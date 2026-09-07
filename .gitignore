@@ -1,0 +1,27 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Local model artifacts must never be committed. They live on /mnt/kingston.
+/models/
+/adapters/
+/datasets/
+*.gguf
+*.safetensors
+*.bin
+
+# Python training sidecar
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets and machine-local config
+.env
+.env.*
+!.env.example
+secrets.toml
+*.key
+
+# Benchmark and eval output
+/bench/results/
+/eval/results/
