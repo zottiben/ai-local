@@ -5,11 +5,13 @@
 
 pub mod anthropic;
 pub mod auth;
+pub mod catalogue;
 pub mod config;
 pub mod download;
 pub mod gateway;
 pub mod gguf;
 pub mod harness;
+pub mod prompt;
 pub mod registry;
 pub mod serve;
 pub mod service;

@@ -155,6 +155,8 @@ struct ServeArgs {
 enum ModelCmd {
     /// List models, with the largest context each can hold here.
     Ls,
+    /// Pick a model interactively, ranked by what this machine can run.
+    Pick,
     /// Search Hugging Face for models you could install.
     Search {
         /// Free text, e.g. "qwen3 coder" or "gemma4".
@@ -200,6 +202,7 @@ fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Budget => budget(),
         Command::Model(ModelCmd::Ls) => model_ls(),
+        Command::Model(ModelCmd::Pick) => model_pick().map(|_| ()),
         Command::Model(ModelCmd::Search { query, limit }) => model_search(&query.join(" "), limit),
         Command::Model(ModelCmd::Files { repo }) => model_files(&repo),
         Command::Model(ModelCmd::Install(args)) => model_install(&args),
@@ -310,6 +313,66 @@ fn http_client() -> anyhow::Result<reqwest::blocking::Client> {
         .user_agent(concat!("ailocal/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(30))
         .build()?)
+}
+
+/// Offer the curated shortlist, ranked for this machine, and install what is chosen.
+///
+/// Returns the installed model's name, so `setup` can carry straight on with it.
+fn model_pick() -> anyhow::Result<Option<String>> {
+    let budget = serve::budget_for_next_launch()
+        .unwrap_or_else(|_| vram::Budget::new(ailocal::vram_used_mib().unwrap_or(900)));
+    let available = budget.available_mib();
+
+    let client = http_client()?;
+    println!("Checking what fits in {available} MiB ...");
+    let mut candidates = ailocal::catalogue::resolve(&client, available);
+    anyhow::ensure!(!candidates.is_empty(), "could not reach the model registry");
+
+    // Reads a few MiB of each fitting model for its real attention geometry, because
+    // weight size does not predict usable context: a 12B with sliding-window attention
+    // holds six times what a 14B with full attention does.
+    println!("Measuring usable context ...");
+    let cache = Config::load()?.cache_type.parse()?;
+    ailocal::catalogue::measure(&client, &mut candidates, &budget, cache);
+
+    let options: Vec<String> = candidates
+        .iter()
+        .map(ailocal::catalogue::Candidate::label)
+        .collect();
+    let header = format!(
+        "Models for this machine ({available} MiB available). \
+         Anything else: ailocal model search <query>"
+    );
+
+    let Some(index) = ailocal::prompt::choose(&header, &options)? else {
+        println!("Nothing selected.");
+        return Ok(None);
+    };
+    let chosen = &candidates[index];
+
+    if !chosen.fits() {
+        println!(
+            "\n{} needs {} MiB but only {available} MiB is free.",
+            chosen.entry.reference, chosen.size_mib
+        );
+        if !ailocal::prompt::confirm("Download it anyway?", false)? {
+            return Ok(None);
+        }
+    }
+    if !chosen.entry.note.is_empty() {
+        println!("\nnote: {}", chosen.entry.note);
+    }
+
+    let reference = format!("ollama:{}", chosen.entry.reference);
+    model_install(&InstallArgs {
+        reference: reference.clone(),
+        force: !chosen.fits(),
+    })?;
+
+    Ok(reference.parse::<Source>().ok().map(|s| {
+        // The registry keys models by filename stem, which is what `serve` wants.
+        s.file_name().trim_end_matches(".gguf").to_owned()
+    }))
 }
 
 fn model_search(query: &str, limit: usize) -> anyhow::Result<()> {
@@ -693,10 +756,12 @@ fn setup(args: &SetupArgs) -> anyhow::Result<()> {
                 models = registry::scan(&cfg.models_dir)?;
             }
             None => {
-                println!("   none installed. Pick one, e.g.:");
-                println!("     ailocal model install ollama:gemma4:12b");
-                println!("   then re-run `ailocal setup`, or pass --model next time.");
-                return Ok(());
+                println!("   none installed - pick one:\n");
+                if model_pick()?.is_none() {
+                    println!("\nNothing installed. Re-run `ailocal setup` when ready.");
+                    return Ok(());
+                }
+                models = registry::scan(&cfg.models_dir)?;
             }
         }
     }

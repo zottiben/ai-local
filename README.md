@@ -34,6 +34,7 @@ desktop session dies.
 | | |
 | --- | --- |
 | `ailocal setup` | check prerequisites, install a model, start services, configure harnesses |
+| `ailocal model pick` | choose interactively from models ranked for your hardware |
 | `ailocal model search <query>` | find GGUF repos on Hugging Face |
 | `ailocal model files <owner/repo>` | list quantisations and which of them fit |
 | `ailocal model install <ref>` | resumable, checksum-verified download |
@@ -59,6 +60,34 @@ gateway can sit behind a tunnel without anything else in front of it. See
 [docs/tunnel.md](docs/tunnel.md).
 
 ## Finding a model
+
+The quickest route is to let it rank a shortlist against your card:
+
+```
+$ ailocal model pick
+Checking what fits in 12887 MiB ...
+Measuring usable context ...
+Models for this machine (12887 MiB available)
+  1) gemma4:12b          6 GiB   256k context   general + coding, very long context
+  2) qwen3:14b           8 GiB    38k context   general + coding, holds up under long prompts
+  3) mistral-nemo:12b    6 GiB    57k context   general purpose, modest footprint
+  ...
+  7) qwen3-coder:30b    17 GiB   will not fit   code specialist, mixture-of-experts
+```
+
+Pick one and it downloads, verifies and registers it. `ailocal setup` runs this for you
+when nothing is installed yet.
+
+The context figures are measured, not guessed: it reads each model's attention geometry
+from the first few MiB of the real file. Ordering is capability first among models that
+can hold a *usable* context - a 4B leaves room for 109k tokens, which does not make it
+the better choice. Models that cannot fit stay on the list so the omission explains
+itself.
+
+The shortlist is curated and will date. `ailocal model search` is the way to anything
+not on it.
+
+### Anything else on Hugging Face
 
 Search Hugging Face, then look at what quantisations a repo offers and which of them
 leave room for context on your card:
