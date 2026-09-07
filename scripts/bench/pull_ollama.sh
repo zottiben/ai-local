@@ -28,7 +28,17 @@ el=$(( $(date +%s) - start )); [ $el -eq 0 ] && el=1
 sz=$(stat -c%s "$OUT")
 
 printf '    %d MiB in %ds (%d MiB/s)\n' $((sz/1048576)) "$el" $((sz/1048576/el))
-[ "$(head -c4 "$OUT")" = GGUF ] || { echo "    NOT a GGUF" >&2; exit 1; }
-[ "sha256:$(sha256sum "$OUT" | cut -d' ' -f1)" = "$DIG" ] \
-  && echo "    sha256 OK" \
-  || { echo "    sha256 MISMATCH" >&2; exit 1; }
+
+if [ "$(head -c4 "$OUT")" != GGUF ]; then
+  echo "    NOT a GGUF" >&2
+  exit 1
+fi
+
+# Deliberately if/else rather than `test && echo || fail`: in that form a failing
+# echo would report a hash mismatch on a perfectly good file.
+if [ "sha256:$(sha256sum "$OUT" | cut -d' ' -f1)" = "$DIG" ]; then
+  echo "    sha256 OK"
+else
+  echo "    sha256 MISMATCH" >&2
+  exit 1
+fi
