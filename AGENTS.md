@@ -14,6 +14,8 @@ Inference is llama.cpp's `llama-server`, Vulkan backend. Models are GGUF from Hu
 **Commands** (from repo root)
 - Build / lint / test: `cargo build`, `cargo clippy -- -D warnings`, `cargo test`
 - Plan: `aip status` (the build plan is in ai-planner, not in a markdown file)
+- Pull a model fast: `scripts/bench/pull_ollama.sh <name> <tag>`
+- Check a model's real context limit: `scripts/bench/ctx_probe.sh <model.gguf> q8_0`
 
 The Rust workspace is established by PR0; until then the cargo commands have nothing to
 run against.
@@ -31,14 +33,34 @@ HF_HOME=/mnt/kingston/ailocal/hf
 Any code path that touches the Hugging Face hub must set this explicitly. The library
 default is `~/.cache/huggingface`, which is on the 13 GB partition.
 
+### 1b. Hugging Face is slow here; prefer the Ollama registry
+Measured from Adelaide: `registry.ollama.ai` 79-97 MB/s, `huggingface.co` 0.016-2.7 MB/s
+and wildly variable even with a Pro token. The `hf_xet` client stalls outright. Ollama
+registry blobs are plain content-addressed GGUFs and need no ollama install - see
+`scripts/bench/pull_ollama.sh`. Its limit is quant coverage: default Q4_K_M only, so
+IQ3/Q3 still has to come from HF (use plain authenticated `curl -C -`, not `hf`).
+
 ### 2. Never use the system Python
 It is 3.14.6 and no ML library ships wheels for it. The sidecar gets its own 3.11/3.12
 venv under `/mnt/kingston/ailocal/venv`, created and verified by the Rust CLI.
 
-### 3. Size against ~14.8 GiB of VRAM, not 16 GB
-The desktop permanently holds ~1255 MiB of the 16368 MiB on the RX 7600 XT. Until the
-RAM upgrade is earned, models must fit **entirely** in VRAM with room for KV cache -
-there are only 8.5 GB of system RAM, so CPU offload thrashes.
+### 3. Never exceed 14400 MiB of VRAM, and size weights against ~10 GiB
+The card has 16368 MiB and the desktop holds ~900 MiB at idle, but it allocates *new*
+framebuffers on demand. Over-committing does not fail gracefully: the compositor loses
+its framebuffer (`amdgpu pin failed`, `-12`) and the graphical session dies. This
+crashed the machine once already.
+
+```
+total ceiling      14400 MiB   (enforce this, never probe past it)
+- desktop            ~900 MiB
+= llama-server     ~13500 MiB   for weights + KV cache + compute buffers
+=> usable weights   ~10 GiB     not 14
+```
+
+So a 24B at Q4 (13.3 GiB) cannot hold even a 4096 context and is unusable. Models must
+fit entirely in VRAM - there are only 8.5 GB of system RAM, so CPU offload thrashes.
+Use `--cache-type-k q8_0 --cache-type-v q8_0`: it roughly halves the KV cache at no
+measurable throughput cost.
 
 ### 4. ROCm never touches the inference path
 Inference is Vulkan. gfx1102 ROCm is flaky (upstream segfaults, hipBLASLt reports the
