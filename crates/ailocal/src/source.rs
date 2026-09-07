@@ -173,6 +173,116 @@ impl Source {
     }
 }
 
+/// Whether a filename is one part of a split GGUF, e.g. `...-00002-of-00003.gguf`.
+///
+/// Listing these is worse than useless: a shard cannot be loaded on its own, and its
+/// size makes a 60 GB model look like it would fit. Fetching a split model means
+/// fetching every part, which this downloader does not do.
+fn is_shard(path: &str) -> bool {
+    let stem = path.strip_suffix(".gguf").unwrap_or(path);
+    let mut parts = stem.rsplit('-');
+    let (Some(total), Some(of), Some(index)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    of == "of"
+        && total.len() == 5
+        && index.len() == 5
+        && total.bytes().all(|b| b.is_ascii_digit())
+        && index.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// A repository found by [`search`].
+#[derive(Debug, Clone)]
+pub struct Repo {
+    pub id: String,
+    pub downloads: u64,
+}
+
+/// A downloadable file within a repository.
+#[derive(Debug, Clone)]
+pub struct RepoFile {
+    pub path: String,
+    pub size_mib: u64,
+}
+
+/// Search Hugging Face for repositories containing GGUF files.
+///
+/// Hugging Face is the only one of the two registries with a usable search API -
+/// Ollama publishes no JSON endpoint for listing or searching its library, only web
+/// pages. Since HF also has far better quant coverage, that is where searching belongs.
+///
+/// # Errors
+/// If the request fails or the response is not the expected shape.
+pub fn search(client: &Client, query: &str, limit: usize) -> anyhow::Result<Vec<Repo>> {
+    let response: serde_json::Value = client
+        .get(format!("{HF_ENDPOINT}/api/models"))
+        .query(&[
+            ("search", query),
+            ("filter", "gguf"),
+            ("sort", "downloads"),
+            ("direction", "-1"),
+            ("limit", &limit.to_string()),
+        ])
+        .send()
+        .context("searching Hugging Face")?
+        .error_for_status()?
+        .json()
+        .context("parsing search results")?;
+
+    Ok(response
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            Some(Repo {
+                id: m["id"].as_str()?.to_owned(),
+                downloads: m["downloads"].as_u64().unwrap_or(0),
+            })
+        })
+        .collect())
+}
+
+/// List the GGUF files in a Hugging Face repository, smallest first.
+///
+/// Quantisations are files rather than tags, so choosing one means choosing a file -
+/// which is also how you find out whether any of them fit.
+///
+/// # Errors
+/// If the repository cannot be listed.
+pub fn files(client: &Client, repo: &str, token: Option<&str>) -> anyhow::Result<Vec<RepoFile>> {
+    let mut request = client.get(format!("{HF_ENDPOINT}/api/models/{repo}/tree/main"));
+    request = request.query(&[("recursive", "true")]);
+    if let Some(t) = token {
+        request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+
+    let response: serde_json::Value = request
+        .send()
+        .with_context(|| format!("listing {repo}"))?
+        .error_for_status()
+        .with_context(|| format!("no such repository {repo}"))?
+        .json()
+        .context("parsing file list")?;
+
+    let mut out: Vec<RepoFile> = response
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|f| {
+            let path = f["path"].as_str()?;
+            if !path.to_ascii_lowercase().ends_with(".gguf") || is_shard(path) {
+                return None;
+            }
+            Some(RepoFile {
+                path: path.to_owned(),
+                size_mib: f["size"].as_u64().unwrap_or(0) / (1024 * 1024),
+            })
+        })
+        .collect();
+    out.sort_by_key(|f| f.size_mib);
+    Ok(out)
+}
+
 /// Read the Hugging Face token from `$HF_HOME/token`, if present.
 ///
 /// Deliberately file-based rather than an environment variable: it is the path the
@@ -245,5 +355,25 @@ mod tests {
     #[test]
     fn missing_token_file_is_none_not_an_error() {
         assert!(hf_token(std::path::Path::new("/nonexistent/hf")).is_none());
+    }
+
+    /// A shard's size makes a 60 GB model look like it fits, and it cannot be loaded
+    /// alone, so listing one is actively misleading.
+    #[test]
+    fn split_gguf_shards_are_recognised() {
+        assert!(is_shard("BF16/Qwen3-Coder-BF16-00002-of-00003.gguf"));
+        assert!(is_shard("model-00001-of-00009.gguf"));
+    }
+
+    #[test]
+    fn ordinary_quant_files_are_not_shards() {
+        for path in [
+            "Qwen3-Coder-30B-A3B-Instruct-UD-Q3_K_XL.gguf",
+            "gemma4-12b-Q4_K_M.gguf",
+            "mmproj-F16.gguf",
+            "model.gguf",
+        ] {
+            assert!(!is_shard(path), "{path} is not a shard");
+        }
     }
 }

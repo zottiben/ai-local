@@ -24,6 +24,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     "rustls-native-certs",
     "http2",
     "json",
+    "query",
     "stream",
 ] }
 # rustix rather than libc: signalling a detached process needs kill(2), and rustix

@@ -155,6 +155,18 @@ struct ServeArgs {
 enum ModelCmd {
     /// List models, with the largest context each can hold here.
     Ls,
+    /// Search Hugging Face for models you could install.
+    Search {
+        /// Free text, e.g. "qwen3 coder" or "gemma4".
+        query: Vec<String>,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+    /// List the quantisations in a Hugging Face repo, and which of them fit here.
+    Files {
+        /// `<owner>/<repo>`, as printed by `ailocal model search`.
+        repo: String,
+    },
     /// Download a model, checking it can actually run here first.
     Install(InstallArgs),
     /// Delete a model from disk.
@@ -188,6 +200,8 @@ fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Budget => budget(),
         Command::Model(ModelCmd::Ls) => model_ls(),
+        Command::Model(ModelCmd::Search { query, limit }) => model_search(&query.join(" "), limit),
+        Command::Model(ModelCmd::Files { repo }) => model_files(&repo),
         Command::Model(ModelCmd::Install(args)) => model_install(&args),
         Command::Model(ModelCmd::Rm { name }) => model_rm(&name),
         Command::Config(ConfigCmd::Show) => config_show(),
@@ -287,6 +301,65 @@ fn model_ls() -> anyhow::Result<()> {
              growing with context, so KV/TOK is the marginal cost of the few global\n\
              layers. This is why a 12B reaches 256k where a 27B stops near 16k."
         );
+    }
+    Ok(())
+}
+
+fn http_client() -> anyhow::Result<reqwest::blocking::Client> {
+    Ok(reqwest::blocking::Client::builder()
+        .user_agent(concat!("ailocal/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?)
+}
+
+fn model_search(query: &str, limit: usize) -> anyhow::Result<()> {
+    anyhow::ensure!(!query.trim().is_empty(), "give me something to search for");
+
+    let repos = ailocal::source::search(&http_client()?, query, limit)?;
+    if repos.is_empty() {
+        println!("nothing matched {query:?}");
+        return Ok(());
+    }
+
+    println!("{:<58} {:>12}", "REPO", "DOWNLOADS");
+    for r in &repos {
+        println!("{:<58} {:>12}", truncate(&r.id, 58), r.downloads);
+    }
+    println!("\nNext: ailocal model files {}", repos[0].id);
+    Ok(())
+}
+
+fn model_files(repo: &str) -> anyhow::Result<()> {
+    let cfg = Config::load()?;
+    let budget = serve::budget_for_next_launch()
+        .unwrap_or_else(|_| vram::Budget::new(ailocal::vram_used_mib().unwrap_or(900)));
+
+    let client = http_client()?;
+    let token = ailocal::source::hf_token(&cfg.hf_home);
+    let files = ailocal::source::files(&client, repo, token.as_deref())?;
+
+    anyhow::ensure!(!files.is_empty(), "{repo} has no .gguf files");
+
+    // Weight size alone decides most of it, and the KV cache needs room on top. Show
+    // the headroom rather than a bare yes/no so an almost-fitting quant is visible.
+    let available = budget.available_mib();
+    println!("{available} MiB available for weights + KV cache\n");
+    println!("{:<52} {:>8}  VERDICT", "FILE", "SIZE");
+    for f in &files {
+        let verdict = if f.size_mib >= available {
+            "too large".to_owned()
+        } else {
+            format!("{} MiB left for context", available - f.size_mib)
+        };
+        println!(
+            "{:<52} {:>5} G  {verdict}",
+            truncate(&f.path, 52),
+            f.size_mib / 1024
+        );
+    }
+
+    if let Some(best) = files.iter().rev().find(|f| f.size_mib + 2048 < available) {
+        println!("\nNext: ailocal model install hf:{repo}/{}", best.path);
     }
     Ok(())
 }

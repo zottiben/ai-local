@@ -34,7 +34,9 @@ desktop session dies.
 | | |
 | --- | --- |
 | `ailocal setup` | check prerequisites, install a model, start services, configure harnesses |
-| `ailocal model install ollama:<name>:<tag>` | resumable, checksum-verified download |
+| `ailocal model search <query>` | find GGUF repos on Hugging Face |
+| `ailocal model files <owner/repo>` | list quantisations and which of them fit |
+| `ailocal model install <ref>` | resumable, checksum-verified download |
 | `ailocal model ls` / `rm` | what is on disk, and what fits |
 | `ailocal serve <model>` | run it, sized to the VRAM budget |
 | `ailocal ps` / `stop` | what is loaded |
@@ -56,21 +58,67 @@ Authentication is a bearer key, which is what every harness already sends, so th
 gateway can sit behind a tunnel without anything else in front of it. See
 [docs/tunnel.md](docs/tunnel.md).
 
-## Downloads
+## Finding a model
 
-Models come from the Ollama registry or Hugging Face:
+Search Hugging Face, then look at what quantisations a repo offers and which of them
+leave room for context on your card:
+
+```
+$ ailocal model search qwen3 coder
+REPO                                                          DOWNLOADS
+unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF                      12581343
+unsloth/Qwen3-Coder-Next-GGUF                                    191200
+lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF              88305
+
+$ ailocal model files unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF
+12887 MiB available for weights + KV cache
+
+FILE                                                     SIZE  VERDICT
+Qwen3-Coder-30B-A3B-Instruct-UD-IQ2_XXS.gguf              9 G  3033 MiB left for context
+Qwen3-Coder-30B-A3B-Instruct-Q2_K_L.gguf                 10 G  2081 MiB left for context
+Qwen3-Coder-30B-A3B-Instruct-UD-IQ3_XXS.gguf             11 G  634 MiB left for context
+Qwen3-Coder-30B-A3B-Instruct-UD-Q3_K_XL.gguf             12 G  too large
+
+$ ailocal model install hf:unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q2_K_L.gguf
+```
+
+Reading that output:
+
+- **Quantisation** is the suffix. `Q4_K_M` is the usual default; `Q5`/`Q6`/`Q8` are
+  larger and closer to the original; `Q3`, `IQ2` and `Q2` trade accuracy for fitting.
+  A `UD-` prefix is an Unsloth dynamic quant, generally better at the same size.
+- **"MiB left for context"** is the number that decides whether a model is pleasant to
+  use. A 30B squeezed in at IQ3 with 634 MiB spare holds only a few thousand tokens,
+  which is useless for coding. Prefer a smaller model with several GiB spare.
+- Split GGUFs (`-00002-of-00003`) are hidden, because a shard cannot be loaded alone.
+
+`ailocal model install` re-checks all of this against the real remote file before
+downloading, so a bad choice costs about two seconds rather than an hour.
+
+### The Ollama registry
+
+Ollama is far faster to download from where it has what you want, and its blobs are
+content-addressed so they verify against a published digest. It has no search API, so
+browse [ollama.com/library](https://ollama.com/library) and use the name and tag exactly
+as shown there:
 
 ```
 ailocal model install ollama:gemma4:12b
-ailocal model install hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q3_K_XL.gguf
+ailocal model install ollama:qwen3:14b
 ```
 
-Ollama registry blobs are plain content-addressed GGUFs, so they verify against a
-published digest and need no Ollama install. Hugging Face has far better quant coverage
-but publishes no plain checksum, so those downloads are length-checked only.
+Its catch is quant coverage - mostly just the default `Q4_K_M` per size. When you need a
+specific quantisation to make something fit, that comes from Hugging Face.
 
-Before downloading, ailocal reads the first 8 MiB of the remote file to check the model
-can actually run - a 16 GB model that could never load is refused in about two seconds.
+Neither source needs the vendor's CLI installed. For gated or rate-limited Hugging Face
+repos, put a token at `$HF_HOME/token` (`/mnt/kingston/ailocal/hf/token` by default).
+
+## Downloads
+
+Downloads resume after an interruption, and land in a `.part` file that is only renamed
+into place once length and checksum check out - so a killed download can never leave
+something that looks like a usable model. Hugging Face publishes no plain checksum, so
+those are length-checked only.
 
 ## Building
 
