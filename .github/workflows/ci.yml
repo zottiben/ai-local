@@ -43,7 +43,10 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Shell syntax
-        run: for f in scripts/bench/*.sh; do bash -n "$f"; done
+        run: |
+          for f in scripts/bench/*.sh; do bash -n "$f"; done
+          # install.sh is /bin/sh, and is what every new machine runs first.
+          sh -n install.sh
 
       - name: Python syntax
         run: python3 -m py_compile scripts/bench/*.py
@@ -52,3 +55,4 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           shellcheck -S warning scripts/bench/*.sh
+          shellcheck -s sh -S warning install.sh

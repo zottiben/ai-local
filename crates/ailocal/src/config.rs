@@ -49,7 +49,7 @@ pub struct Config {
 
     /// Address the gateway service binds to.
     ///
-    /// Loopback by default. The the tunnel host tunnel reaches this host over the LAN, so
+    /// Loopback by default. A Cloudflare tunnel reaches this host over the LAN, so
     /// exposing it there means binding `0.0.0.0` - which is safe only because the
     /// gateway requires a bearer key.
     #[serde(default = "default_gateway_host")]

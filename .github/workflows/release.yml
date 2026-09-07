@@ -1,0 +1,87 @@
+name: Release
+
+# Cut a release by pushing a version tag that matches Cargo.toml:
+#   git tag v0.1.0 && git push origin v0.1.0
+# Builds Linux binaries, publishes a GitHub Release and uploads checksums.txt.
+# Asset names must match what install.sh expects.
+#
+# Linux only: ailocal reads amdgpu sysfs for VRAM and drives llama.cpp's Vulkan
+# backend, so there is nothing to ship for macOS or Windows.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: verify tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION="$(grep '^version' crates/ailocal/Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "tag=$VERSION cargo=$CARGO_VERSION"
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $CARGO_VERSION" >&2
+            exit 1
+          fi
+
+  linux:
+    name: Linux ${{ matrix.arch }}
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest, arch: x86_64, target: x86_64-unknown-linux-gnu }
+          - { runner: ubuntu-24.04-arm, arch: aarch64, target: aarch64-unknown-linux-gnu }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+          cache-workspaces: .
+
+      - name: Build and archive
+        run: |
+          set -eux
+          VERSION="${GITHUB_REF_NAME#v}"
+          cargo build --release -p ailocal --target ${{ matrix.target }}
+          mkdir -p stage
+          cp "target/${{ matrix.target }}/release/ailocal" stage/ailocal
+          tar czf "ailocal-v${VERSION}-linux-${{ matrix.arch }}.tar.gz" -C stage ailocal
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: ailocal-v*-linux-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: [linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: sha256sum ailocal-v* > checksums.txt
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            ailocal-v* checksums.txt

@@ -40,6 +40,33 @@ enum Command {
     /// systemd units, so this survives a reboot.
     #[command(subcommand)]
     Service(ServiceCmd),
+    /// Check prerequisites and bring everything up in one go.
+    Setup(SetupArgs),
+    /// Install the latest release in place.
+    ///
+    /// Arguments are forwarded to the install script, e.g. `ailocal update --check`.
+    /// Help is forwarded too, so `ailocal update --help` documents the script's own
+    /// options rather than clap's view of them.
+    #[command(disable_help_flag = true)]
+    Update {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(Args)]
+struct SetupArgs {
+    /// Model to install if none are present, e.g. `ollama:gemma4:12b`.
+    #[arg(long)]
+    model: Option<String>,
+
+    /// Do not touch harness configuration.
+    #[arg(long)]
+    skip_harness: bool,
+
+    /// Do not install systemd units.
+    #[arg(long)]
+    skip_service: bool,
 }
 
 #[derive(Subcommand)]
@@ -77,7 +104,7 @@ enum GatewayCmd {
         #[arg(long, default_value_t = 8081)]
         port: u16,
         /// Bind address. Leave as loopback unless something else fronts it - the
-        /// the tunnel host tunnel reaches this host over the LAN, so 0.0.0.0 is needed there.
+        /// tunnel reaches this host over the LAN, so 0.0.0.0 is needed to expose it.
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
     },
@@ -174,6 +201,8 @@ fn main() -> anyhow::Result<()> {
         Command::Service(ServiceCmd::Install { no_start }) => service_install(no_start),
         Command::Service(ServiceCmd::Uninstall) => service_uninstall(),
         Command::Service(ServiceCmd::Status) => service_status(),
+        Command::Setup(args) => setup(&args),
+        Command::Update { args } => std::process::exit(ailocal::update::run(&args)?),
         Command::Gateway(GatewayCmd::Check { url }) => gateway_check(&url),
         Command::Gateway(GatewayCmd::Key) => {
             println!("{}", auth::load_or_create()?);
@@ -521,6 +550,143 @@ fn harness_unconfigure(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Bring a fresh machine up: check what is needed, then do the rest.
+fn setup(args: &SetupArgs) -> anyhow::Result<()> {
+    let mut blocked = false;
+
+    println!("1. prerequisites");
+    match ailocal::update::which("llama-server") {
+        Some(p) => println!("   ok    llama-server at {}", p.display()),
+        None => {
+            blocked = true;
+            println!("   MISS  llama-server not on PATH");
+            println!("         Arch:   sudo pacman -Syu llama-cpp ggml-vulkan");
+            println!("         other:  https://github.com/ggml-org/llama.cpp");
+        }
+    }
+    // ggml ships backends as separate packages, and without the GPU one llama-server
+    // silently runs on CPU - which looks like a broken GPU rather than a missing 54 MB.
+    if std::path::Path::new("/usr/lib/ggml/libggml-vulkan.so").exists() {
+        println!("   ok    Vulkan backend present");
+    } else {
+        println!("   warn  no libggml-vulkan.so found; llama-server may fall back to CPU");
+        println!("         Arch: sudo pacman -Syu ggml-vulkan");
+    }
+    match ailocal::vram_used_mib() {
+        Ok(used) => {
+            // Budget against what a launch would actually get, not against current
+            // usage - otherwise a loaded model makes the machine look out of VRAM.
+            let budget =
+                serve::budget_for_next_launch().unwrap_or_else(|_| vram::Budget::new(used));
+            println!(
+                "   ok    GPU visible, {used} MiB in use, {} MiB available for a model",
+                budget.available_mib()
+            );
+        }
+        Err(e) => {
+            blocked = true;
+            println!("   MISS  no amdgpu VRAM node: {e}");
+        }
+    }
+
+    println!("\n2. config");
+    let path = Config::path()?;
+    if path.exists() {
+        println!("   ok    {}", path.display());
+    } else {
+        println!("   wrote {}", Config::load()?.save()?.display());
+    }
+    let cfg = Config::load()?;
+    if !cfg.models_dir.exists() {
+        std::fs::create_dir_all(&cfg.models_dir)?;
+        println!("   made  {}", cfg.models_dir.display());
+    }
+
+    anyhow::ensure!(
+        !blocked,
+        "prerequisites missing - install them and re-run `ailocal setup`"
+    );
+
+    println!("\n3. models");
+    let mut models = registry::scan(&cfg.models_dir)?;
+    if models.is_empty() {
+        match &args.model {
+            Some(reference) => {
+                println!("   installing {reference} ...");
+                model_install(&InstallArgs {
+                    reference: reference.clone(),
+                    force: false,
+                })?;
+                models = registry::scan(&cfg.models_dir)?;
+            }
+            None => {
+                println!("   none installed. Pick one, e.g.:");
+                println!("     ailocal model install ollama:gemma4:12b");
+                println!("   then re-run `ailocal setup`, or pass --model next time.");
+                return Ok(());
+            }
+        }
+    }
+    for m in &models {
+        println!("   ok    {} ({} GiB)", m.name, m.size_mib / 1024);
+    }
+
+    if !args.skip_service {
+        println!("\n4. services");
+        service_install(false)?;
+    }
+
+    if !args.skip_harness {
+        println!("\n5. harnesses");
+        let url = format!("http://{}:{}", "127.0.0.1", cfg.gateway_port);
+        for harness in ["pi", "claude-code"] {
+            match harness_configure(harness, &url) {
+                Ok(()) => {}
+                // A harness that is not installed is not a failure of setup.
+                Err(e) => println!("   skip  {harness}: {e}"),
+            }
+        }
+    }
+
+    println!("\nReady. `ailocal ps` shows what is loaded, `ailocal gateway check` verifies auth.");
+    Ok(())
+}
+
+/// The binary a systemd unit should point at.
+///
+/// `current_exe` is wrong when running from `cargo run` or `target/release`: a unit
+/// written with that path breaks on the next `cargo clean`, and quietly keeps running
+/// a stale build until then. Prefer an installed copy on PATH, and refuse rather than
+/// write a build path if there is none.
+fn unit_binary() -> anyhow::Result<std::path::PathBuf> {
+    let current = std::env::current_exe()?.canonicalize()?;
+    if !ailocal::update::is_build_dir(&current) {
+        return Ok(current);
+    }
+
+    let installed = ailocal::update::which("ailocal")
+        .and_then(|p| p.canonicalize().ok())
+        .filter(|p| !ailocal::update::is_build_dir(p));
+
+    match installed {
+        Some(path) => {
+            eprintln!(
+                "note: running from a build directory; units will point at {}",
+                path.display()
+            );
+            Ok(path)
+        }
+        None => anyhow::bail!(
+            "running from {} - a systemd unit must not point into a build directory, \
+             because `cargo clean` would break the service.\n\
+             Install it first, e.g. `install -Dm755 {} ~/.local/bin/ailocal`, then \
+             re-run this from there.",
+            current.display(),
+            current.display()
+        ),
+    }
+}
+
 fn gateway_check(url: &str) -> anyhow::Result<()> {
     let base = url.trim_end_matches('/');
     let key = auth::load_or_create()?;
@@ -582,7 +748,7 @@ fn gateway_check(url: &str) -> anyhow::Result<()> {
 
 fn service_install(no_start: bool) -> anyhow::Result<()> {
     let cfg = Config::load()?;
-    let exe = std::env::current_exe()?.canonicalize()?;
+    let exe = unit_binary()?;
 
     let units = service::install(
         &exe,

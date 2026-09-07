@@ -1,7 +1,7 @@
 # ai-local - project knowledge
 
 A Rust CLI and gateway to download, serve, fine-tune and expose local LLMs to my coding
-harnesses (Pi, Codex, Claude Code), locally and remotely via the the tunnel host Cloudflare tunnel.
+harnesses (Pi, Codex, Claude Code), locally and remotely via a Cloudflare tunnel.
 
 **Stack:** Rust (CLI, registry, gateway) + a pinned Python sidecar for training only.
 Inference is llama.cpp's `llama-server`, Vulkan backend. Models are GGUF from Hugging Face.

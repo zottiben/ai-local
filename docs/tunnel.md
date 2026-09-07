@@ -1,72 +1,80 @@
-# Reaching the gateway from outside the house
+# Reaching the gateway from outside your network
 
-`llm.example.com` -> Cloudflare -> the tunnel on the tunnel host -> this PC over the LAN.
+A Cloudflare tunnel is the least-effort way to expose the gateway without opening a
+port or holding a static public IP.
 
 ```
-internet -> llm.example.com (Cloudflare edge)
-         -> cloudflared on the tunnel host (10.0.0.10)
-         -> http://10.0.0.20:8081  (ailocal gateway, bearer-authenticated)
+internet -> <your-hostname>            (Cloudflare edge)
+         -> cloudflared                (wherever it already runs)
+         -> http://<gpu-host>:8081     (ailocal gateway, bearer-authenticated)
          -> http://127.0.0.1:8080      (llama-server, loopback only)
 ```
 
-The tunnel terminates on the tunnel host rather than here: it already runs, it needs no new
-daemon on this machine, and the tunnel host only shuffles bytes so its weak CPU is irrelevant.
+Run the tunnel wherever cloudflared already lives - typically a NAS or always-on server
+rather than the GPU box. It only shuffles bytes, so it needs no GPU and barely any CPU,
+and reusing an existing tunnel means one less daemon to maintain.
 
 ## What is exposed
 
-Only the gateway binds `0.0.0.0`. llama-server stays on loopback, so the authenticated
-gateway is the sole way in. Every route except `/health` requires the bearer key from
-`~/.config/ailocal/gateway.key`.
+Only the gateway binds a routable address:
+
+```toml
+# ~/.config/ailocal/config.toml
+gateway_host = "0.0.0.0"
+```
+
+llama-server stays on loopback, so the authenticated gateway is the sole way in. Every
+route except `/health` requires the bearer key from `~/.config/ailocal/gateway.key`.
 
 ## Adding the route
 
-the tunnel host's tunnel is **remotely managed** - it runs with `TUNNEL_TOKEN` and no local
-config file, so ingress comes from the Zero Trust dashboard and cannot be edited over
-SSH. In *Networks -> Tunnels -> (the tunnel) -> Published application routes*, add:
+If cloudflared runs with a `TUNNEL_TOKEN` it is **remotely managed** - there is no local
+`config.yml` to edit and ingress comes from the Zero Trust dashboard (the container logs
+it as `Updated to new configuration ... version=N`). Add a public hostname there:
 
 | Field | Value |
 | --- | --- |
-| Subdomain | `lara` |
-| Domain | `benzotti.me` |
+| Subdomain / domain | whatever you want to reach it at |
 | Service | `HTTP` |
-| URL | `10.0.0.20:8081` |
+| URL | `<gpu-host-ip>:8081` |
 
-Every existing route points at `10.0.0.10` because those services run *on* the tunnel host,
-where `10.0.0.10` is effectively localhost. This one cannot: gemma4 needs 11.3 GB of
-VRAM and the tunnel host has no GPU, so cloudflared makes one LAN hop to the machine that does.
-It forwards to any address it can route to, so this is no different to it.
+Pointing at a *different* host from the one running cloudflared is fine - it forwards to
+any address it can route to. That is the normal case here, since the GPU is rarely in the
+same box as the tunnel.
 
 ### Pin the address first
 
-This PC is on **DHCP** (`ipv4.method:auto`), and the tunnel host cannot resolve it by name -
-there is no PTR record and no mDNS. So the route has to name an IP, and that IP has to
-stop moving, or a lease change silently breaks the tunnel with no error anywhere except
-a 502 at the edge.
+The route names an IP, so that IP has to stop moving. If the GPU host is on DHCP, a lease
+change breaks the tunnel with no error anywhere except a 502 at the edge. Check with:
 
-Pin it on the router (10.0.0.1) as a DHCP reservation:
+```
+nmcli -t connection show "<connection>" | grep ipv4.method   # "auto" means DHCP
+```
 
-| | |
-| --- | --- |
-| MAC | `aa:bb:cc:dd:ee:ff` (enp4s0) |
-| IP | `10.0.0.20` |
+Reserve it on the router against the host's MAC. A reservation is preferable to a static
+address on the host: it survives an OS reinstall, and keeps all addressing in one place.
 
-A reservation is preferable to a static address on the host: it survives an OS
-reinstall, and it keeps all addressing in one place rather than half in the router and
-half in NetworkManager.
+A hostname would be more robust than an IP, but only if the tunnel host can resolve it -
+which needs a DNS entry or mDNS that many home routers do not provide. Check before
+relying on it:
 
-## Why there is no Access policy on it
+```
+getent hosts <gpu-hostname>     # run this on the machine running cloudflared
+```
 
-**A Cloudflare Access policy would break this.** Access authenticates with a browser
-redirect, and a coding harness cannot complete one - it sends `Authorization: Bearer`
-and expects an answer. Access *service tokens* exist for exactly this, but they need
-`CF-Access-Client-Id` and `CF-Access-Client-Secret` headers, and neither Pi nor Claude
-Code lets you set arbitrary headers on requests.
+## Why not to put Access in front of it
 
-So the hostname is left without an Access application, and authentication is the
-gateway's own bearer key: 32 bytes from `/dev/urandom`, compared in constant time.
-That is the same posture as any API-key-protected endpoint.
+**A Cloudflare Access policy will break harness access.** Access authenticates with a
+browser redirect, and a coding harness cannot complete one - it sends
+`Authorization: Bearer` and expects an answer. Access *service tokens* exist for exactly
+this, but they require `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers, and
+harnesses generally do not let you set arbitrary headers.
 
-If the key leaks, rotate it:
+So leave the hostname without an Access application and let the gateway's own bearer key
+be the authentication: 32 bytes from `/dev/urandom`, compared in constant time. That is
+the same posture as any API-key-protected endpoint.
+
+Rotate it if it leaks:
 
 ```
 rm ~/.config/ailocal/gateway.key
@@ -79,20 +87,20 @@ systemctl --user restart ailocal-gateway.service
 ## Remote clients must stream
 
 Cloudflare drops a proxied request that produces nothing for ~100 seconds (error 524).
-A cold model load plus a long prompt can exceed that: Claude Code turns against this
-model measured 1m53s-2m21s locally.
+A cold model load plus a long prompt can exceed that - Claude Code turns against a 12B
+measured around two minutes.
 
-Streaming responses keep the connection fed, so they are unaffected - and Pi and Claude
+Streaming responses keep the connection fed, so they are unaffected, and Pi and Claude
 Code both stream by default. A *non-streaming* request over the tunnel can time out
 where the identical request over the LAN succeeds. Prefer `"stream": true` remotely.
 
 ## Verifying
 
 ```
-ailocal gateway check                            # locally
-ailocal gateway check https://llm.example.com   # through the tunnel
+ailocal gateway check                          # locally
+ailocal gateway check https://<your-hostname>  # through the tunnel
 ```
 
 It asserts `/health` answers unauthenticated, that a missing or wrong credential is
-refused, and that the real key is accepted. The second check is the one that matters:
+refused, and that the real key is accepted. The 401 assertions are the ones that matter:
 if `/v1/models` returns 200 without a credential, the endpoint is open to the internet.

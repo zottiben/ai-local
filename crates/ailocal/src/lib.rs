@@ -14,6 +14,7 @@ pub mod registry;
 pub mod serve;
 pub mod service;
 pub mod source;
+pub mod update;
 pub mod vram;
 
 /// VRAM currently in use, in MiB, read from the amdgpu sysfs node.

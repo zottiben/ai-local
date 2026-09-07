@@ -1,0 +1,49 @@
+name: Pages
+
+# Publishes the install script and a small landing page to GitHub Pages at
+# https://zottiben.github.io/ai-local/ so it can be curl'd from a clean URL:
+#   curl -fsSL https://zottiben.github.io/ai-local/install.sh | sh
+#
+# Needs the repository to be public (or a paid plan): Pages is unavailable for private
+# repositories on the free tier, and release assets behind a private repo need an auth
+# token, which would break `curl | sh` anyway.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "install.sh"
+      - "docs/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp install.sh _site/
+          cp docs/index.html _site/index.html
+          touch _site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
