@@ -41,6 +41,22 @@ pub struct Config {
     /// Token ceiling on thinking. `-1` is unrestricted, `0` ends it immediately.
     #[serde(default = "default_reasoning_budget")]
     pub reasoning_budget: i64,
+
+    /// Model the service unit loads at boot. `None` means load nothing and let the
+    /// gateway pull one in on the first request.
+    #[serde(default)]
+    pub default_model: Option<String>,
+
+    /// Address the gateway service binds to.
+    ///
+    /// Loopback by default. The the tunnel host tunnel reaches this host over the LAN, so
+    /// exposing it there means binding `0.0.0.0` - which is safe only because the
+    /// gateway requires a bearer key.
+    #[serde(default = "default_gateway_host")]
+    pub gateway_host: String,
+
+    #[serde(default = "default_gateway_port")]
+    pub gateway_port: u16,
 }
 
 fn default_models_dir() -> PathBuf {
@@ -63,6 +79,14 @@ fn default_reasoning_budget() -> i64 {
     -1
 }
 
+fn default_gateway_host() -> String {
+    "127.0.0.1".to_owned()
+}
+
+fn default_gateway_port() -> u16 {
+    8081
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -71,6 +95,9 @@ impl Default for Config {
             cache_type: default_cache_type(),
             reasoning: default_reasoning(),
             reasoning_budget: default_reasoning_budget(),
+            default_model: None,
+            gateway_host: default_gateway_host(),
+            gateway_port: default_gateway_port(),
         }
     }
 }

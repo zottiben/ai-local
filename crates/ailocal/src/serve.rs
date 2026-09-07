@@ -252,6 +252,53 @@ pub fn plan_context(model: &Model, budget: &Budget, opts: &Options) -> anyhow::R
 /// If the model cannot be served safely, the binary is missing, or it fails to become
 /// healthy before the timeout.
 pub fn start(model: &Model, budget: &Budget, opts: &Options) -> anyhow::Result<Instance> {
+    let (instance, child) = spawn(model, budget, opts, Stdio::LogFile)?;
+    // Deliberately not waited on: dropping a std::process::Child does not kill it, so
+    // the server outlives this command. It does still die on SIGHUP when the terminal
+    // closes, which is what `run_foreground` under systemd is for.
+    drop(child);
+    Ok(instance)
+}
+
+/// Run llama-server in the foreground, returning when it exits.
+///
+/// This is the form a service manager wants: one process to supervise, restart and
+/// collect logs from, rather than a command that forks and returns. Terminating this
+/// process terminates the model.
+///
+/// # Errors
+/// If the model cannot be served safely or fails to become healthy.
+pub fn run_foreground(model: &Model, budget: &Budget, opts: &Options) -> anyhow::Result<()> {
+    let (instance, mut child) = spawn(model, budget, opts, Stdio::Inherit)?;
+    println!(
+        "{} up at {} with {} context",
+        instance.model,
+        instance.base_url(),
+        instance.context
+    );
+
+    let status = child.wait().context("waiting for llama-server")?;
+    std::fs::remove_file(state_path()?).ok();
+    anyhow::ensure!(status.success(), "llama-server exited with {status}");
+    Ok(())
+}
+
+/// Where llama-server's output should go.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stdio {
+    /// A log file, so a detached server's output is still recoverable.
+    LogFile,
+    /// Our own stdio, so a service manager collects it into the journal.
+    Inherit,
+}
+
+/// Plan, evict, spawn and wait for health, returning the live child.
+fn spawn(
+    model: &Model,
+    budget: &Budget,
+    opts: &Options,
+    stdio: Stdio,
+) -> anyhow::Result<(Instance, std::process::Child)> {
     let context = plan_context(model, budget, opts)?;
 
     // Single-tenant: the budget cannot hold two models, so this is eviction. Done only
@@ -268,7 +315,6 @@ pub fn start(model: &Model, budget: &Budget, opts: &Options) -> anyhow::Result<I
         std::fs::create_dir_all(dir)?;
     }
     let out = std::fs::File::create(&log).with_context(|| format!("creating {}", log.display()))?;
-    let err = out.try_clone()?;
 
     // Sampled after eviction, so it reflects the desktop alone.
     let desktop_mib = crate::vram_used_mib().unwrap_or(budget.desktop_mib);
@@ -284,9 +330,10 @@ pub fn start(model: &Model, budget: &Budget, opts: &Options) -> anyhow::Result<I
         .args(["--port", &opts.port.to_string()])
         .args(["-a", &model.name])
         .args(["--reasoning", &opts.reasoning])
-        .arg("--no-webui")
-        .stdout(out)
-        .stderr(err);
+        .arg("--no-webui");
+    if stdio == Stdio::LogFile {
+        cmd.stdout(out.try_clone()?).stderr(out);
+    }
     if opts.reasoning_budget >= 0 {
         cmd.args(["--reasoning-budget", &opts.reasoning_budget.to_string()]);
     }
@@ -313,7 +360,7 @@ pub fn start(model: &Model, budget: &Budget, opts: &Options) -> anyhow::Result<I
     match await_healthy(&instance) {
         Ok(()) => {
             record(&instance)?;
-            Ok(instance)
+            Ok((instance, child))
         }
         Err(e) => {
             terminate(pid).ok();

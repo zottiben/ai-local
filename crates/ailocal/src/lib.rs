@@ -12,6 +12,7 @@ pub mod gguf;
 pub mod harness;
 pub mod registry;
 pub mod serve;
+pub mod service;
 pub mod source;
 pub mod vram;
 

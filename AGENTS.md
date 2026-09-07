@@ -19,6 +19,7 @@ Inference is llama.cpp's `llama-server`, Vulkan backend. Models are GGUF from Hu
 - Run one: `ailocal serve <name>`, then `ailocal ps` / `ailocal stop`
 - Expose it to harnesses: `ailocal gateway run` (key via `ailocal gateway key`)
 - Point a harness at it: `ailocal harness configure pi|claude-code` (undo with `unconfigure`)
+- Run it 24/7: `ailocal service install`, then `ailocal service status`
 - Check a model's real context limit: `scripts/bench/ctx_probe.sh <model.gguf> q8_0`
 
 The Rust workspace is established by PR0; until then the cargo commands have nothing to
@@ -85,7 +86,16 @@ Inference is Vulkan. gfx1102 ROCm is flaky (upstream segfaults, hipBLASLt report
 arch unsupported). ROCm is for training only, so a training-side breakage can never take
 down the daily driver.
 
-### 5. Root steps go to the user, and Arch is never partially upgraded
+### 5. Services are systemd **user** units
+They need the GPU and the user's home, and installing them needs no root - which matters
+because `sudo` here prompts for a password. The one privileged part is lingering: without
+`sudo loginctl enable-linger <user>` the units only start after a login, so a headless
+reboot leaves the gateway down.
+
+`ailocal serve --foreground` exists for this: systemd must supervise llama-server
+directly, not a command that forks and returns.
+
+### 6. Root steps go to the user, and Arch is never partially upgraded
 `sudo` needs a password, so the agent cannot install packages. Hand the user an exact
 command. It always syncs first:
 
@@ -95,7 +105,7 @@ sudo pacman -Syu <packages>
 
 `pacman -S` into a stale database is how a rolling-release install gets broken.
 
-### 6. Pi needs both a credential and a catalogue entry
+### 7. Pi needs both a credential and a catalogue entry
 Pi's llama.cpp provider is registered from the *cached model catalogue*, not from the
 credential. Writing only `~/.pi/agent/auth.json` leaves `--provider llama.cpp` failing
 with "Unknown provider" and `auth check` reporting `provider_not_found`. The catalogue
@@ -111,7 +121,7 @@ writes a file to `source` rather than touching `~/.claude/settings.json` - setti
 apply to every Claude Code session on the machine, including ones meant for the real
 Anthropic API.
 
-### 7. Retrieval for facts, fine-tuning for behaviour
+### 8. Retrieval for facts, fine-tuning for behaviour
 Codebase knowledge is a retrieval problem, not a QLoRA problem. An adapter trained on a
 repo produces confident wrong API signatures and is stale on the next commit. No
 fine-tuning lands before the eval harness (PR11) can prove it helped.

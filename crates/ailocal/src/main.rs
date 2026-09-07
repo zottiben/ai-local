@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use ailocal::{
     auth, config::Config, download, gateway, gguf, harness, registry, registry::Fit, serve,
-    source::Source, vram,
+    service, source::Source, vram,
 };
 use clap::{Args, Parser, Subcommand};
 
@@ -37,6 +37,23 @@ enum Command {
     /// Point a coding harness at this machine's gateway.
     #[command(subcommand)]
     Harness(HarnessCmd),
+    /// systemd units, so this survives a reboot.
+    #[command(subcommand)]
+    Service(ServiceCmd),
+}
+
+#[derive(Subcommand)]
+enum ServiceCmd {
+    /// Write and enable the user units.
+    Install {
+        /// Write the units but do not enable or start them.
+        #[arg(long)]
+        no_start: bool,
+    },
+    /// Stop, disable and remove the units.
+    Uninstall,
+    /// Show unit state.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -91,6 +108,13 @@ struct ServeArgs {
     /// empty content.
     #[arg(long)]
     reasoning: Option<String>,
+
+    /// Stay in the foreground until llama-server exits.
+    ///
+    /// What a service manager wants: one process to supervise and collect logs from,
+    /// rather than a command that forks and returns.
+    #[arg(long)]
+    foreground: bool,
 }
 
 #[derive(Subcommand)]
@@ -140,6 +164,9 @@ fn main() -> anyhow::Result<()> {
         Command::Gateway(GatewayCmd::Run { port, host }) => gateway_run(&host, port),
         Command::Harness(HarnessCmd::Configure { name, url }) => harness_configure(&name, &url),
         Command::Harness(HarnessCmd::Unconfigure { name }) => harness_unconfigure(&name),
+        Command::Service(ServiceCmd::Install { no_start }) => service_install(no_start),
+        Command::Service(ServiceCmd::Uninstall) => service_uninstall(),
+        Command::Service(ServiceCmd::Status) => service_status(),
         Command::Gateway(GatewayCmd::Key) => {
             println!("{}", auth::load_or_create()?);
             eprintln!("stored in {}", auth::key_path()?.display());
@@ -372,6 +399,10 @@ fn serve_model(args: &ServeArgs) -> anyhow::Result<()> {
         format_count(context)
     );
 
+    if args.foreground {
+        return serve::run_foreground(model, &budget, &opts);
+    }
+
     let instance = serve::start(model, &budget, &opts)?;
     println!(
         "{} up at {} with {} context, {} KV, reasoning {}",
@@ -478,6 +509,75 @@ fn harness_unconfigure(name: &str) -> anyhow::Result<()> {
         println!("removed the {} entry from pi", harness::PI_PROVIDER_ID);
     } else {
         println!("pi was not configured");
+    }
+    Ok(())
+}
+
+fn service_install(no_start: bool) -> anyhow::Result<()> {
+    let cfg = Config::load()?;
+    let exe = std::env::current_exe()?.canonicalize()?;
+
+    let units = service::install(
+        &exe,
+        &cfg.gateway_host,
+        cfg.gateway_port,
+        cfg.default_model.as_deref(),
+    )?;
+    println!(
+        "wrote {} into {}",
+        units.join(", "),
+        service::unit_dir()?.display()
+    );
+    println!("  ExecStart uses {}", exe.display());
+
+    service::systemctl(&["daemon-reload"])?;
+    if !no_start {
+        for unit in &units {
+            service::systemctl(&["enable", "--now", unit])?;
+            println!("  enabled and started {unit}");
+        }
+    }
+
+    if !service::linger_enabled() {
+        println!(
+            "\nnote: user services only run once you have logged in. For the gateway to\n\
+             come up at boot and survive logout, enable lingering (needs root):\n\
+             \x20   sudo loginctl enable-linger {}",
+            std::env::var("USER").unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+fn service_uninstall() -> anyhow::Result<()> {
+    for unit in [service::GATEWAY_UNIT, service::MODEL_UNIT] {
+        service::systemctl(&["disable", "--now", unit]).ok();
+    }
+    let removed = service::uninstall()?;
+    service::systemctl(&["daemon-reload"])?;
+
+    if removed.is_empty() {
+        println!("no units were installed");
+    } else {
+        println!("removed {}", removed.join(", "));
+    }
+    Ok(())
+}
+
+fn service_status() -> anyhow::Result<()> {
+    println!(
+        "linger      {}",
+        if service::linger_enabled() {
+            "enabled (starts at boot, survives logout)"
+        } else {
+            "disabled (units start at login only)"
+        }
+    );
+    for unit in [service::GATEWAY_UNIT, service::MODEL_UNIT] {
+        let active = service::systemctl(&["is-active", unit])?;
+        let enabled = service::systemctl(&["is-enabled", unit])?;
+        let text = |o: &std::process::Output| String::from_utf8_lossy(&o.stdout).trim().to_owned();
+        println!("{unit:<24} {:<10} {}", text(&active), text(&enabled));
     }
     Ok(())
 }
