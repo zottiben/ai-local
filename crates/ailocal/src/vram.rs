@@ -18,6 +18,15 @@ pub const CEILING_MIB: u64 = 14_400;
 /// Slack for llama.cpp's compute buffers, which scale with batch rather than context.
 pub const COMPUTE_BUFFER_MIB: u64 = 500;
 
+/// Multiplier applied to computed cache size.
+///
+/// The arithmetic below accounts for the KV tensors themselves. Measured allocation
+/// runs above that, in graph and bookkeeping overhead not worth modelling exactly.
+/// Chosen so the predicted total footprint sits just above the measured one on gemma4
+/// at 262144, because the error must land on the side of refusing a load that would
+/// have fitted rather than accepting one that takes the desktop down.
+const SAFETY_FACTOR: f64 = 1.25;
+
 /// Element width of a quantised KV cache entry, in bytes.
 ///
 /// The `q*` variants are not whole numbers: a block stores a scale alongside its
@@ -38,40 +47,103 @@ impl CacheType {
             Self::Q4_0 => 0.5625,
         }
     }
+
+    /// The spelling llama.cpp expects for `--cache-type-k` / `--cache-type-v`.
+    #[must_use]
+    pub fn as_llama_arg(self) -> &'static str {
+        match self {
+            Self::F16 => "f16",
+            Self::Q8_0 => "q8_0",
+            Self::Q4_0 => "q4_0",
+        }
+    }
 }
 
-/// The attention geometry that determines KV cache cost, read from GGUF metadata.
-#[derive(Debug, Clone, Copy)]
-pub struct KvLayout {
+impl std::str::FromStr for CacheType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "f16" => Ok(Self::F16),
+            "q8_0" => Ok(Self::Q8_0),
+            "q4_0" => Ok(Self::Q4_0),
+            other => anyhow::bail!("unknown cache type {other:?}, expected f16, q8_0 or q4_0"),
+        }
+    }
+}
+
+/// A set of attention layers sharing one geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayerGroup {
     pub layers: u32,
     pub kv_heads: u32,
     pub key_length: u32,
     pub value_length: u32,
 }
 
-impl KvLayout {
-    /// Bytes of KV cache per token of context.
-    ///
-    /// Both K and V are stored for every layer and every KV head, so this is linear in
-    /// all four dimensions. Grouped-query attention shows up as `kv_heads` being well
-    /// below the model's attention head count.
-    ///
-    /// This *over*-estimates sliding-window models such as gemma4, where most layers
-    /// hold a fixed-size window rather than growing with context. Over-estimating is
-    /// the safe direction: it refuses loads that would in fact have fit.
+impl LayerGroup {
+    /// Bytes of cache this group needs per token of context it holds.
     #[must_use]
     pub fn bytes_per_token(&self, cache: CacheType) -> f64 {
-        let elements = f64::from(self.layers)
+        f64::from(self.layers)
             * f64::from(self.kv_heads)
-            * f64::from(self.key_length + self.value_length);
-        elements * cache.bytes_per_element()
+            * f64::from(self.key_length + self.value_length)
+            * cache.bytes_per_element()
+    }
+}
+
+/// How a model's KV cache grows with context.
+///
+/// Splitting global from sliding layers is not a detail - it is the difference between
+/// a 12B holding 256k tokens and a 27B holding 19k. Treating every layer as global
+/// over-estimates gemma4 by 40x and would wrongly report it unable to run long context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvLayout {
+    /// Layers whose cache grows with the full context.
+    pub global: LayerGroup,
+    /// Layers capped at a fixed window, paired with that window size.
+    pub sliding: Option<(LayerGroup, u32)>,
+}
+
+impl KvLayout {
+    /// A model where every layer attends over the whole context.
+    #[must_use]
+    pub fn dense(layers: u32, kv_heads: u32, key_length: u32, value_length: u32) -> Self {
+        Self {
+            global: LayerGroup {
+                layers,
+                kv_heads,
+                key_length,
+                value_length,
+            },
+            sliding: None,
+        }
     }
 
-    /// Total KV cache for `context` tokens, in MiB, rounded up.
+    /// Marginal cost of one more token of context, once past the sliding window.
+    ///
+    /// This is the number that actually governs how far context can be pushed, since
+    /// the sliding layers stop growing.
+    #[must_use]
+    pub fn bytes_per_token(&self, cache: CacheType) -> f64 {
+        self.global.bytes_per_token(cache) * SAFETY_FACTOR
+    }
+
+    /// Total cache bytes for `context` tokens.
+    #[must_use]
+    pub fn cache_bytes(&self, cache: CacheType, context: u64) -> f64 {
+        let mut bytes = self.global.bytes_per_token(cache) * context as f64;
+        if let Some((group, window)) = self.sliding {
+            let held = context.min(u64::from(window));
+            bytes += group.bytes_per_token(cache) * held as f64;
+        }
+        bytes * SAFETY_FACTOR
+    }
+
+    /// Total cache for `context` tokens, in MiB, rounded up.
     #[must_use]
     pub fn cache_mib(&self, cache: CacheType, context: u64) -> u64 {
-        let bytes = self.bytes_per_token(cache) * context as f64;
-        (bytes / (1024.0 * 1024.0)).ceil() as u64
+        (self.cache_bytes(cache, context) / (1024.0 * 1024.0)).ceil() as u64
     }
 }
 
@@ -104,11 +176,25 @@ impl Budget {
     #[must_use]
     pub fn max_context(&self, kv: &KvLayout, cache: CacheType, weights_mib: u64) -> Option<u64> {
         let for_cache = self.available_mib().checked_sub(weights_mib)?;
-        let per_token = kv.bytes_per_token(cache);
-        if per_token <= 0.0 {
-            return None;
+        let budget_bytes = for_cache as f64 * 1024.0 * 1024.0 / SAFETY_FACTOR;
+
+        let global = kv.global.bytes_per_token(cache);
+        let (sliding, window) = kv.sliding.map_or((0.0, 0u64), |(g, w)| {
+            (g.bytes_per_token(cache), u64::from(w))
+        });
+
+        // Below the window every layer still grows, so both groups charge per token.
+        let within = budget_bytes / (global + sliding);
+        if within <= window as f64 {
+            return Some(within as u64);
         }
-        Some((for_cache as f64 * 1024.0 * 1024.0 / per_token) as u64)
+
+        // Past it the sliding layers are a fixed cost and only the global ones grow.
+        if global <= 0.0 {
+            return Some(u64::MAX);
+        }
+        let past = (budget_bytes - sliding * window as f64) / global;
+        Some(past.max(0.0) as u64)
     }
 
     /// Whether a specific load fits. This is the check that must gate every spawn.
@@ -124,25 +210,43 @@ mod tests {
 
     /// qwen3-14b: 40 layers, 8 KV heads, 128/128. Measured 84.8 KiB/token at q8_0 by
     /// differencing VRAM between ctx=4096 and ctx=32768 on the real card.
-    const QWEN3_14B: KvLayout = KvLayout {
-        layers: 40,
-        kv_heads: 8,
-        key_length: 128,
-        value_length: 128,
-    };
+    fn qwen3_14b() -> KvLayout {
+        KvLayout::dense(40, 8, 128, 128)
+    }
 
     /// qwen3.6-27b (arch `qwen35`): 65 layers, 4 KV heads, 256/256, global attention on
     /// every layer. Read from the first 8 MiB of the blob.
-    const QWEN36_27B: KvLayout = KvLayout {
-        layers: 65,
-        kv_heads: 4,
-        key_length: 256,
-        value_length: 256,
-    };
+    fn qwen36_27b() -> KvLayout {
+        KvLayout::dense(65, 4, 256, 256)
+    }
+
+    /// gemma4-12b: 48 blocks in a repeating pattern of 5 sliding then 1 global. The
+    /// sliding layers carry 8 KV heads at 256/256 over a 1024 window; the global layers
+    /// carry a single KV head at 512/512.
+    fn gemma4_12b() -> KvLayout {
+        KvLayout {
+            global: LayerGroup {
+                layers: 8,
+                kv_heads: 1,
+                key_length: 512,
+                value_length: 512,
+            },
+            sliding: Some((
+                LayerGroup {
+                    layers: 40,
+                    kv_heads: 8,
+                    key_length: 256,
+                    value_length: 256,
+                },
+                1024,
+            )),
+        }
+    }
 
     #[test]
     fn kv_per_token_matches_the_measured_card() {
-        let kib = QWEN3_14B.bytes_per_token(CacheType::Q8_0) / 1024.0;
+        // Compare raw geometry against the measurement, without the safety factor.
+        let kib = qwen3_14b().global.bytes_per_token(CacheType::Q8_0) / 1024.0;
         assert!(
             (kib - 84.8).abs() < 1.0,
             "predicted {kib:.1} KiB/token, measured 84.8"
@@ -151,9 +255,9 @@ mod tests {
 
     #[test]
     fn q8_0_cache_is_about_half_of_f16() {
-        let f16 = QWEN3_14B.bytes_per_token(CacheType::F16);
-        let q8 = QWEN3_14B.bytes_per_token(CacheType::Q8_0);
-        assert!((f16 / q8 - 1.882).abs() < 0.01);
+        let g = qwen3_14b().global;
+        let ratio = g.bytes_per_token(CacheType::F16) / g.bytes_per_token(CacheType::Q8_0);
+        assert!((ratio - 1.882).abs() < 0.01);
     }
 
     /// The load that actually killed the desktop: qwen3-14b at ctx=65536.
@@ -161,10 +265,10 @@ mod tests {
     fn rejects_the_load_that_crashed_the_machine() {
         let budget = Budget::new(900);
         assert!(
-            !budget.fits(&QWEN3_14B, CacheType::Q8_0, 8836, 65536),
+            !budget.fits(&qwen3_14b(), CacheType::Q8_0, 8836, 65536),
             "must refuse the ctx=65536 load that took the compositor down"
         );
-        assert!(budget.fits(&QWEN3_14B, CacheType::Q8_0, 8836, 32768));
+        assert!(budget.fits(&qwen3_14b(), CacheType::Q8_0, 8836, 32768));
     }
 
     /// A 27B cannot hold a long context here at any quant, because quantising weights
@@ -173,10 +277,50 @@ mod tests {
     fn dense_27b_cannot_reach_long_context() {
         let budget = Budget::new(900);
         let ctx = budget
-            .max_context(&QWEN36_27B, CacheType::Q8_0, 10428)
+            .max_context(&qwen36_27b(), CacheType::Q8_0, 10428)
             .expect("IQ3_XXS weights fit");
-        assert!((18_000..21_000).contains(&ctx), "expected ~19k, got {ctx}");
-        assert!(!budget.fits(&QWEN36_27B, CacheType::Q8_0, 10428, 200_000));
+        assert!((14_000..18_000).contains(&ctx), "expected ~16k, got {ctx}");
+        assert!(!budget.fits(&qwen36_27b(), CacheType::Q8_0, 10428, 200_000));
+    }
+
+    /// The regression that matters most: gemma4 measurably holds its full 262144
+    /// context at 11242 MiB peak. Treating its sliding layers as global predicted
+    /// ~15k and would have declared the daily driver unusable.
+    #[test]
+    fn sliding_window_model_reaches_its_full_trained_context() {
+        let budget = Budget::new(900);
+        let ctx = budget
+            .max_context(&gemma4_12b(), CacheType::Q8_0, 7039)
+            .expect("weights fit");
+        assert!(
+            ctx >= 262_144,
+            "gemma4 holds 262144 on the real card, predicted only {ctx}"
+        );
+        assert!(budget.fits(&gemma4_12b(), CacheType::Q8_0, 7039, 262_144));
+    }
+
+    /// The estimate has to match reality, and specifically must not come in under it.
+    ///
+    /// Measured on the card: gemma4-12b at ctx=262144 peaked 10368 MiB above the
+    /// desktop baseline, covering weights, KV cache and compute buffers.
+    #[test]
+    fn predicted_footprint_covers_the_measured_one() {
+        const MEASURED_MIB: u64 = 10_368;
+        const WEIGHTS_MIB: u64 = 7039;
+
+        let predicted =
+            WEIGHTS_MIB + gemma4_12b().cache_mib(CacheType::Q8_0, 262_144) + COMPUTE_BUFFER_MIB;
+
+        assert!(
+            predicted >= MEASURED_MIB,
+            "predicted {predicted} MiB but the card actually used {MEASURED_MIB} MiB - \
+             under-estimating is what crashes the desktop"
+        );
+        assert!(
+            predicted <= MEASURED_MIB * 11 / 10,
+            "predicted {predicted} MiB against {MEASURED_MIB} measured - so conservative \
+             it would refuse loads that work"
+        );
     }
 
     #[test]
@@ -184,7 +328,7 @@ mod tests {
         let budget = Budget::new(900);
         // devstral-24b Q4_K_M, 13.34 GiB. Measured: could not hold even 4096.
         assert_eq!(
-            budget.max_context(&QWEN36_27B, CacheType::Q8_0, 13_660),
+            budget.max_context(&qwen36_27b(), CacheType::Q8_0, 13_660),
             None
         );
     }
@@ -192,5 +336,13 @@ mod tests {
     #[test]
     fn a_desktop_over_the_ceiling_leaves_nothing() {
         assert_eq!(Budget::new(CEILING_MIB + 1).available_mib(), 0);
+    }
+
+    #[test]
+    fn cache_types_round_trip_through_their_llama_spelling() {
+        for c in [CacheType::F16, CacheType::Q8_0, CacheType::Q4_0] {
+            assert_eq!(c.as_llama_arg().parse::<CacheType>().unwrap(), c);
+        }
+        assert!("q3_k_m".parse::<CacheType>().is_err());
     }
 }
