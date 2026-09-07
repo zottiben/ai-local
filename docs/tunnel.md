@@ -31,8 +31,28 @@ SSH. In *Networks -> Tunnels -> (the tunnel) -> Published application routes*, a
 | Service | `HTTP` |
 | URL | `10.0.0.20:8081` |
 
-Every existing route points at `10.0.0.10`; this is the first one crossing to
-another LAN host, which cloudflared handles no differently.
+Every existing route points at `10.0.0.10` because those services run *on* the tunnel host,
+where `10.0.0.10` is effectively localhost. This one cannot: gemma4 needs 11.3 GB of
+VRAM and the tunnel host has no GPU, so cloudflared makes one LAN hop to the machine that does.
+It forwards to any address it can route to, so this is no different to it.
+
+### Pin the address first
+
+This PC is on **DHCP** (`ipv4.method:auto`), and the tunnel host cannot resolve it by name -
+there is no PTR record and no mDNS. So the route has to name an IP, and that IP has to
+stop moving, or a lease change silently breaks the tunnel with no error anywhere except
+a 502 at the edge.
+
+Pin it on the router (10.0.0.1) as a DHCP reservation:
+
+| | |
+| --- | --- |
+| MAC | `aa:bb:cc:dd:ee:ff` (enp4s0) |
+| IP | `10.0.0.20` |
+
+A reservation is preferable to a static address on the host: it survives an OS
+reinstall, and it keeps all addressing in one place rather than half in the router and
+half in NetworkManager.
 
 ## Why there is no Access policy on it
 
