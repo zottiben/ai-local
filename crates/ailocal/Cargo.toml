@@ -9,8 +9,10 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-stream.workspace = true
 axum.workspace = true
 clap.workspace = true
+futures-util.workspace = true
 indicatif.workspace = true
 reqwest.workspace = true
 rustix.workspace = true

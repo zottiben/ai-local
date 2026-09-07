@@ -18,6 +18,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
+use crate::anthropic;
 use crate::config::Config;
 use crate::registry::{self, Fit};
 use crate::serve;
@@ -77,6 +78,9 @@ pub fn router(state: Arc<AppState>) -> Router {
                 // and serving it ourselves means Pi's model picker drives our loader -
                 // with the VRAM ceiling enforced - rather than a bare llama-server
                 // router that would happily load past it.
+                // Anthropic Messages API, which is what makes ANTHROPIC_BASE_URL work
+                // for Claude Code.
+                .route("/v1/messages", post(messages))
                 .route("/models", get(router_list))
                 .route("/models/load", post(router_load))
                 .route("/models/unload", post(router_unload))
@@ -96,17 +100,20 @@ async fn require_bearer(
     request: Request,
     next: Next,
 ) -> Response {
+    // Anthropic clients authenticate with `x-api-key`; OpenAI ones with a bearer
+    // token. Accept either, since we serve both protocols on the same port.
     let presented = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(crate::auth::bearer);
+        .and_then(crate::auth::bearer)
+        .or_else(|| headers.get("x-api-key").and_then(|v| v.to_str().ok()));
 
     match presented {
         Some(token) if crate::auth::constant_time_eq(token, &state.key) => next.run(request).await,
         _ => ApiError::new(
             StatusCode::UNAUTHORIZED,
-            "missing or invalid API key; send `Authorization: Bearer <key>` \
-             (see `ailocal gateway key`)",
+            "missing or invalid API key; send `Authorization: Bearer <key>` or \
+             `x-api-key: <key>` (see `ailocal gateway key`)",
         )
         .into_response(),
     }
@@ -253,6 +260,107 @@ async fn ensure_loaded(state: &Arc<AppState>, model: &str) -> ApiResult<serve::I
         )
     })?
     .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, format!("{e:#}")))
+}
+
+/// Anthropic Messages endpoint.
+///
+/// Translates in, forwards to llama-server's OpenAI surface, and translates back -
+/// including the streaming case, where the two protocols disagree on structure rather
+/// than only on naming.
+async fn messages(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> ApiResult<Response> {
+    let request: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")))?;
+
+    let model = request["model"]
+        .as_str()
+        .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "request has no \"model\" field"))?
+        .to_owned();
+
+    let wants_stream = request["stream"].as_bool().unwrap_or(false);
+    let instance = ensure_loaded(&state, &model).await?;
+
+    let mut translated = anthropic::request_to_openai(&request)
+        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+    if wants_stream {
+        // Ask for usage on the final chunk so the reported output token count is the
+        // server's rather than our estimate.
+        translated["stream_options"] = serde_json::json!({ "include_usage": true });
+    }
+
+    let upstream = state
+        .client
+        .post(format!("{}/v1/chat/completions", instance.base_url()))
+        .json(&translated)
+        .send()
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                format!("upstream llama-server did not answer: {e}"),
+            )
+        })?;
+
+    if !wants_stream {
+        let openai: serde_json::Value = upstream.json().await.map_err(|e| {
+            ApiError::new(StatusCode::BAD_GATEWAY, format!("upstream returned: {e}"))
+        })?;
+        return Ok(Json(anthropic::response_to_anthropic(&openai, &model)).into_response());
+    }
+
+    let stream = anthropic_event_stream(upstream, model);
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from_stream(stream))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
+}
+
+/// Re-frame an OpenAI SSE stream as Anthropic events.
+///
+/// Buffers only up to an event boundary: SSE frames are separated by a blank line and
+/// can be split across TCP reads, so a naive per-chunk parse drops deltas.
+fn anthropic_event_stream(
+    upstream: reqwest::Response,
+    model: String,
+) -> impl futures_util::Stream<Item = Result<String, std::io::Error>> {
+    use futures_util::StreamExt as _;
+
+    async_stream::stream! {
+        let mut translator = anthropic::StreamTranslator::new(&model);
+        let mut bytes = upstream.bytes_stream();
+        let mut buffer = String::new();
+
+        while let Some(chunk) = bytes.next().await {
+            let Ok(chunk) = chunk else { break };
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(split) = buffer.find("\n\n") {
+                let frame = buffer[..split].to_owned();
+                buffer.drain(..split + 2);
+
+                for line in frame.lines() {
+                    let Some(payload) = line.strip_prefix("data: ") else { continue };
+                    if payload.trim() == "[DONE]" {
+                        continue;
+                    }
+                    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+                        continue;
+                    };
+                    for event in translator.push(&value) {
+                        yield Ok(event.encode());
+                    }
+                }
+            }
+        }
+
+        for event in translator.finish() {
+            yield Ok(event.encode());
+        }
+    }
 }
 
 /// Forward a request to llama-server, preserving streaming.

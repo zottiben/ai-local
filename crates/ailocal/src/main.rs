@@ -387,8 +387,8 @@ fn serve_model(args: &ServeArgs) -> anyhow::Result<()> {
 
 fn harness_configure(name: &str, url: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
-        name == "pi",
-        "unknown harness {name:?}; currently only `pi` is supported"
+        matches!(name, "pi" | "claude-code"),
+        "unknown harness {name:?}; expected `pi` or `claude-code`"
     );
 
     let cfg = Config::load()?;
@@ -418,6 +418,25 @@ fn harness_configure(name: &str, url: &str) -> anyhow::Result<()> {
     );
 
     let key = auth::load_or_create()?;
+
+    if name == "claude-code" {
+        let first = &models[0];
+        let (path, outcome) =
+            harness::configure_claude_code(url, &key, &first.id, first.context_window)?;
+        match outcome {
+            harness::Outcome::AlreadyConfigured => println!("claude-code env already current"),
+            harness::Outcome::Configured { .. } => println!("wrote {}", path.display()),
+        }
+        println!("  source it in a shell, then run claude there:");
+        println!("    source {} && claude", path.display());
+        println!(
+            "  deliberately not written into ~/.claude/settings.json - that would\n\
+             \x20 redirect every Claude Code session on this machine, not just the\n\
+             \x20 ones you want on the local model."
+        );
+        return Ok(());
+    }
+
     match harness::configure_pi(url, &key, &models)? {
         harness::Outcome::AlreadyConfigured => {
             println!("pi already points at {url}");
@@ -441,9 +460,19 @@ fn harness_configure(name: &str, url: &str) -> anyhow::Result<()> {
 }
 
 fn harness_unconfigure(name: &str) -> anyhow::Result<()> {
+    if name == "claude-code" {
+        let path = harness::claude_code_env_path()?;
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+            println!("removed {}", path.display());
+        } else {
+            println!("claude-code was not configured");
+        }
+        return Ok(());
+    }
     anyhow::ensure!(
         name == "pi",
-        "unknown harness {name:?}; currently only `pi` is supported"
+        "unknown harness {name:?}; expected `pi` or `claude-code`"
     );
     if harness::unconfigure_pi()? {
         println!("removed the {} entry from pi", harness::PI_PROVIDER_ID);

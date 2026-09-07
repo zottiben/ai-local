@@ -207,6 +207,68 @@ pub fn unconfigure_pi() -> anyhow::Result<bool> {
     Ok(removed)
 }
 
+/// Render the environment Claude Code needs to talk to the gateway.
+///
+/// Deliberately a file to source rather than an edit to `~/.claude/settings.json`:
+/// settings apply to *every* Claude Code session on the machine, so writing them there
+/// would silently redirect work you wanted to run against the real Anthropic API. An
+/// env file is opt-in per shell and reverts by closing it.
+#[must_use]
+pub fn claude_code_env(base_url: &str, api_key: &str, model: &str, context: u64) -> String {
+    let base = normalize_base_url(base_url);
+    format!(
+        "# Source this to point Claude Code at the local model:\n\
+         #   source {}\n\
+         # Written by `ailocal harness configure claude-code`.\n\
+         export ANTHROPIC_BASE_URL={base}\n\
+         export ANTHROPIC_AUTH_TOKEN={api_key}\n\
+         export ANTHROPIC_MODEL={model}\n\
+         export ANTHROPIC_SMALL_FAST_MODEL={model}\n\
+         # Claude Code does not know this model, so it would otherwise assume a 200k\n\
+         # window and auto-compact far too early.\n\
+         export CLAUDE_CODE_MAX_CONTEXT_TOKENS={context}\n",
+        claude_code_env_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "<path>".into()),
+    )
+}
+
+/// Where the Claude Code env file is written.
+///
+/// # Errors
+/// If neither `XDG_CONFIG_HOME` nor `HOME` is set.
+pub fn claude_code_env_path() -> anyhow::Result<PathBuf> {
+    Ok(crate::config::Config::path()?.with_file_name("claude-code.env"))
+}
+
+/// Write the Claude Code env file.
+///
+/// # Errors
+/// If the file cannot be written.
+pub fn configure_claude_code(
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    context: u64,
+) -> anyhow::Result<(PathBuf, Outcome)> {
+    let path = claude_code_env_path()?;
+    let desired = claude_code_env(base_url, api_key, model, context);
+
+    if std::fs::read_to_string(&path).is_ok_and(|existing| existing == desired) {
+        return Ok((path, Outcome::AlreadyConfigured));
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, &desired).with_context(|| format!("writing {}", path.display()))?;
+
+    // Holds the gateway key.
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
+
+    Ok((path, Outcome::Configured { backup: None }))
+}
+
 /// Copy a file next to itself with a timestamped suffix.
 fn back_up(path: &Path) -> anyhow::Result<PathBuf> {
     let stamp = std::time::SystemTime::now()
@@ -271,5 +333,33 @@ mod tests {
             pi_credential("http://h:1", "k"),
             pi_credential("http://h:1/v1/", "k"),
         );
+    }
+
+    #[test]
+    fn claude_code_env_sets_what_claude_code_reads() {
+        let env = claude_code_env("http://127.0.0.1:8081/v1", "ail_k", "gemma4", 262_144);
+        // Claude Code appends /v1 itself, so the stored value must not already have it.
+        assert!(env.contains("export ANTHROPIC_BASE_URL=http://127.0.0.1:8081\n"));
+        assert!(env.contains("export ANTHROPIC_AUTH_TOKEN=ail_k"));
+        assert!(env.contains("export ANTHROPIC_MODEL=gemma4"));
+        assert!(env.contains("export CLAUDE_CODE_MAX_CONTEXT_TOKENS=262144"));
+    }
+
+    #[test]
+    fn pi_model_entries_carry_the_fields_pi_filters_on() {
+        let entry = pi_model_entry(
+            &PiModel {
+                id: "m".into(),
+                context_window: 1024,
+                reasoning: false,
+            },
+            "http://h:1",
+        );
+        // Pi drops catalogue entries that do not match both of these exactly.
+        assert_eq!(entry["api"], "openai-completions");
+        assert_eq!(entry["provider"], PI_PROVIDER_ID);
+        assert_eq!(entry["baseUrl"], "http://h:1/v1");
+        assert_eq!(entry["contextWindow"], 1024);
+        assert_eq!(entry["maxTokens"], 1024);
     }
 }

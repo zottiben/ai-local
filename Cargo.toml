@@ -10,8 +10,10 @@ repository = "https://github.com/zottiben/ai-local"
 
 [workspace.dependencies]
 anyhow = "1"
+async-stream = "0.3"
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
 indicatif = "0.18"
 # rustls rather than native-tls: one less system library to have present when setting
 # up a new machine, which is the whole point of this project. Trust roots still come
