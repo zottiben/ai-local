@@ -22,6 +22,9 @@ reqwest = { version = "0.13", default-features = false, features = [
     "http2",
     "json",
 ] }
+# rustix rather than libc: signalling a detached process needs kill(2), and rustix
+# wraps it safely so the workspace can keep forbidding unsafe.
+rustix = { version = "1", features = ["process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

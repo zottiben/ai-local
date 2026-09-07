@@ -1,6 +1,8 @@
 //! `ailocal` - manage local LLMs and expose them to coding harnesses.
 
-use ailocal::{config::Config, download, gguf, registry, registry::Fit, source::Source, vram};
+use ailocal::{
+    config::Config, download, gguf, registry, registry::Fit, serve, source::Source, vram,
+};
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
@@ -20,6 +22,29 @@ enum Command {
     /// Inspect or write the config file.
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// Run a model, evicting whatever is already running.
+    Serve(ServeArgs),
+    /// Show the running model, if any.
+    Ps,
+    /// Stop the running model.
+    Stop,
+}
+
+#[derive(Args)]
+struct ServeArgs {
+    /// Model name as shown by `ailocal model ls`.
+    name: String,
+
+    /// Context size. Defaults to the largest that fits; a larger request is refused
+    /// rather than silently clamped.
+    #[arg(long)]
+    ctx: Option<u64>,
+
+    #[arg(long, default_value_t = serve::DEFAULT_PORT)]
+    port: u16,
+
+    #[arg(long, default_value = serve::DEFAULT_HOST)]
+    host: String,
 }
 
 #[derive(Subcommand)]
@@ -61,6 +86,9 @@ fn main() -> anyhow::Result<()> {
         Command::Model(ModelCmd::Rm { name }) => model_rm(&name),
         Command::Config(ConfigCmd::Show) => config_show(),
         Command::Config(ConfigCmd::Init) => config_init(),
+        Command::Serve(args) => serve_model(&args),
+        Command::Ps => ps(),
+        Command::Stop => stop(),
     }
 }
 
@@ -248,6 +276,75 @@ fn model_rm(name: &str) -> anyhow::Result<()> {
 
     std::fs::remove_file(&model.path)?;
     println!("removed {} ({} MiB)", model.path.display(), model.size_mib);
+    Ok(())
+}
+
+fn serve_model(args: &ServeArgs) -> anyhow::Result<()> {
+    let cfg = Config::load()?;
+    let cache: vram::CacheType = cfg.cache_type.parse()?;
+    let models = registry::scan(&cfg.models_dir)?;
+    let model = models.iter().find(|m| m.name == args.name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no model named {:?}; `ailocal model ls` shows what is installed",
+            args.name
+        )
+    })?;
+
+    // Budget against what will be free after any eviction, not against current usage.
+    let budget = serve::budget_for_next_launch()?;
+    let opts = serve::Options {
+        context: args.ctx,
+        host: args.host.clone(),
+        port: args.port,
+        cache,
+        api_key: None,
+    };
+
+    // Resolve the context before announcing anything, so a refusal is not preceded by
+    // a line claiming we started.
+    let context = serve::plan_context(model, &budget, &opts)?;
+
+    if let Some(old) = serve::running()? {
+        println!("evicting {} (only one model fits at a time)", old.model);
+    }
+    println!(
+        "starting {} with {} context ...",
+        model.name,
+        format_count(context)
+    );
+
+    let instance = serve::start(model, &budget, &opts)?;
+    println!(
+        "{} up at {} with {} context, {} KV",
+        instance.model,
+        instance.base_url(),
+        format_count(instance.context),
+        instance.cache_type
+    );
+    println!("vram now {} MiB", ailocal::vram_used_mib()?);
+    Ok(())
+}
+
+fn ps() -> anyhow::Result<()> {
+    match serve::running()? {
+        None => println!("nothing running"),
+        Some(i) => {
+            println!("{:<12} {}", "model", i.model);
+            println!("{:<12} {}", "url", i.base_url());
+            println!("{:<12} {}", "context", format_count(i.context));
+            println!("{:<12} {}", "kv cache", i.cache_type);
+            println!("{:<12} {}", "pid", i.pid);
+            println!("{:<12} {} MiB", "vram", ailocal::vram_used_mib()?);
+        }
+    }
+    Ok(())
+}
+
+fn stop() -> anyhow::Result<()> {
+    match serve::stop()? {
+        None => println!("nothing running"),
+        Some(i) => println!("stopped {} (pid {})", i.model, i.pid),
+    }
     Ok(())
 }
 

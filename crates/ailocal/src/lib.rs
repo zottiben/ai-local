@@ -7,6 +7,7 @@ pub mod config;
 pub mod download;
 pub mod gguf;
 pub mod registry;
+pub mod serve;
 pub mod source;
 pub mod vram;
 

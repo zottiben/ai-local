@@ -16,6 +16,7 @@ Inference is llama.cpp's `llama-server`, Vulkan backend. Models are GGUF from Hu
 - Plan: `aip status` (the build plan is in ai-planner, not in a markdown file)
 - Install a model: `ailocal model install ollama:<name>:<tag>` (or `hf:<owner>/<repo>/<file>`)
 - What is on disk and what fits: `ailocal model ls`
+- Run one: `ailocal serve <name>`, then `ailocal ps` / `ailocal stop`
 - Check a model's real context limit: `scripts/bench/ctx_probe.sh <model.gguf> q8_0`
 
 The Rust workspace is established by PR0; until then the cargo commands have nothing to
@@ -62,6 +63,16 @@ So a 24B at Q4 (13.3 GiB) cannot hold even a 4096 context and is unusable. Model
 fit entirely in VRAM - there are only 8.5 GB of system RAM, so CPU offload thrashes.
 Use `--cache-type-k q8_0 --cache-type-v q8_0`: it roughly halves the KV cache at no
 measurable throughput cost.
+
+`ailocal serve` enforces this: it sizes the context from the model's own KV geometry,
+refuses a larger `--ctx` rather than clamping it, and watches VRAM while loading so a
+mis-estimate costs a failed start instead of the session.
+
+### 3b. Both current models are reasoning models
+gemma4-12b and qwen3-14b emit chain-of-thought into `reasoning_content` and only fill
+`content` afterwards. A small `max_tokens` therefore returns an **empty answer** with
+`finish_reason: length` - gemma4 spent 200 tokens thinking before writing anything.
+Budget generously, and expect the gateway (PR6/PR8) to have to deal with the field.
 
 ### 4. ROCm never touches the inference path
 Inference is Vulkan. gfx1102 ROCm is flaky (upstream segfaults, hipBLASLt reports the
