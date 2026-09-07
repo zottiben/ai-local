@@ -11,7 +11,7 @@
 //! Only one model runs at a time. With ~13 GB of usable budget a second model is not
 //! coexistence, it is eviction, so that is what it does.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
@@ -64,16 +64,26 @@ impl Instance {
 /// # Errors
 /// If VRAM usage cannot be read and no instance is running to supply a baseline.
 pub fn budget_for_next_launch() -> anyhow::Result<Budget> {
-    match running()? {
-        Some(i) if i.desktop_mib > 0 => Ok(Budget::new(i.desktop_mib)),
-        _ => Ok(Budget::new(crate::vram_used_mib()?)),
+    // The ceiling comes from the device: a 16 GB card and a 64 GB Mac cannot share a
+    // hardcoded constant.
+    let mut budget = Budget::for_device(&crate::primary_device()?);
+
+    // With a model already resident, that memory is not a permanent cost - starting
+    // another evicts it - so budget against the baseline recorded when it loaded.
+    if let Some(instance) = running()?
+        && instance.desktop_mib > 0
+    {
+        budget.desktop_mib = instance.desktop_mib;
     }
+    Ok(budget)
 }
 
 /// Where the running-instance record lives.
 ///
-/// `XDG_RUNTIME_DIR` when available, since the state is meaningless across a reboot
-/// and that directory is cleared for us.
+/// `XDG_RUNTIME_DIR` when available, since the state is meaningless across a reboot and
+/// that directory is cleared for us. macOS sets no such variable, and its per-user
+/// `TMPDIR` has the same property, so the fallback is right there rather than a
+/// degradation.
 ///
 /// # Errors
 /// If no suitable directory can be determined.
@@ -85,8 +95,23 @@ pub fn state_path() -> anyhow::Result<PathBuf> {
 }
 
 /// Whether a process is still alive.
+///
+/// `kill(pid, 0)` rather than `/proc/<pid>`: it is portable, and there is no `/proc` on
+/// macOS - where the directory check would silently report every process as dead, so
+/// `ps` would show nothing running and a second model would load on top of the first.
 fn is_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    let Ok(raw) = i32::try_from(pid) else {
+        return false;
+    };
+    let Some(target) = rustix::process::Pid::from_raw(raw) else {
+        return false;
+    };
+    // Err(ESRCH) means no such process; Err(EPERM) means it exists but is not ours,
+    // which still counts as alive.
+    !matches!(
+        rustix::process::test_kill_process(target),
+        Err(rustix::io::Errno::SRCH)
+    )
 }
 
 /// The currently running instance, if there is one.
@@ -398,19 +423,25 @@ fn await_healthy(instance: &Instance) -> anyhow::Result<()> {
     let health = format!("{}/health", instance.base_url());
     let deadline = Instant::now() + STARTUP_TIMEOUT;
 
+    // Only meaningful where VRAM can be sampled cheaply; see `can_poll_vram`.
+    let watchdog = crate::can_poll_vram();
+    let ceiling = crate::primary_device()
+        .map(|d| vram::Budget::for_device(&d).ceiling_mib)
+        .unwrap_or(vram::CEILING_MIB);
+
     while Instant::now() < deadline {
         if !is_alive(instance.pid) {
             anyhow::bail!("llama-server exited during startup");
         }
 
-        if let Ok(used) = crate::vram_used_mib()
-            && used >= vram::CEILING_MIB
+        if watchdog
+            && let Ok(used) = crate::vram_used_mib()
+            && used >= ceiling
         {
             terminate(instance.pid).ok();
             anyhow::bail!(
-                "aborted at {used} MiB of VRAM, over the {} MiB ceiling - \
-                 killed it rather than let it starve the compositor",
-                vram::CEILING_MIB
+                "aborted at {used} MiB of VRAM, over the {ceiling} MiB ceiling - \
+                 killed it rather than let it starve the compositor"
             );
         }
 

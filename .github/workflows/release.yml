@@ -2,11 +2,12 @@ name: Release
 
 # Cut a release by pushing a version tag that matches Cargo.toml:
 #   git tag v0.1.0 && git push origin v0.1.0
-# Builds Linux binaries, publishes a GitHub Release and uploads checksums.txt.
-# Asset names must match what install.sh expects.
+# Builds Linux binaries and a universal macOS binary, publishes a GitHub Release and
+# uploads checksums.txt. Asset names must match what install.sh expects.
 #
-# Linux only: ailocal reads amdgpu sysfs for VRAM and drives llama.cpp's Vulkan
-# backend, so there is nothing to ship for macOS or Windows.
+# macOS ships one universal binary rather than two per-arch ones: it costs a few MB and
+# removes a whole class of "wrong build for this Mac" reports. It is ad-hoc signed -
+# curl downloads carry no quarantine attribute, so Gatekeeper does not prompt.
 on:
   push:
     tags:
@@ -64,9 +65,41 @@ jobs:
           path: ailocal-v*-linux-*.tar.gz
           if-no-files-found: error
 
+  macos:
+    name: macOS universal
+    needs: verify
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: aarch64-apple-darwin,x86_64-apple-darwin
+          cache-workspaces: .
+
+      - name: Build and archive
+        run: |
+          set -eux
+          VERSION="${GITHUB_REF_NAME#v}"
+          cargo build --release -p ailocal --target aarch64-apple-darwin
+          cargo build --release -p ailocal --target x86_64-apple-darwin
+          mkdir -p stage
+          lipo -create -output stage/ailocal \
+            target/aarch64-apple-darwin/release/ailocal \
+            target/x86_64-apple-darwin/release/ailocal
+          # Ad-hoc signature: without one, arm64 macOS refuses to exec the binary at all.
+          codesign --force --sign - stage/ailocal
+          lipo -info stage/ailocal
+          tar czf "ailocal-v${VERSION}-macos-universal.tar.gz" -C stage ailocal
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: ailocal-v*-macos-universal.tar.gz
+          if-no-files-found: error
+
   release:
     name: publish release
-    needs: [linux]
+    needs: [linux, macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

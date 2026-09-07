@@ -147,26 +147,70 @@ impl KvLayout {
     }
 }
 
+/// Memory held back from a discrete GPU for the desktop.
+///
+/// The compositor allocates framebuffers on demand, so leaving only its resident
+/// footprint free is what kills the session. Derived from measurement: 16368 MiB of
+/// board memory against a ceiling of 14400 that never crashed.
+const DISCRETE_RESERVE_MIB: u64 = 2048;
+
+/// Memory held back on a unified-memory device.
+///
+/// Smaller because llama.cpp already reports macOS's `iogpu.wired_limit_mb` as the
+/// device total, and that cap exists precisely to keep memory for the rest of the
+/// system. Over-committing here degrades into paging rather than killing anything, so
+/// the reserve is about staying responsive, not about survival.
+const UNIFIED_RESERVE_MIB: u64 = 1024;
+
 /// What a load has to fit inside.
 #[derive(Debug, Clone, Copy)]
 pub struct Budget {
-    /// VRAM already held by the desktop, sampled before the load.
+    /// Total board or wired memory we will never exceed.
+    pub ceiling_mib: u64,
+    /// Memory already held by everything that is not the model being loaded.
     pub desktop_mib: u64,
 }
 
 impl Budget {
+    /// A budget for this project's reference machine.
+    ///
+    /// Kept for the discrete-GPU case where the ceiling is a measured constant rather
+    /// than something the backend reports.
     #[must_use]
     pub fn new(desktop_mib: u64) -> Self {
-        Self { desktop_mib }
+        Self {
+            ceiling_mib: CEILING_MIB,
+            desktop_mib,
+        }
+    }
+
+    /// A budget derived from whatever llama.cpp says the device has.
+    ///
+    /// The reserve depends on how the device shares memory, not on the operating
+    /// system: a discrete card has to leave room for the compositor, while unified
+    /// memory is already capped by the OS on our behalf.
+    #[must_use]
+    pub fn for_device(device: &crate::device::Device) -> Self {
+        let reserve = if device.backend.is_unified_memory() {
+            UNIFIED_RESERVE_MIB
+        } else {
+            DISCRETE_RESERVE_MIB
+        };
+        Self {
+            ceiling_mib: device.total_mib.saturating_sub(reserve),
+            // What the device reports free already excludes everything else resident,
+            // so the baseline is whatever is missing from the total.
+            desktop_mib: device.total_mib.saturating_sub(device.free_mib),
+        }
     }
 
     /// MiB available to llama-server for weights, KV cache and compute buffers.
     ///
-    /// Saturates at zero rather than underflowing when the desktop alone is over the
+    /// Saturates at zero rather than underflowing when the baseline alone is over the
     /// ceiling, which would mean nothing can be loaded at all.
     #[must_use]
     pub fn available_mib(&self) -> u64 {
-        CEILING_MIB
+        self.ceiling_mib
             .saturating_sub(self.desktop_mib)
             .saturating_sub(COMPUTE_BUFFER_MIB)
     }
@@ -336,6 +380,48 @@ mod tests {
     #[test]
     fn a_desktop_over_the_ceiling_leaves_nothing() {
         assert_eq!(Budget::new(CEILING_MIB + 1).available_mib(), 0);
+    }
+
+    fn device(backend: crate::device::Backend, total: u64, free: u64) -> crate::device::Device {
+        crate::device::Device {
+            id: "D0".into(),
+            name: "test".into(),
+            backend,
+            total_mib: total,
+            free_mib: free,
+        }
+    }
+
+    /// A discrete card must hold back enough for the compositor to keep allocating.
+    #[test]
+    fn a_discrete_device_reserves_room_for_the_desktop() {
+        use crate::device::Backend;
+        let b = Budget::for_device(&device(Backend::Vulkan, 16_384, 15_400));
+        assert_eq!(b.ceiling_mib, 16_384 - DISCRETE_RESERVE_MIB);
+        // 984 MiB already resident, so that is the baseline.
+        assert_eq!(b.desktop_mib, 984);
+        // Close to the hand-tuned ceiling this project was built against.
+        assert!((b.ceiling_mib as i64 - CEILING_MIB as i64).abs() < 200);
+    }
+
+    /// Unified memory is already capped by the OS, so it holds back less.
+    #[test]
+    fn a_unified_device_reserves_less() {
+        use crate::device::Backend;
+        let metal = Budget::for_device(&device(Backend::Metal, 26_000, 25_900));
+        let discrete = Budget::for_device(&device(Backend::Vulkan, 26_000, 25_900));
+        assert!(metal.available_mib() > discrete.available_mib());
+        assert_eq!(metal.ceiling_mib, 26_000 - UNIFIED_RESERVE_MIB);
+    }
+
+    /// A 36 GB Mac should be able to run things this 16 GB card cannot.
+    #[test]
+    fn a_large_unified_device_affords_a_much_bigger_model() {
+        use crate::device::Backend;
+        let mac = Budget::for_device(&device(Backend::Metal, 36_864, 36_000));
+        let kv = KvLayout::dense(65, 4, 256, 256);
+        // qwen3.6-27b at Q4_K_M, which cannot load at all on 16 GB.
+        assert!(mac.max_context(&kv, CacheType::Q8_0, 16_058).is_some());
     }
 
     #[test]

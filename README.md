@@ -8,8 +8,21 @@ curl -fsSL https://zottiben.github.io/ai-local/install.sh | sh
 ailocal setup --model ollama:gemma4:12b
 ```
 
-Linux, x86_64 or aarch64. Needs [llama.cpp](https://github.com/ggml-org/llama.cpp) with
-the Vulkan backend (`llama-cpp` + `ggml-vulkan` on Arch).
+Linux (x86_64/aarch64) or macOS (Apple Silicon and Intel). Needs
+[llama.cpp](https://github.com/ggml-org/llama.cpp):
+
+```
+brew install llama.cpp                          # macOS, Metal is built in
+sudo pacman -Syu llama-cpp ggml-vulkan          # Arch, Vulkan backend
+```
+
+On macOS the memory ceiling comes from `iogpu.wired_limit_mb`, which is what llama.cpp
+reports as device memory. Raising it lets larger models load at the cost of the headroom
+macOS uses to stay responsive:
+
+```
+sudo sysctl iogpu.wired_limit_mb=28000   # session only; =0 restores the default
+```
 
 ## What it does
 

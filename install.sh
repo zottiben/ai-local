@@ -9,8 +9,8 @@
 #   --version <tag>   install a specific release tag (e.g. v0.1.0) instead of the latest
 #   -h, --help        show this help
 #
-# Linux only. ailocal reads VRAM from amdgpu's sysfs and drives llama.cpp's Vulkan
-# backend, neither of which exists on macOS or Windows.
+# Linux (x86_64, aarch64) and macOS (universal). Windows is out of scope: llama.cpp's
+# GPU backends and the service managers this drives are Unix-only here.
 set -eu
 
 REPO="zottiben/ai-local"
@@ -62,16 +62,20 @@ done
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
 
-if [ "$OS" != "linux" ]; then
-  echo "Unsupported OS: $OS. ailocal is Linux-only - it reads amdgpu sysfs for VRAM" >&2
-  echo "and drives llama.cpp's Vulkan backend." >&2
-  exit 1
-fi
-
-case "$ARCH" in
-  x86_64 | amd64) LARCH="x86_64" ;;
-  arm64 | aarch64) LARCH="aarch64" ;;
-  *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
+case "$OS" in
+  linux)
+    case "$ARCH" in
+      x86_64 | amd64) PLATFORM="linux-x86_64" ;;
+      arm64 | aarch64) PLATFORM="linux-aarch64" ;;
+      *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
+    esac
+    ;;
+  darwin)
+    # One universal binary rather than per-arch: it is a few MB more and removes a
+    # whole class of "wrong build for this Mac" reports.
+    PLATFORM="macos-universal"
+    ;;
+  *) echo "Unsupported OS: $OS (ailocal targets Linux and macOS)" >&2; exit 1 ;;
 esac
 
 # Pick a bin dir on PATH without needing sudo when possible.
@@ -129,12 +133,12 @@ elif [ "$CHECK_ONLY" -eq 1 ]; then
 fi
 
 # --- asset name (must match .github/workflows/release.yml) -----------------------
-FILENAME="ailocal-v${VERSION_NUM}-linux-${LARCH}.tar.gz"
+FILENAME="ailocal-v${VERSION_NUM}-${PLATFORM}.tar.gz"
 
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-echo "Downloading ailocal ${VERSION} for linux-${LARCH}..."
+echo "Downloading ailocal ${VERSION} for ${PLATFORM}..."
 curl -fsSL "${BASE}/${FILENAME}" -o "${TMPDIR}/${FILENAME}"
 
 # --- verify checksum (best-effort: only if published and a hasher is available) --
@@ -173,6 +177,11 @@ else
   sudo mv -f "$staged" "$BIN_DIR/ailocal"
 fi
 
+if [ "$OS" = "darwin" ]; then
+  # curl downloads carry no quarantine attribute, but clear it in case of a re-host.
+  xattr -d com.apple.quarantine "$BIN_DIR/ailocal" 2>/dev/null || true
+fi
+
 # Best-effort: the receipt only speeds up the next run's up-to-date check.
 if mkdir -p "$(dirname "$RECEIPT")" 2>/dev/null; then
   printf '%s\n' "$VERSION_NUM" > "$RECEIPT" 2>/dev/null || true
@@ -182,11 +191,16 @@ echo "Installed ailocal ${VERSION} to ${BIN_DIR}/ailocal"
 
 if [ -n "$CURRENT" ] && [ "$CURRENT" != "$VERSION_NUM" ]; then
   echo "Updated from v${CURRENT}."
-  # Units embed the binary path, and a running gateway keeps the old image mapped.
+  # Service definitions embed the binary path, and a running gateway keeps the old
+  # image mapped, so it has to be restarted to pick up the new one.
   if command -v systemctl >/dev/null 2>&1 &&
      systemctl --user is-active ailocal-gateway.service >/dev/null 2>&1; then
     echo "Restarting the gateway to pick it up..."
     systemctl --user restart ailocal-gateway.service || true
+  elif command -v launchctl >/dev/null 2>&1 &&
+       launchctl print "gui/$(id -u)/io.github.zottiben.ailocal.gateway" >/dev/null 2>&1; then
+    echo "Restarting the gateway to pick it up..."
+    launchctl kickstart -k "gui/$(id -u)/io.github.zottiben.ailocal.gateway" || true
   fi
 fi
 

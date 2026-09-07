@@ -10,10 +10,18 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  # Deliberately one job running the gates in the same order as the local pre-pr
-  # check, so CI can never reject something that passed locally.
+  # Deliberately runs the gates in the same order as the local pre-pr check, so CI can
+  # never reject something that passed locally.
+  #
+  # Both platforms, because the platform-specific code - service manager, process
+  # liveness, device probing - is exactly the code least likely to be exercised by
+  # whoever is doing the editing.
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
 

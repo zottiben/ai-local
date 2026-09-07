@@ -696,32 +696,39 @@ fn setup(args: &SetupArgs) -> anyhow::Result<()> {
         None => {
             blocked = true;
             println!("   MISS  llama-server not on PATH");
-            println!("         Arch:   sudo pacman -Syu llama-cpp ggml-vulkan");
+            if cfg!(target_os = "macos") {
+                println!("         macOS:  brew install llama.cpp");
+            } else {
+                println!("         Arch:   sudo pacman -Syu llama-cpp ggml-vulkan");
+            }
             println!("         other:  https://github.com/ggml-org/llama.cpp");
         }
     }
-    // ggml ships backends as separate packages, and without the GPU one llama-server
-    // silently runs on CPU - which looks like a broken GPU rather than a missing 54 MB.
-    if std::path::Path::new("/usr/lib/ggml/libggml-vulkan.so").exists() {
-        println!("   ok    Vulkan backend present");
-    } else {
-        println!("   warn  no libggml-vulkan.so found; llama-server may fall back to CPU");
-        println!("         Arch: sudo pacman -Syu ggml-vulkan");
-    }
-    match ailocal::vram_used_mib() {
-        Ok(used) => {
-            // Budget against what a launch would actually get, not against current
-            // usage - otherwise a loaded model makes the machine look out of VRAM.
-            let budget =
-                serve::budget_for_next_launch().unwrap_or_else(|_| vram::Budget::new(used));
+    // Ask llama.cpp what it can see rather than looking for a backend library. On
+    // Linux ggml ships backends as separate packages, and without the GPU one
+    // llama-server silently runs on CPU - which looks like a broken GPU rather than a
+    // missing 54 MB. On macOS Metal is built in and there is no library to look for.
+    match ailocal::primary_device() {
+        Ok(gpu) => {
             println!(
-                "   ok    GPU visible, {used} MiB in use, {} MiB available for a model",
+                "   ok    {} via {:?}, {} MiB",
+                gpu.name, gpu.backend, gpu.total_mib
+            );
+            // Budget against what a launch would actually get, not against current
+            // usage - otherwise a loaded model makes the machine look out of memory.
+            let budget =
+                serve::budget_for_next_launch().unwrap_or_else(|_| vram::Budget::for_device(&gpu));
+            println!(
+                "   ok    {} MiB available for a model",
                 budget.available_mib()
             );
         }
         Err(e) => {
             blocked = true;
-            println!("   MISS  no amdgpu VRAM node: {e}");
+            println!("   MISS  {e}");
+            if cfg!(target_os = "linux") {
+                println!("         Arch: sudo pacman -Syu ggml-vulkan");
+            }
         }
     }
 
@@ -901,10 +908,10 @@ fn service_install(no_start: bool) -> anyhow::Result<()> {
     );
     println!("  ExecStart uses {}", exe.display());
 
-    service::systemctl(&["daemon-reload"])?;
+    service::reload()?;
     if !no_start {
         for unit in &units {
-            service::systemctl(&["enable", "--now", unit])?;
+            service::enable(unit)?;
             println!("  enabled and started {unit}");
         }
     }
@@ -921,11 +928,11 @@ fn service_install(no_start: bool) -> anyhow::Result<()> {
 }
 
 fn service_uninstall() -> anyhow::Result<()> {
-    for unit in [service::GATEWAY_UNIT, service::MODEL_UNIT] {
-        service::systemctl(&["disable", "--now", unit]).ok();
+    for unit in service::service_names() {
+        service::disable(unit).ok();
     }
     let removed = service::uninstall()?;
-    service::systemctl(&["daemon-reload"])?;
+    service::reload()?;
 
     if removed.is_empty() {
         println!("no units were installed");
@@ -944,11 +951,20 @@ fn service_status() -> anyhow::Result<()> {
             "disabled (units start at login only)"
         }
     );
-    for unit in [service::GATEWAY_UNIT, service::MODEL_UNIT] {
-        let active = service::systemctl(&["is-active", unit])?;
-        let enabled = service::systemctl(&["is-enabled", unit])?;
-        let text = |o: &std::process::Output| String::from_utf8_lossy(&o.stdout).trim().to_owned();
-        println!("{unit:<24} {:<10} {}", text(&active), text(&enabled));
+    for unit in service::service_names() {
+        println!(
+            "{unit:<40} {:<10} {}",
+            if service::is_active(unit) {
+                "active"
+            } else {
+                "inactive"
+            },
+            if service::is_enabled(unit) {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
     }
     Ok(())
 }
