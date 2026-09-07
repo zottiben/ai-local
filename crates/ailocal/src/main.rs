@@ -83,6 +83,13 @@ enum GatewayCmd {
     },
     /// Print the API key, creating one if there is none.
     Key,
+    /// Check a gateway is reachable and correctly authenticated.
+    ///
+    /// Point it at the public hostname to verify the tunnel end to end.
+    Check {
+        #[arg(default_value = "http://127.0.0.1:8081")]
+        url: String,
+    },
 }
 
 #[derive(Args)]
@@ -167,6 +174,7 @@ fn main() -> anyhow::Result<()> {
         Command::Service(ServiceCmd::Install { no_start }) => service_install(no_start),
         Command::Service(ServiceCmd::Uninstall) => service_uninstall(),
         Command::Service(ServiceCmd::Status) => service_status(),
+        Command::Gateway(GatewayCmd::Check { url }) => gateway_check(&url),
         Command::Gateway(GatewayCmd::Key) => {
             println!("{}", auth::load_or_create()?);
             eprintln!("stored in {}", auth::key_path()?.display());
@@ -510,6 +518,65 @@ fn harness_unconfigure(name: &str) -> anyhow::Result<()> {
     } else {
         println!("pi was not configured");
     }
+    Ok(())
+}
+
+fn gateway_check(url: &str) -> anyhow::Result<()> {
+    let base = url.trim_end_matches('/');
+    let key = auth::load_or_create()?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    let mut failures = 0;
+    let mut check =
+        |label: &str, expected: u16, send: &dyn Fn() -> anyhow::Result<u16>| match send() {
+            Ok(status) if status == expected => println!("  ok    {label} ({status})"),
+            Ok(status) => {
+                failures += 1;
+                println!("  FAIL  {label}: got {status}, expected {expected}");
+            }
+            Err(e) => {
+                failures += 1;
+                println!("  FAIL  {label}: {e}");
+            }
+        };
+
+    println!("checking {base}");
+    check("health, unauthenticated", 200, &|| {
+        Ok(client
+            .get(format!("{base}/health"))
+            .send()?
+            .status()
+            .as_u16())
+    });
+    // If this returns 200 the endpoint is open to the internet.
+    check("models rejects no credential", 401, &|| {
+        Ok(client
+            .get(format!("{base}/v1/models"))
+            .send()?
+            .status()
+            .as_u16())
+    });
+    check("models rejects a wrong credential", 401, &|| {
+        Ok(client
+            .get(format!("{base}/v1/models"))
+            .bearer_auth("ail_definitely_wrong")
+            .send()?
+            .status()
+            .as_u16())
+    });
+    check("models accepts the real key", 200, &|| {
+        Ok(client
+            .get(format!("{base}/v1/models"))
+            .bearer_auth(&key)
+            .send()?
+            .status()
+            .as_u16())
+    });
+
+    anyhow::ensure!(failures == 0, "{failures} check(s) failed");
+    println!("all checks passed");
     Ok(())
 }
 
