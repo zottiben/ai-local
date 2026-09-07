@@ -25,7 +25,7 @@ vram_mib() { echo $(( $(cat "$VRAM") / 1048576 )); }
 BASE=$(vram_mib)
 echo "  baseline (desktop) = ${BASE} MiB | ceiling = ${CEILING_MIB} MiB"
 
-for CTX in 4096 8192 16384 32768 65536 131072; do
+for CTX in 4096 8192 16384 32768 65536 131072 196608 262144; do
   [ "$CTX" -gt "$MAX_CTX" ] && break
 
   llama-server -m "$MODEL" -ngl 99 -c "$CTX" --port $PORT \
