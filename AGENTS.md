@@ -18,6 +18,7 @@ Inference is llama.cpp's `llama-server`, Vulkan backend. Models are GGUF from Hu
 - What is on disk and what fits: `ailocal model ls`
 - Run one: `ailocal serve <name>`, then `ailocal ps` / `ailocal stop`
 - Expose it to harnesses: `ailocal gateway run` (key via `ailocal gateway key`)
+- Point Pi at it: `ailocal harness configure pi` (undo with `harness unconfigure pi`)
 - Check a model's real context limit: `scripts/bench/ctx_probe.sh <model.gguf> q8_0`
 
 The Rust workspace is established by PR0; until then the cargo commands have nothing to
@@ -94,7 +95,18 @@ sudo pacman -Syu <packages>
 
 `pacman -S` into a stale database is how a rolling-release install gets broken.
 
-### 6. Retrieval for facts, fine-tuning for behaviour
+### 6. Pi needs both a credential and a catalogue entry
+Pi's llama.cpp provider is registered from the *cached model catalogue*, not from the
+credential. Writing only `~/.pi/agent/auth.json` leaves `--provider llama.cpp` failing
+with "Unknown provider" and `auth check` reporting `provider_not_found`. The catalogue
+entry in `~/.pi/agent/models-store.json` needs `api: "openai-completions"` and
+`provider: "llama.cpp"`, and Pi strips a trailing `/v1` from `LLAMA_BASE_URL` before
+storing it - so store the stripped form or every run looks like a change.
+
+Both files hold live credentials for other providers. Always merge, never rewrite, and
+back up first.
+
+### 7. Retrieval for facts, fine-tuning for behaviour
 Codebase knowledge is a retrieval problem, not a QLoRA problem. An adapter trained on a
 repo produces confident wrong API signatures and is stale on the next commit. No
 fine-tuning lands before the eval harness (PR11) can prove it helped.

@@ -73,6 +73,14 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .route("/v1/chat/completions", post(proxy))
                 .route("/v1/completions", post(proxy))
                 .route("/v1/embeddings", post(proxy))
+                // llama.cpp router API. Pi speaks this natively via `/login llama.cpp`,
+                // and serving it ourselves means Pi's model picker drives our loader -
+                // with the VRAM ceiling enforced - rather than a bare llama-server
+                // router that would happily load past it.
+                .route("/models", get(router_list))
+                .route("/models/load", post(router_load))
+                .route("/models/unload", post(router_unload))
+                .route("/props", get(props))
                 .layer(axum::middleware::from_fn_with_state(
                     state.clone(),
                     require_bearer,
@@ -144,6 +152,74 @@ async fn list_models(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde
         .collect();
 
     Ok(Json(serde_json::json!({ "object": "list", "data": data })))
+}
+
+/// Catalogue in llama.cpp router form.
+///
+/// Pi requires only `id` and `status.value`, and treats anything other than
+/// `unloaded` as available. Models that cannot fit are still listed, so they are
+/// visible rather than mysteriously absent - loading one fails with the reason.
+async fn router_list(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    let models = registry::scan(&state.config.models_dir).map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("reading model directory: {e}"),
+        )
+    })?;
+    let loaded = serve::running().ok().flatten().map(|i| i.model);
+
+    let data: Vec<serde_json::Value> = models
+        .iter()
+        .map(|m| {
+            let is_loaded = loaded.as_deref() == Some(m.name.as_str());
+            serde_json::json!({
+                "id": m.name,
+                "object": "model",
+                "owned_by": "ailocal",
+                "created": 0,
+                "status": { "value": if is_loaded { "loaded" } else { "unloaded" } },
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({ "object": "list", "data": data })))
+}
+
+#[derive(serde::Deserialize)]
+struct ModelRef {
+    model: String,
+}
+
+async fn router_load(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ModelRef>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let instance = ensure_loaded(&state, &body.model).await?;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "model": instance.model,
+        "context": instance.context,
+    })))
+}
+
+async fn router_unload(Json(body): Json<ModelRef>) -> ApiResult<Json<serde_json::Value>> {
+    let stopped = tokio::task::spawn_blocking(serve::stop)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "unloaded": stopped.map(|i| i.model).unwrap_or(body.model),
+    })))
+}
+
+/// Server properties.
+///
+/// `models_autoload: false` tells Pi that loading is explicit, which is true here: the
+/// budget only holds one model, so loading is a decision rather than a side effect.
+async fn props() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "models_autoload": false }))
 }
 
 /// Make sure `model` is the one that is loaded, swapping if it is not.

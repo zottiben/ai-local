@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use ailocal::{
-    auth, config::Config, download, gateway, gguf, registry, registry::Fit, serve, source::Source,
-    vram,
+    auth, config::Config, download, gateway, gguf, harness, registry, registry::Fit, serve,
+    source::Source, vram,
 };
 use clap::{Args, Parser, Subcommand};
 
@@ -34,6 +34,23 @@ enum Command {
     /// The authenticated OpenAI-compatible front end.
     #[command(subcommand)]
     Gateway(GatewayCmd),
+    /// Point a coding harness at this machine's gateway.
+    #[command(subcommand)]
+    Harness(HarnessCmd),
+}
+
+#[derive(Subcommand)]
+enum HarnessCmd {
+    /// Write the gateway into a harness's configuration.
+    Configure {
+        /// Which harness. Currently `pi`.
+        name: String,
+        /// Gateway URL the harness should call.
+        #[arg(long, default_value = "http://127.0.0.1:8081")]
+        url: String,
+    },
+    /// Remove our entry from a harness's configuration.
+    Unconfigure { name: String },
 }
 
 #[derive(Subcommand)]
@@ -121,6 +138,8 @@ fn main() -> anyhow::Result<()> {
         Command::Ps => ps(),
         Command::Stop => stop(),
         Command::Gateway(GatewayCmd::Run { port, host }) => gateway_run(&host, port),
+        Command::Harness(HarnessCmd::Configure { name, url }) => harness_configure(&name, &url),
+        Command::Harness(HarnessCmd::Unconfigure { name }) => harness_unconfigure(&name),
         Command::Gateway(GatewayCmd::Key) => {
             println!("{}", auth::load_or_create()?);
             eprintln!("stored in {}", auth::key_path()?.display());
@@ -363,6 +382,74 @@ fn serve_model(args: &ServeArgs) -> anyhow::Result<()> {
         opts.reasoning
     );
     println!("vram now {} MiB", ailocal::vram_used_mib()?);
+    Ok(())
+}
+
+fn harness_configure(name: &str, url: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        name == "pi",
+        "unknown harness {name:?}; currently only `pi` is supported"
+    );
+
+    let cfg = Config::load()?;
+    let cache: vram::CacheType = cfg.cache_type.parse()?;
+    let budget = serve::budget_for_next_launch()
+        .unwrap_or_else(|_| vram::Budget::new(ailocal::vram_used_mib().unwrap_or(900)));
+
+    // Advertise only what can actually run, at the context it would actually get.
+    // Offering a model Pi cannot load just moves the failure later.
+    let models: Vec<harness::PiModel> = registry::scan(&cfg.models_dir)?
+        .iter()
+        .filter_map(|m| {
+            match registry::assess(m.kv, m.trained_context, &budget, cache, m.size_mib) {
+                Fit::Fits(ctx) => Some(harness::PiModel {
+                    id: m.name.clone(),
+                    context_window: ctx,
+                    reasoning: cfg.reasoning != "off",
+                }),
+                _ => None,
+            }
+        })
+        .collect();
+
+    anyhow::ensure!(
+        !models.is_empty(),
+        "no installed model can run here; `ailocal model ls` shows why"
+    );
+
+    let key = auth::load_or_create()?;
+    match harness::configure_pi(url, &key, &models)? {
+        harness::Outcome::AlreadyConfigured => {
+            println!("pi already points at {url}");
+        }
+        harness::Outcome::Configured { backup } => {
+            println!("pi configured to use {url}");
+            if let Some(b) = backup {
+                println!("  backup: {}", b.display());
+            }
+        }
+    }
+    for m in &models {
+        println!("  {} ({} context)", m.id, format_count(m.context_window));
+    }
+    println!(
+        "  try: pi --provider {} --model {}",
+        harness::PI_PROVIDER_ID,
+        models[0].id
+    );
+    Ok(())
+}
+
+fn harness_unconfigure(name: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        name == "pi",
+        "unknown harness {name:?}; currently only `pi` is supported"
+    );
+    if harness::unconfigure_pi()? {
+        println!("removed the {} entry from pi", harness::PI_PROVIDER_ID);
+    } else {
+        println!("pi was not configured");
+    }
     Ok(())
 }
 

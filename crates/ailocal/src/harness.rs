@@ -1,0 +1,275 @@
+//! Writing our endpoint into a coding harness's own configuration.
+//!
+//! These files belong to other tools and hold live credentials, so every write here is
+//! a merge rather than a rewrite, is backed up first, and is a no-op when the settings
+//! already say what we want. `revert` puts the newest backup back.
+//!
+//! Pi's schema was read from its shipped bundle rather than guessed: the llama.cpp
+//! provider stores `{"type":"api_key","key":...,"env":{"LLAMA_BASE_URL":...}}` under
+//! the provider id, normalises the URL by stripping any trailing `/v1`, and then calls
+//! `<base>/models` for the catalogue and `<base>/v1/chat/completions` for inference.
+
+use std::path::{Path, PathBuf};
+
+use anyhow::Context as _;
+
+/// Pi's provider id for a llama.cpp-compatible server.
+pub const PI_PROVIDER_ID: &str = "llama.cpp";
+
+/// What a configure call did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// Settings already matched; nothing was written.
+    AlreadyConfigured,
+    Configured {
+        backup: Option<PathBuf>,
+    },
+}
+
+/// Path to Pi's credential store.
+///
+/// # Errors
+/// If `HOME` is not set.
+pub fn pi_auth_path() -> anyhow::Result<PathBuf> {
+    pi_file("auth.json")
+}
+
+/// Path to Pi's cached model catalogue.
+///
+/// # Errors
+/// If `HOME` is not set.
+pub fn pi_models_store_path() -> anyhow::Result<PathBuf> {
+    pi_file("models-store.json")
+}
+
+fn pi_file(name: &str) -> anyhow::Result<PathBuf> {
+    let home = std::env::var_os("HOME").ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
+    Ok(PathBuf::from(home).join(".pi/agent").join(name))
+}
+
+/// A model to advertise to Pi.
+#[derive(Debug, Clone)]
+pub struct PiModel {
+    pub id: String,
+    pub context_window: u64,
+    pub reasoning: bool,
+}
+
+/// Largest completion Pi should request.
+///
+/// Capped well below the context window: these are reasoning models, and an
+/// over-generous cap mostly buys longer thinking rather than a longer answer.
+const MAX_OUTPUT_TOKENS: u64 = 8192;
+
+/// The catalogue entry Pi caches for a local model.
+///
+/// `api` must be `openai-completions` and `provider` must be the llama.cpp id, or Pi
+/// filters the entry out when it refreshes.
+#[must_use]
+pub fn pi_model_entry(model: &PiModel, base_url: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": model.id,
+        "name": format!("{} (local)", model.id),
+        "api": "openai-completions",
+        "provider": PI_PROVIDER_ID,
+        "baseUrl": format!("{}/v1", normalize_base_url(base_url)),
+        "reasoning": model.reasoning,
+        "input": ["text"],
+        // Local inference is free, and Pi renders these figures directly.
+        "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+        "contextWindow": model.context_window,
+        "maxTokens": model.context_window.min(MAX_OUTPUT_TOKENS),
+    })
+}
+
+/// The credential Pi expects for a llama.cpp server.
+#[must_use]
+pub fn pi_credential(base_url: &str, api_key: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "api_key",
+        "key": api_key,
+        "env": { "LLAMA_BASE_URL": normalize_base_url(base_url) },
+    })
+}
+
+/// Strip a trailing `/v1` and trailing slashes, as Pi does before storing.
+///
+/// Writing a URL Pi would normalise differently makes the settings look changed on
+/// every run, so we store exactly what it would.
+#[must_use]
+pub fn normalize_base_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    trimmed.strip_suffix("/v1").unwrap_or(trimmed).to_owned()
+}
+
+/// Point Pi at our gateway.
+///
+/// Writes two files, because the credential alone is not enough: Pi builds its provider
+/// registry from the cached model catalogue, so with no catalogue entry the provider
+/// does not exist at all and `--provider llama.cpp` fails with "Unknown provider".
+///
+/// # Errors
+/// If either file cannot be read, is not a JSON object, or cannot be written.
+pub fn configure_pi(base_url: &str, api_key: &str, models: &[PiModel]) -> anyhow::Result<Outcome> {
+    let credential = merge_json(
+        &pi_auth_path()?,
+        PI_PROVIDER_ID,
+        pi_credential(base_url, api_key),
+    )?;
+
+    let catalogue = serde_json::json!({
+        "models": models
+            .iter()
+            .map(|m| pi_model_entry(m, base_url))
+            .collect::<Vec<_>>(),
+        "checkedAt": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0),
+    });
+    let catalogue = merge_json(&pi_models_store_path()?, PI_PROVIDER_ID, catalogue)?;
+
+    match (credential, catalogue) {
+        (None, None) => Ok(Outcome::AlreadyConfigured),
+        (a, b) => Ok(Outcome::Configured { backup: a.or(b) }),
+    }
+}
+
+/// Set `key` to `value` in a JSON object file, backing it up if that changes anything.
+///
+/// Returns the backup path when a write happened, `None` when the file already said
+/// what we wanted. Volatile bookkeeping fields are ignored in the comparison, or the
+/// catalogue would look changed on every run and rewrite the file each time.
+fn merge_json(path: &Path, key: &str, value: serde_json::Value) -> anyhow::Result<Option<PathBuf>> {
+    anyhow::ensure!(
+        path.exists(),
+        "{} does not exist - run pi at least once first",
+        path.display()
+    );
+
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut root: serde_json::Value =
+        serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+    let object = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("{} is not a JSON object", path.display()))?;
+
+    if object
+        .get(key)
+        .is_some_and(|existing| stable_part(existing) == stable_part(&value))
+    {
+        return Ok(None);
+    }
+
+    let backup = back_up(path)?;
+    object.insert(key.to_owned(), value);
+    write_atomically(path, &format!("{}\n", serde_json::to_string_pretty(&root)?))?;
+    Ok(Some(backup))
+}
+
+/// A value with volatile bookkeeping fields removed, for comparison.
+fn stable_part(value: &serde_json::Value) -> serde_json::Value {
+    let mut copy = value.clone();
+    if let Some(o) = copy.as_object_mut() {
+        o.remove("checkedAt");
+        o.remove("lastModified");
+        o.remove("etag");
+    }
+    copy
+}
+
+/// Remove our entries from both of Pi's files, leaving everything else alone.
+///
+/// # Errors
+/// If a file cannot be read or written.
+pub fn unconfigure_pi() -> anyhow::Result<bool> {
+    let mut removed = false;
+    for path in [pi_auth_path()?, pi_models_store_path()?] {
+        if !path.exists() {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path)?;
+        let mut root: serde_json::Value = serde_json::from_str(&raw)?;
+        let Some(object) = root.as_object_mut() else {
+            continue;
+        };
+        if object.remove(PI_PROVIDER_ID).is_none() {
+            continue;
+        }
+        back_up(&path)?;
+        write_atomically(
+            &path,
+            &format!("{}\n", serde_json::to_string_pretty(&root)?),
+        )?;
+        removed = true;
+    }
+    Ok(removed)
+}
+
+/// Copy a file next to itself with a timestamped suffix.
+fn back_up(path: &Path) -> anyhow::Result<PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let name = format!(
+        "{}.ailocal-{stamp}.bak",
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    );
+    let backup = path.with_file_name(name);
+    std::fs::copy(path, &backup)
+        .with_context(|| format!("backing up {} to {}", path.display(), backup.display()))?;
+    Ok(backup)
+}
+
+/// Write via a temporary file and rename, so an interrupted write cannot truncate
+/// somebody else's credential store.
+fn write_atomically(path: &Path, contents: &str) -> anyhow::Result<()> {
+    let temp = path.with_extension("ailocal-tmp");
+    std::fs::write(&temp, contents).with_context(|| format!("writing {}", temp.display()))?;
+
+    // Preserve the original's permissions, since this file holds credentials.
+    if let Ok(meta) = std::fs::metadata(path) {
+        std::fs::set_permissions(&temp, meta.permissions()).ok();
+    }
+    std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_urls_are_normalised_the_way_pi_stores_them() {
+        for (input, want) in [
+            ("http://127.0.0.1:8081", "http://127.0.0.1:8081"),
+            ("http://127.0.0.1:8081/", "http://127.0.0.1:8081"),
+            ("http://127.0.0.1:8081/v1", "http://127.0.0.1:8081"),
+            ("http://127.0.0.1:8081/v1/", "http://127.0.0.1:8081"),
+            ("  http://host:9/v1  ", "http://host:9"),
+        ] {
+            assert_eq!(normalize_base_url(input), want, "for {input:?}");
+        }
+    }
+
+    /// The stored value has to be byte-identical to what Pi would write, or every run
+    /// looks like a change and rewrites the file.
+    #[test]
+    fn credential_matches_pi_login_output() {
+        let cred = pi_credential("http://127.0.0.1:8081/v1", "ail_secret");
+        assert_eq!(cred["type"], "api_key");
+        assert_eq!(cred["key"], "ail_secret");
+        assert_eq!(cred["env"]["LLAMA_BASE_URL"], "http://127.0.0.1:8081");
+    }
+
+    #[test]
+    fn the_same_settings_produce_an_identical_credential() {
+        assert_eq!(
+            pi_credential("http://h:1", "k"),
+            pi_credential("http://h:1/v1/", "k"),
+        );
+    }
+}

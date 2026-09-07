@@ -8,6 +8,7 @@ pub mod config;
 pub mod download;
 pub mod gateway;
 pub mod gguf;
+pub mod harness;
 pub mod registry;
 pub mod serve;
 pub mod source;
