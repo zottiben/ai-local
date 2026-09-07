@@ -3,8 +3,10 @@
 //! The binary is a thin shell over this library, so the logic that decides whether a
 //! model may be loaded is testable without a GPU present.
 
+pub mod auth;
 pub mod config;
 pub mod download;
+pub mod gateway;
 pub mod gguf;
 pub mod registry;
 pub mod serve;

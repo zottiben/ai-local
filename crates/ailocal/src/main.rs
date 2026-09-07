@@ -1,7 +1,10 @@
 //! `ailocal` - manage local LLMs and expose them to coding harnesses.
 
+use std::sync::Arc;
+
 use ailocal::{
-    config::Config, download, gguf, registry, registry::Fit, serve, source::Source, vram,
+    auth, config::Config, download, gateway, gguf, registry, registry::Fit, serve, source::Source,
+    vram,
 };
 use clap::{Args, Parser, Subcommand};
 
@@ -28,6 +31,24 @@ enum Command {
     Ps,
     /// Stop the running model.
     Stop,
+    /// The authenticated OpenAI-compatible front end.
+    #[command(subcommand)]
+    Gateway(GatewayCmd),
+}
+
+#[derive(Subcommand)]
+enum GatewayCmd {
+    /// Run the gateway in the foreground.
+    Run {
+        #[arg(long, default_value_t = 8081)]
+        port: u16,
+        /// Bind address. Leave as loopback unless something else fronts it - the
+        /// the tunnel host tunnel reaches this host over the LAN, so 0.0.0.0 is needed there.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+    },
+    /// Print the API key, creating one if there is none.
+    Key,
 }
 
 #[derive(Args)]
@@ -45,6 +66,14 @@ struct ServeArgs {
 
     #[arg(long, default_value = serve::DEFAULT_HOST)]
     host: String,
+
+    /// Whether the model may think before answering: auto, on or off.
+    ///
+    /// Defaults to the configured value. `off` forces a direct answer, which matters
+    /// because these models can spend an entire token budget reasoning and return
+    /// empty content.
+    #[arg(long)]
+    reasoning: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -79,6 +108,8 @@ enum ConfigCmd {
 }
 
 fn main() -> anyhow::Result<()> {
+    quit_quietly_on_broken_pipe();
+
     match Cli::parse().command {
         Command::Budget => budget(),
         Command::Model(ModelCmd::Ls) => model_ls(),
@@ -89,6 +120,12 @@ fn main() -> anyhow::Result<()> {
         Command::Serve(args) => serve_model(&args),
         Command::Ps => ps(),
         Command::Stop => stop(),
+        Command::Gateway(GatewayCmd::Run { port, host }) => gateway_run(&host, port),
+        Command::Gateway(GatewayCmd::Key) => {
+            println!("{}", auth::load_or_create()?);
+            eprintln!("stored in {}", auth::key_path()?.display());
+            Ok(())
+        }
     }
 }
 
@@ -123,10 +160,11 @@ fn model_ls() -> anyhow::Result<()> {
     let cfg = Config::load()?;
     let cache: vram::CacheType = cfg.cache_type.parse()?;
 
-    // Fall back to a nominal desktop footprint so the listing still works headless,
-    // e.g. over SSH or in CI, where there is no amdgpu node to read.
-    let desktop = ailocal::vram_used_mib().unwrap_or(900);
-    let budget = vram::Budget::new(desktop);
+    // Budget against what would be free after evicting whatever is loaded. Using live
+    // VRAM instead reports the running model as unable to fit, which is absurd on its
+    // face and was exactly what this printed before.
+    let budget = serve::budget_for_next_launch()
+        .unwrap_or_else(|_| vram::Budget::new(ailocal::vram_used_mib().unwrap_or(900)));
 
     let models = registry::scan(&cfg.models_dir)?;
     if models.is_empty() {
@@ -281,7 +319,6 @@ fn model_rm(name: &str) -> anyhow::Result<()> {
 
 fn serve_model(args: &ServeArgs) -> anyhow::Result<()> {
     let cfg = Config::load()?;
-    let cache: vram::CacheType = cfg.cache_type.parse()?;
     let models = registry::scan(&cfg.models_dir)?;
     let model = models.iter().find(|m| m.name == args.name).ok_or_else(|| {
         anyhow::anyhow!(
@@ -296,8 +333,11 @@ fn serve_model(args: &ServeArgs) -> anyhow::Result<()> {
         context: args.ctx,
         host: args.host.clone(),
         port: args.port,
-        cache,
-        api_key: None,
+        reasoning: args
+            .reasoning
+            .clone()
+            .unwrap_or_else(|| cfg.reasoning.clone()),
+        ..serve::Options::from_config(&cfg)?
     };
 
     // Resolve the context before announcing anything, so a refusal is not preceded by
@@ -315,14 +355,48 @@ fn serve_model(args: &ServeArgs) -> anyhow::Result<()> {
 
     let instance = serve::start(model, &budget, &opts)?;
     println!(
-        "{} up at {} with {} context, {} KV",
+        "{} up at {} with {} context, {} KV, reasoning {}",
         instance.model,
         instance.base_url(),
         format_count(instance.context),
-        instance.cache_type
+        instance.cache_type,
+        opts.reasoning
     );
     println!("vram now {} MiB", ailocal::vram_used_mib()?);
     Ok(())
+}
+
+fn gateway_run(host: &str, port: u16) -> anyhow::Result<()> {
+    let state = Arc::new(gateway::AppState {
+        key: auth::load_or_create()?,
+        config: Config::load()?,
+        // No timeout: a cold model load can take tens of seconds and a streamed
+        // completion runs for minutes. The upstream is a local process, so a hung
+        // request is a bug to see rather than something to paper over with a deadline.
+        client: reqwest::Client::builder().build()?,
+    });
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    runtime.block_on(async move {
+        let listener = tokio::net::TcpListener::bind((host, port)).await?;
+        println!("gateway listening on http://{host}:{port}");
+        println!("  key in {}", auth::key_path()?.display());
+        match serve::running()? {
+            Some(i) => println!("  currently loaded: {} ({} ctx)", i.model, i.context),
+            None => println!("  no model loaded; one will start on first request"),
+        }
+
+        axum::serve(listener, gateway::router(state))
+            .with_graceful_shutdown(async {
+                tokio::signal::ctrl_c().await.ok();
+                println!("\nshutting down");
+            })
+            .await?;
+        Ok::<_, anyhow::Error>(())
+    })
 }
 
 fn ps() -> anyhow::Result<()> {
@@ -346,6 +420,26 @@ fn stop() -> anyhow::Result<()> {
         Some(i) => println!("stopped {} (pid {})", i.model, i.pid),
     }
     Ok(())
+}
+
+/// Exit cleanly when output is piped into something that stops reading.
+///
+/// Rust ignores SIGPIPE, so `ailocal model ls | head` makes `println!` panic on EPIPE
+/// and prints a backtrace where a Unix tool should simply stop. Restoring the default
+/// disposition needs `unsafe`, which the workspace forbids, so this catches the panic
+/// instead and exits as if the write had succeeded.
+fn quit_quietly_on_broken_pipe() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let broken_pipe = info
+            .payload()
+            .downcast_ref::<String>()
+            .is_some_and(|m| m.contains("Broken pipe"));
+        if broken_pipe {
+            std::process::exit(0);
+        }
+        previous(info);
+    }));
 }
 
 /// Render a token count as `32k` / `256k`, falling back to the exact number.

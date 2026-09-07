@@ -27,6 +27,20 @@ pub struct Config {
     /// throughput cost, and is what makes long contexts fit.
     #[serde(default = "default_cache_type")]
     pub cache_type: String,
+
+    /// Whether models may emit chain-of-thought: `auto`, `on` or `off`.
+    ///
+    /// Both current models are reasoning models, and they spend heavily on it - gemma4
+    /// burned ~700 tokens of thinking on "say hello in three words" and never reached
+    /// an answer. Thinking goes to a separate `reasoning_content` field, so an
+    /// exhausted budget looks to a client like an empty reply. `off` trades that
+    /// capability for a direct answer.
+    #[serde(default = "default_reasoning")]
+    pub reasoning: String,
+
+    /// Token ceiling on thinking. `-1` is unrestricted, `0` ends it immediately.
+    #[serde(default = "default_reasoning_budget")]
+    pub reasoning_budget: i64,
 }
 
 fn default_models_dir() -> PathBuf {
@@ -41,12 +55,22 @@ fn default_cache_type() -> String {
     "q8_0".to_owned()
 }
 
+fn default_reasoning() -> String {
+    "auto".to_owned()
+}
+
+fn default_reasoning_budget() -> i64 {
+    -1
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             models_dir: default_models_dir(),
             hf_home: default_hf_home(),
             cache_type: default_cache_type(),
+            reasoning: default_reasoning(),
+            reasoning_budget: default_reasoning_budget(),
         }
     }
 }
@@ -122,6 +146,8 @@ mod tests {
         assert_eq!(c.models_dir, Path::new("/tmp/models"));
         assert_eq!(c.hf_home, default_hf_home());
         assert_eq!(c.cache_type, "q8_0");
+        assert_eq!(c.reasoning, "auto");
+        assert_eq!(c.reasoning_budget, -1);
     }
 
     #[test]

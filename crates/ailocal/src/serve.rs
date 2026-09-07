@@ -169,6 +169,10 @@ pub struct Options {
     pub cache: CacheType,
     /// Bearer token llama-server requires on requests, if any.
     pub api_key: Option<String>,
+    /// `auto`, `on` or `off` - see [`crate::config::Config::reasoning`].
+    pub reasoning: String,
+    /// Token ceiling on thinking; `-1` leaves it unrestricted.
+    pub reasoning_budget: i64,
 }
 
 impl Default for Options {
@@ -179,7 +183,24 @@ impl Default for Options {
             port: DEFAULT_PORT,
             cache: CacheType::Q8_0,
             api_key: None,
+            reasoning: "auto".to_owned(),
+            reasoning_budget: -1,
         }
+    }
+}
+
+impl Options {
+    /// Options taking their defaults from the config file.
+    ///
+    /// # Errors
+    /// If the configured cache type is not one llama.cpp accepts.
+    pub fn from_config(config: &crate::config::Config) -> anyhow::Result<Self> {
+        Ok(Self {
+            cache: config.cache_type.parse()?,
+            reasoning: config.reasoning.clone(),
+            reasoning_budget: config.reasoning_budget,
+            ..Self::default()
+        })
     }
 }
 
@@ -262,9 +283,13 @@ pub fn start(model: &Model, budget: &Budget, opts: &Options) -> anyhow::Result<I
         .args(["--host", &opts.host])
         .args(["--port", &opts.port.to_string()])
         .args(["-a", &model.name])
+        .args(["--reasoning", &opts.reasoning])
         .arg("--no-webui")
         .stdout(out)
         .stderr(err);
+    if opts.reasoning_budget >= 0 {
+        cmd.args(["--reasoning-budget", &opts.reasoning_budget.to_string()]);
+    }
     if let Some(key) = &opts.api_key {
         cmd.args(["--api-key", key]);
     }
