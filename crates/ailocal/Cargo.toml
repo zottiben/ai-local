@@ -1,0 +1,15 @@
+[package]
+name = "ailocal"
+version = "0.1.0"
+description = "Manage local LLMs and expose them to coding harnesses"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Deliberately one job running the gates in the same order as the local pre-pr
+  # check, so CI can never reject something that passed locally.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Respects rust-toolchain.toml, so CI and every dev machine agree on the
+      # compiler and on which lints exist.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-workspaces: .
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build
+        run: cargo build --workspace --release
+
+  # The bench scripts encode the VRAM ceiling that keeps this machine alive.
+  # A syntax error in them is a real outage, so they get parsed too.
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Shell syntax
+        run: for f in scripts/bench/*.sh; do bash -n "$f"; done
+
+      - name: Python syntax
+        run: python3 -m py_compile scripts/bench/*.py
+
+      - name: Shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -S warning scripts/bench/*.sh
