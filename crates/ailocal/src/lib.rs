@@ -4,8 +4,10 @@
 //! model may be loaded is testable without a GPU present.
 
 pub mod config;
+pub mod download;
 pub mod gguf;
 pub mod registry;
+pub mod source;
 pub mod vram;
 
 /// VRAM currently in use, in MiB, read from the amdgpu sysfs node.

@@ -14,7 +14,8 @@ Inference is llama.cpp's `llama-server`, Vulkan backend. Models are GGUF from Hu
 **Commands** (from repo root)
 - Build / lint / test: `cargo build`, `cargo clippy -- -D warnings`, `cargo test`
 - Plan: `aip status` (the build plan is in ai-planner, not in a markdown file)
-- Pull a model fast: `scripts/bench/pull_ollama.sh <name> <tag>`
+- Install a model: `ailocal model install ollama:<name>:<tag>` (or `hf:<owner>/<repo>/<file>`)
+- What is on disk and what fits: `ailocal model ls`
 - Check a model's real context limit: `scripts/bench/ctx_probe.sh <model.gguf> q8_0`
 
 The Rust workspace is established by PR0; until then the cargo commands have nothing to

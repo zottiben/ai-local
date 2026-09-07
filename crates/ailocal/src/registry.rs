@@ -14,6 +14,53 @@ use crate::vram::{Budget, CacheType, KvLayout};
 /// info of a large model without pulling gigabytes through the page cache.
 const HEAD_BYTES: usize = 16 << 20;
 
+/// Smallest context worth having a model for at all.
+pub const MIN_USEFUL_CONTEXT: u64 = 4096;
+
+/// Whether a model can run on this machine.
+///
+/// The cases are kept distinct on purpose. An earlier version collapsed 'metadata
+/// unreadable' and 'weights do not fit' into one `None` and proceeded on both, which
+/// downloaded 16 GB of a model that could never load. Not knowing and knowing it will
+/// fail are opposite answers, and only one of them is safe to continue from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fit {
+    /// Metadata could not be read, so no judgement was possible.
+    Unknown,
+    /// Runs, with this much context.
+    Fits(u64),
+    /// Loads, but with too little context to be worth it.
+    ContextTooSmall(u64),
+    /// The weights alone exceed the budget.
+    WeightsTooLarge,
+}
+
+/// Decide whether a model fits, given what we know about it.
+///
+/// `kv` is `None` when the GGUF metadata could not be parsed - distinct from the
+/// weights being too large, which [`Budget::max_context`] signals with its own `None`.
+#[must_use]
+pub fn assess(
+    kv: Option<KvLayout>,
+    trained_context: Option<u64>,
+    budget: &Budget,
+    cache: CacheType,
+    weights_mib: u64,
+) -> Fit {
+    let Some(kv) = kv else {
+        return Fit::Unknown;
+    };
+    let Some(ctx) = budget.max_context(&kv, cache, weights_mib) else {
+        return Fit::WeightsTooLarge;
+    };
+    let ctx = trained_context.map_or(ctx, |trained| ctx.min(trained));
+    if ctx >= MIN_USEFUL_CONTEXT {
+        Fit::Fits(ctx)
+    } else {
+        Fit::ContextTooSmall(ctx)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Model {
     pub name: String,
@@ -159,5 +206,66 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    fn qwen36_27b() -> KvLayout {
+        KvLayout::dense(65, 4, 256, 256)
+    }
+
+    /// The regression: qwen3.6:27b at Q4_K_M is 16057 MiB against ~13000 MiB available.
+    /// This must be a refusal, not an "unknown" that installs 16 GB anyway.
+    #[test]
+    fn oversized_weights_are_a_refusal_not_an_unknown() {
+        let fit = assess(
+            Some(qwen36_27b()),
+            Some(262_144),
+            &Budget::new(900),
+            CacheType::Q8_0,
+            16_057,
+        );
+        assert_eq!(fit, Fit::WeightsTooLarge);
+        assert_ne!(
+            fit,
+            Fit::Unknown,
+            "must not be confused with missing metadata"
+        );
+    }
+
+    #[test]
+    fn unreadable_metadata_is_unknown_not_a_refusal() {
+        assert_eq!(
+            assess(None, None, &Budget::new(900), CacheType::Q8_0, 100),
+            Fit::Unknown
+        );
+    }
+
+    /// A 27B at IQ3_XXS loads and holds ~16k, which is worth downloading.
+    #[test]
+    fn a_model_that_loads_with_usable_context_fits() {
+        match assess(
+            Some(qwen36_27b()),
+            Some(262_144),
+            &Budget::new(900),
+            CacheType::Q8_0,
+            10_428,
+        ) {
+            Fit::Fits(ctx) => assert!((14_000..18_000).contains(&ctx), "got {ctx}"),
+            other => panic!("expected Fits, got {other:?}"),
+        }
+    }
+
+    /// Barely loading is not the same as being useful.
+    #[test]
+    fn a_model_with_a_sliver_of_context_is_refused() {
+        match assess(
+            Some(qwen36_27b()),
+            Some(262_144),
+            &Budget::new(900),
+            CacheType::Q8_0,
+            12_900,
+        ) {
+            Fit::ContextTooSmall(ctx) => assert!(ctx < MIN_USEFUL_CONTEXT, "got {ctx}"),
+            other => panic!("expected ContextTooSmall, got {other:?}"),
+        }
     }
 }
