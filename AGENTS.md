@@ -20,6 +20,7 @@ Inference is llama.cpp's `llama-server`, Vulkan backend. Models are GGUF from Hu
 - Expose it to harnesses: `ailocal gateway run` (key via `ailocal gateway key`)
 - Point a harness at it: `ailocal harness configure pi|claude-code` (undo with `unconfigure`)
 - Run it 24/7: `ailocal service install`, then `ailocal service status`
+- Score a model: `ailocal extras install eval`, then `ailocal eval run`
 - Check a model's real context limit: `scripts/bench/ctx_probe.sh <model.gguf> q8_0`
 
 The Rust workspace is established by PR0; until then the cargo commands have nothing to
@@ -124,4 +125,16 @@ Anthropic API.
 ### 8. Retrieval for facts, fine-tuning for behaviour
 Codebase knowledge is a retrieval problem, not a QLoRA problem. An adapter trained on a
 repo produces confident wrong API signatures and is stale on the next commit. No
-fine-tuning lands before the eval harness (PR11) can prove it helped.
+fine-tuning lands before the eval harness can prove it helped - it exists now, as the
+`eval` extra, and `held-out` is the split an adapter must be measured on.
+
+### 9. The core binary stays small; eval and training are opt-in extras
+`ailocal` is what a fresh machine curl-pipes and what runs 24/7 under systemd. Anything
+occasional or heavy is a separate binary in `crates/ailocal-<name>`, released from the
+same tag as its own asset and reached as an external subcommand (`ailocal eval ...` runs
+`ailocal-eval`). Adding one means: a workspace member, an entry in `extras::EXTRAS`, the
+name in install.sh's `KNOWN_EXTRAS`, and the binary in release.yml's build loop.
+
+Versions move in lockstep - `ailocal extras install` pins to the core's own version and
+`ailocal update` refreshes whatever is installed - because a core and an extra from
+different releases is the one failure this split can create on its own.

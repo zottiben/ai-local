@@ -22,6 +22,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ailocal-eval"
+version = "0.2.0"
+dependencies = [
+ "ailocal",
+ "anyhow",
+ "clap",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -17,15 +17,33 @@ use anyhow::{Context as _, bail};
 /// (any URL curl accepts, including `file://`, which is how the tests run offline).
 const INSTALL_URL: &str = "https://zottiben.github.io/ai-local/install.sh";
 
+/// `ailocal update`: refresh the core binary and every extra installed beside it.
+///
+/// Extras are carried along rather than left behind, because a core and an extra from
+/// different releases is the one failure this split CLI can create on its own. The
+/// script's `--check` path exits before installing anything, so `update --check` still
+/// only reports.
+///
+/// # Errors
+/// If curl is missing, the script cannot be downloaded, or it cannot be run.
+pub fn run(args: &[String]) -> anyhow::Result<i32> {
+    let mut all = args.to_vec();
+    for extra in crate::extras::installed() {
+        all.push("--extra".to_owned());
+        all.push(extra.to_owned());
+    }
+    run_script(&all)
+}
+
 /// Fetch the published install script and run it, forwarding `args` and inheriting
 /// stdio so the script's own progress output is what the user sees.
 ///
 /// # Errors
 /// If curl is missing, the script cannot be downloaded, or it cannot be run.
-pub fn run(args: &[String]) -> anyhow::Result<i32> {
+pub fn run_script(args: &[String]) -> anyhow::Result<i32> {
     if which("curl").is_none() {
         bail!(
-            "`ailocal update` needs curl on your PATH. Install curl, or download a \
+            "installing needs curl on your PATH. Install curl, or download a \
              build from https://github.com/zottiben/ai-local/releases/latest"
         );
     }

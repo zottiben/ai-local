@@ -23,6 +23,14 @@ pub struct Config {
     #[serde(default = "default_hf_home")]
     pub hf_home: PathBuf,
 
+    /// Where the `eval` extra keeps run records and its compile scratch.
+    ///
+    /// On the big disk with everything else. Reports themselves are kilobytes, but the
+    /// scratch directory holds compiled test binaries, and the training slices this
+    /// eval gates will put datasets alongside them.
+    #[serde(default = "default_eval_dir")]
+    pub eval_dir: PathBuf,
+
     /// KV cache quantisation. `q8_0` roughly halves cache size for no measurable
     /// throughput cost, and is what makes long contexts fit.
     #[serde(default = "default_cache_type")]
@@ -67,6 +75,10 @@ fn default_hf_home() -> PathBuf {
     Path::new(DATA_ROOT).join("hf")
 }
 
+fn default_eval_dir() -> PathBuf {
+    Path::new(DATA_ROOT).join("eval")
+}
+
 fn default_cache_type() -> String {
     "q8_0".to_owned()
 }
@@ -92,6 +104,7 @@ impl Default for Config {
         Self {
             models_dir: default_models_dir(),
             hf_home: default_hf_home(),
+            eval_dir: default_eval_dir(),
             cache_type: default_cache_type(),
             reasoning: default_reasoning(),
             reasoning_budget: default_reasoning_budget(),
@@ -164,6 +177,10 @@ mod tests {
         assert!(
             c.hf_home.starts_with(DATA_ROOT),
             "HF_HOME must not default into /home"
+        );
+        assert!(
+            c.eval_dir.starts_with(DATA_ROOT),
+            "eval scratch and datasets must not default onto the small partitions"
         );
     }
 

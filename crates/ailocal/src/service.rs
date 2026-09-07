@@ -316,6 +316,46 @@ pub fn disable(service: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Stop a service without changing whether it starts on its own.
+///
+/// Distinct from [`disable`], which also un-enables it. This is for handing the model
+/// over temporarily - the eval harness takes ownership of llama-server to control the
+/// reasoning flag, and a supervisor that restarts it underneath would fight for it.
+///
+/// On launchd this unloads the job, because there is no stop that survives a
+/// `KeepAlive`. [`start`] loads it again, so the pair round-trips.
+///
+/// # Errors
+/// If the service manager cannot be run.
+pub fn stop(service: &str) -> anyhow::Result<()> {
+    match manager() {
+        Manager::Systemd => {
+            systemctl(&["stop", service])?;
+        }
+        Manager::Launchd => {
+            launchctl(&["bootout", &domain_target(service)])?;
+        }
+    }
+    Ok(())
+}
+
+/// Start a service that is already installed, without enabling it.
+///
+/// # Errors
+/// If the service manager cannot be run.
+pub fn start(service: &str) -> anyhow::Result<()> {
+    match manager() {
+        Manager::Systemd => {
+            systemctl(&["start", service])?;
+        }
+        Manager::Launchd => {
+            let path = unit_dir()?.join(file_name(service));
+            launchctl(&["bootstrap", &domain(), &path.display().to_string()])?;
+        }
+    }
+    Ok(())
+}
+
 /// Whether a service is currently running.
 #[must_use]
 pub fn is_active(service: &str) -> bool {

@@ -5,6 +5,11 @@ name: Release
 # Builds Linux binaries and a universal macOS binary, publishes a GitHub Release and
 # uploads checksums.txt. Asset names must match what install.sh expects.
 #
+# The optional extras ship as their own assets from this same tag, so that the core
+# download stays small for machines that only serve models. They are versioned in
+# lockstep with it, which the verify job enforces - a core and an extra from different
+# releases is the one failure a split CLI can create on its own.
+#
 # macOS ships one universal binary rather than two per-arch ones: it costs a few MB and
 # removes a whole class of "wrong build for this Mac" reports. It is ad-hoc signed -
 # curl downloads carry no quarantine attribute, so Gatekeeper does not prompt.
@@ -26,12 +31,14 @@ jobs:
       - name: Check version
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          CARGO_VERSION="$(grep '^version' crates/ailocal/Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
-          echo "tag=$VERSION cargo=$CARGO_VERSION"
-          if [ "$VERSION" != "$CARGO_VERSION" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $CARGO_VERSION" >&2
-            exit 1
-          fi
+          for crate in ailocal ailocal-eval; do
+            CARGO_VERSION="$(grep '^version' "crates/${crate}/Cargo.toml" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+            echo "tag=$VERSION ${crate}=$CARGO_VERSION"
+            if [ "$VERSION" != "$CARGO_VERSION" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match ${crate}'s version $CARGO_VERSION" >&2
+              exit 1
+            fi
+          done
 
   linux:
     name: Linux ${{ matrix.arch }}
@@ -54,15 +61,19 @@ jobs:
         run: |
           set -eux
           VERSION="${GITHUB_REF_NAME#v}"
-          cargo build --release -p ailocal --target ${{ matrix.target }}
+          cargo build --release --workspace --target ${{ matrix.target }}
           mkdir -p stage
-          cp "target/${{ matrix.target }}/release/ailocal" stage/ailocal
-          tar czf "ailocal-v${VERSION}-linux-${{ matrix.arch }}.tar.gz" -C stage ailocal
+          # One archive per binary, each holding just that binary, so install.sh can
+          # fetch an extra without pulling the core down again.
+          for binary in ailocal ailocal-eval; do
+            cp "target/${{ matrix.target }}/release/${binary}" "stage/${binary}"
+            tar czf "${binary}-v${VERSION}-linux-${{ matrix.arch }}.tar.gz" -C stage "${binary}"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.arch }}
-          path: ailocal-v*-linux-*.tar.gz
+          path: ailocal*-v*-linux-*.tar.gz
           if-no-files-found: error
 
   macos:
@@ -80,21 +91,23 @@ jobs:
         run: |
           set -eux
           VERSION="${GITHUB_REF_NAME#v}"
-          cargo build --release -p ailocal --target aarch64-apple-darwin
-          cargo build --release -p ailocal --target x86_64-apple-darwin
+          cargo build --release --workspace --target aarch64-apple-darwin
+          cargo build --release --workspace --target x86_64-apple-darwin
           mkdir -p stage
-          lipo -create -output stage/ailocal \
-            target/aarch64-apple-darwin/release/ailocal \
-            target/x86_64-apple-darwin/release/ailocal
-          # Ad-hoc signature: without one, arm64 macOS refuses to exec the binary at all.
-          codesign --force --sign - stage/ailocal
-          lipo -info stage/ailocal
-          tar czf "ailocal-v${VERSION}-macos-universal.tar.gz" -C stage ailocal
+          for binary in ailocal ailocal-eval; do
+            lipo -create -output "stage/${binary}" \
+              "target/aarch64-apple-darwin/release/${binary}" \
+              "target/x86_64-apple-darwin/release/${binary}"
+            # Ad-hoc signature: without one, arm64 macOS refuses to exec the binary at all.
+            codesign --force --sign - "stage/${binary}"
+            lipo -info "stage/${binary}"
+            tar czf "${binary}-v${VERSION}-macos-universal.tar.gz" -C stage "${binary}"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
           name: macos-universal
-          path: ailocal-v*-macos-universal.tar.gz
+          path: ailocal*-v*-macos-universal.tar.gz
           if-no-files-found: error
 
   release:
@@ -107,7 +120,7 @@ jobs:
           merge-multiple: true
 
       - name: Generate checksums
-        run: sha256sum ailocal-v* > checksums.txt
+        run: sha256sum ailocal*-v* > checksums.txt
 
       - name: Publish
         env:
@@ -117,4 +130,4 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes \
-            ailocal-v* checksums.txt
+            ailocal*-v* checksums.txt

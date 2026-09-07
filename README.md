@@ -58,6 +58,8 @@ desktop session dies.
 | `ailocal harness configure pi\|claude-code` | point a harness at it |
 | `ailocal service install` / `status` | systemd user units for 24/7 |
 | `ailocal update` | install the latest release in place |
+| `ailocal extras list` / `install <name>` | optional companions, see below |
+| `ailocal eval run` | score a model on a coding suite (needs the `eval` extra) |
 
 ## The gateway
 
@@ -154,6 +156,54 @@ specific quantisation to make something fit, that comes from Hugging Face.
 
 Neither source needs the vendor's CLI installed. For gated or rate-limited Hugging Face
 repos, put a token at `$HF_HOME/token` (`/mnt/kingston/ailocal/hf/token` by default).
+
+## Extras
+
+The core binary is what a fresh machine downloads and what runs under systemd all day,
+so it stays small. Anything occasional and heavier ships as a separate binary released
+from the same tag, installed only if you want it:
+
+```
+ailocal extras install eval
+```
+
+They are reached through the core CLI as subcommands - `ailocal eval ...` runs
+`ailocal-eval` - and `ailocal update` keeps whichever ones you have installed in step
+with the core, since a mismatched pair is the one failure a split CLI can create by
+itself.
+
+### `eval` - is this model actually any good here?
+
+A coding suite scored by programs rather than by another model, so the number means the
+same thing every time it is produced. Where the answer is code, the check is `rustc`:
+compiling and passing its tests are separate checks with different weights, so "writes
+plausible Rust that does not work" is visibly different from "gets it right".
+
+```
+ailocal eval run                                   # whatever is loaded
+ailocal eval run --reasoning off --reasoning on    # two arms, side by side
+ailocal eval run --model a --model b               # two models, side by side
+ailocal eval compare <run-a> <run-b>
+```
+
+```
+ARM                                 SCORE   PASS   EMPTY    CUT   TOK/S
+gemma4-12b-Q4_K_M (reasoning off)     91%    86%       0      0    23.9
+```
+
+`EMPTY` and `CUT` are there because reasoning models fail in a way a score alone hides:
+chain-of-thought goes to `reasoning_content` and `content` stays empty until it is done,
+so a model that thinks past its token budget returns *nothing* rather than something
+short. To a harness that looks like a broken model, not a slow one.
+
+Reasoning is a llama-server launch flag, so comparing modes means reloading the model.
+The run pauses the model service for its duration and starts it again afterwards,
+including if it fails part way.
+
+**It runs code the model writes**, under a timeout and without a sandbox - which is
+inherent to checking whether code works, and is what every coding benchmark does, but
+is worth knowing before you run it. `--no-exec` compiles without running, and reports
+those checks as unjudged rather than failed.
 
 ## Downloads
 

@@ -1,0 +1,25 @@
+[package]
+name = "ailocal-eval"
+version = "0.2.0"
+description = "Score local models on a coding task set, and compare two side by side"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The core library, for config, the model registry and the VRAM-aware loader. An eval
+# that loaded models by some other route would not be measuring what `ailocal serve`
+# actually does.
+ailocal = { path = "../ailocal" }
+
+anyhow.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true

@@ -46,6 +46,19 @@ pub struct Instance {
     /// like a permanent cost and refuses every replacement.
     #[serde(default)]
     pub desktop_mib: u64,
+    /// `--reasoning` this server was launched with.
+    ///
+    /// A launch-time flag with no per-request equivalent, so the only way to know
+    /// whether the resident model is thinking is to have written it down. The eval
+    /// harness compares reasoning arms and would otherwise have to restart the model
+    /// for every task to be sure which mode it was in.
+    #[serde(default = "unknown_reasoning")]
+    pub reasoning: String,
+}
+
+/// What to assume for a state file written before `reasoning` was recorded.
+fn unknown_reasoning() -> String {
+    "?".to_owned()
 }
 
 impl Instance {
@@ -380,6 +393,7 @@ fn spawn(
         context,
         cache_type: opts.cache.as_llama_arg().to_owned(),
         desktop_mib,
+        reasoning: opts.reasoning.clone(),
     };
 
     match await_healthy(&instance) {
@@ -534,7 +548,19 @@ mod tests {
             context: 4096,
             cache_type: "q8_0".into(),
             desktop_mib,
+            reasoning: "auto".into(),
         }
+    }
+
+    /// State files written by an older build have no `reasoning` field, and must still
+    /// deserialise - otherwise an upgrade makes `ailocal ps` report nothing running
+    /// while llama-server is very much still holding the VRAM.
+    #[test]
+    fn a_state_file_without_reasoning_still_loads() {
+        let older = r#"{"pid":1,"model":"m","path":"/tmp/m.gguf","host":"127.0.0.1",
+                        "port":8080,"context":4096,"cache_type":"q8_0","desktop_mib":900}"#;
+        let parsed: Instance = serde_json::from_str(older).unwrap();
+        assert_eq!(parsed.reasoning, "?");
     }
 
     #[test]

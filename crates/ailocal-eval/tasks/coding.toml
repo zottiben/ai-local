@@ -1,0 +1,492 @@
+# The built-in coding suite.
+#
+# Every task is scored by a program, never by another model. Where the answer is code,
+# the check is `rustc`: "compiles" and "passes its tests" are separate checks with
+# different weights, so a model that writes plausible Rust that does not work scores
+# above one that writes prose and below one that gets it right.
+#
+# Each prompt states the exact signature to produce, because the test is appended to
+# the answer verbatim. That is deliberate - following an interface precisely is most of
+# what a model has to do inside a coding harness, and a model that renames the function
+# has failed at the task even if the algorithm is right.
+#
+# Splits: `dev` may be looked at while iterating on prompts or on the harness itself.
+# `held-out` may not, and is what a trained adapter must be measured on. Most of the
+# suite is held out on purpose.
+
+# --- writing a function from a specification ---------------------------------------
+
+[[task]]
+id = "rust-reverse-words"
+category = "write"
+split = "held-out"
+prompt = '''
+Write a Rust function with exactly this signature:
+
+    pub fn reverse_words(s: &str) -> String
+
+It returns the whitespace-separated words of `s` in reverse order, joined by single
+spaces. Any amount of whitespace separates words, and leading and trailing whitespace
+is ignored, so an input that is empty or all whitespace returns an empty string.
+
+Reply with only the code, in a single ```rust block.
+'''
+[[task.check]]
+kind = "rust_compiles"
+weight = 1.0
+[[task.check]]
+kind = "rust_test"
+weight = 3.0
+test = '''
+#[test]
+fn reverses() {
+    assert_eq!(reverse_words("hello world"), "world hello");
+    assert_eq!(reverse_words("  a  b   c "), "c b a");
+    assert_eq!(reverse_words("one"), "one");
+    assert_eq!(reverse_words(""), "");
+    assert_eq!(reverse_words("   "), "");
+}
+'''
+
+[[task]]
+id = "rust-mean-no-overflow"
+category = "edge-cases"
+split = "held-out"
+prompt = '''
+Write a Rust function with exactly this signature:
+
+    pub fn mean(xs: &[u32]) -> Option<u32>
+
+It returns the arithmetic mean of `xs`, rounded down, or `None` when `xs` is empty.
+It must not overflow: a slice of a thousand values each equal to `u32::MAX` has to
+return `Some(u32::MAX)`, not panic and not wrap.
+
+Reply with only the code, in a single ```rust block.
+'''
+[[task.check]]
+kind = "rust_compiles"
+weight = 1.0
+[[task.check]]
+kind = "rust_test"
+weight = 3.0
+test = '''
+#[test]
+fn averages() {
+    assert_eq!(mean(&[]), None);
+    assert_eq!(mean(&[1, 2, 3]), Some(2));
+    assert_eq!(mean(&[1, 2]), Some(1));
+    assert_eq!(mean(&[5]), Some(5));
+}
+
+#[test]
+fn does_not_overflow() {
+    assert_eq!(mean(&[u32::MAX; 4]), Some(u32::MAX));
+    assert_eq!(mean(&[u32::MAX; 1000]), Some(u32::MAX));
+}
+'''
+
+[[task]]
+id = "rust-dedup-order"
+category = "write"
+split = "held-out"
+prompt = '''
+Write a Rust function with exactly this signature:
+
+    pub fn dedup_preserve_order(xs: &[i64]) -> Vec<i64>
+
+It returns the values of `xs` with later duplicates removed, keeping the order of first
+appearance. Only adjacent duplicates being removed is not enough - `[3, 1, 3]` must
+become `[3, 1]`.
+
+Reply with only the code, in a single ```rust block.
+'''
+[[task.check]]
+kind = "rust_compiles"
+weight = 1.0
+[[task.check]]
+kind = "rust_test"
+weight = 3.0
+test = '''
+#[test]
+fn keeps_first_appearance() {
+    assert_eq!(dedup_preserve_order(&[3, 1, 3, 2, 1]), vec![3, 1, 2]);
+    assert_eq!(dedup_preserve_order(&[7, 7, 7]), vec![7]);
+    assert_eq!(dedup_preserve_order(&[]), Vec::<i64>::new());
+    assert_eq!(dedup_preserve_order(&[1, 2, 3]), vec![1, 2, 3]);
+}
+'''
+
+[[task]]
+id = "rust-top-n"
+category = "write"
+split = "held-out"
+prompt = '''
+Write a Rust function with exactly this signature:
+
+    pub fn top_n(counts: &[(String, u64)], n: usize) -> Vec<String>
+
+It returns the names of the `n` entries with the highest counts, highest first. Ties on
+the count are broken by the name in ascending alphabetical order. If `n` exceeds the
+number of entries, return them all.
+
+Reply with only the code, in a single ```rust block.
+'''
+[[task.check]]
+kind = "rust_compiles"
+weight = 1.0
+[[task.check]]
+kind = "rust_test"
+weight = 3.0
+test = '''
+#[test]
+fn ranks_and_breaks_ties_by_name() {
+    let counts = vec![
+        ("b".to_string(), 5),
+        ("a".to_string(), 5),
+        ("c".to_string(), 9),
+    ];
+    assert_eq!(top_n(&counts, 2), vec!["c".to_string(), "a".to_string()]);
+    assert_eq!(
+        top_n(&counts, 3),
+        vec!["c".to_string(), "a".to_string(), "b".to_string()]
+    );
+    assert_eq!(top_n(&counts, 10).len(), 3);
+    assert!(top_n(&counts, 0).is_empty());
+}
+'''
+
+# --- fixing code that is already there ----------------------------------------------
+
+[[task]]
+id = "rust-fix-binary-search"
+category = "fix"
+split = "held-out"
+prompt = '''
+This Rust binary search hangs forever on some inputs:
+
+```rust
+pub fn find(haystack: &[i32], needle: i32) -> Option<usize> {
+    let (mut lo, mut hi) = (0usize, haystack.len());
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if haystack[mid] == needle {
+            return Some(mid);
+        }
+        if haystack[mid] < needle {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    None
+}
+```
+
+`haystack` is sorted ascending. Fix it, keeping the signature exactly as it is.
+
+Reply with only the corrected code, in a single ```rust block.
+'''
+[[task.check]]
+kind = "rust_compiles"
+weight = 1.0
+[[task.check]]
+kind = "rust_test"
+weight = 3.0
+test = '''
+#[test]
+fn finds_or_reports_absent() {
+    assert_eq!(find(&[1, 3, 5, 7], 5), Some(2));
+    assert_eq!(find(&[1, 3, 5, 7], 1), Some(0));
+    assert_eq!(find(&[1, 3, 5, 7], 7), Some(3));
+    assert_eq!(find(&[1, 3, 5, 7], 4), None);
+    assert_eq!(find(&[1, 3, 5, 7], 8), None);
+    assert_eq!(find(&[], 1), None);
+    assert_eq!(find(&[2], 2), Some(0));
+    assert_eq!(find(&[2], 3), None);
+}
+'''
+
+# --- interfaces, errors and data structures -----------------------------------------
+
+[[task]]
+id = "rust-parse-port"
+category = "errors"
+split = "held-out"
+prompt = '''
+Write a Rust function with exactly this signature:
+
+    pub fn parse_port(s: &str) -> Result<u16, String>
+
+It parses `s` as a TCP port. A valid port is 1 to 65535 inclusive. Anything else -
+including 0, a number above 65535, and text that is not a number - returns
+`Err(format!("invalid port: {s}"))` with exactly that wording.
+
+Reply with only the code, in a single ```rust block.
+'''
+[[task.check]]
+kind = "rust_compiles"
+weight = 1.0
+[[task.check]]
+kind = "rust_test"
+weight = 3.0
+test = '''
+#[test]
+fn accepts_valid_ports() {
+    assert_eq!(parse_port("8080"), Ok(8080));
+    assert_eq!(parse_port("1"), Ok(1));
+    assert_eq!(parse_port("65535"), Ok(65535));
+}
+
+#[test]
+fn rejects_the_rest_with_the_stated_message() {
+    assert_eq!(parse_port("0"), Err("invalid port: 0".to_string()));
+    assert_eq!(parse_port("65536"), Err("invalid port: 65536".to_string()));
+    assert_eq!(parse_port("70000"), Err("invalid port: 70000".to_string()));
+    assert_eq!(parse_port("http"), Err("invalid port: http".to_string()));
+    assert_eq!(parse_port(""), Err("invalid port: ".to_string()));
+}
+'''
+
+[[task]]
+id = "rust-lru"
+category = "data-structure"
+split = "held-out"
+prompt = '''
+Write a fixed-capacity LRU cache in Rust, using only the standard library, with exactly
+this public interface:
+
+    pub struct Lru { /* your fields */ }
+
+    impl Lru {
+        pub fn new(capacity: usize) -> Self
+        pub fn get(&mut self, key: &str) -> Option<i64>
+        pub fn put(&mut self, key: &str, value: i64)
+    }
+
+`get` counts as a use, so it makes that key the most recently used. `put` on a key that
+is already present updates its value and also counts as a use. When `put` would exceed
+the capacity, the least recently used entry is evicted.
+
+Reply with only the code, in a single ```rust block.
+'''
+max_tokens = 2048
+[[task.check]]
+kind = "rust_compiles"
+weight = 1.0
+[[task.check]]
+kind = "rust_test"
+weight = 3.0
+test = '''
+#[test]
+fn evicts_the_least_recently_used() {
+    let mut c = Lru::new(2);
+    c.put("a", 1);
+    c.put("b", 2);
+    assert_eq!(c.get("a"), Some(1));
+    c.put("c", 3);
+    assert_eq!(c.get("b"), None, "b was least recently used");
+    assert_eq!(c.get("a"), Some(1));
+    assert_eq!(c.get("c"), Some(3));
+}
+
+#[test]
+fn overwriting_a_key_does_not_grow_the_cache() {
+    let mut c = Lru::new(2);
+    c.put("a", 1);
+    c.put("a", 9);
+    c.put("b", 2);
+    assert_eq!(c.get("a"), Some(9));
+    assert_eq!(c.get("b"), Some(2));
+}
+
+#[test]
+fn a_missing_key_is_none() {
+    let mut c = Lru::new(1);
+    assert_eq!(c.get("nothing"), None);
+}
+'''
+
+[[task]]
+id = "rust-display-impl"
+category = "traits"
+split = "dev"
+prompt = '''
+Given this Rust struct:
+
+```rust
+pub struct Size {
+    pub w: u32,
+    pub h: u32,
+}
+```
+
+Implement `std::fmt::Display` for it so that a `Size { w: 1920, h: 1080 }` formats as
+`1920x1080`.
+
+Reply with only the code - the struct and the impl - in a single ```rust block.
+'''
+[[task.check]]
+kind = "rust_compiles"
+weight = 1.0
+[[task.check]]
+kind = "rust_test"
+weight = 3.0
+test = '''
+#[test]
+fn formats_as_width_by_height() {
+    assert_eq!(format!("{}", Size { w: 1920, h: 1080 }), "1920x1080");
+    assert_eq!(Size { w: 1, h: 2 }.to_string(), "1x2");
+}
+'''
+
+[[task]]
+id = "rust-longest-lifetime"
+category = "lifetimes"
+split = "dev"
+prompt = '''
+Write a Rust function with exactly this signature:
+
+    pub fn longest<'a>(a: &'a str, b: &'a str) -> &'a str
+
+It returns whichever of the two string slices is longer, measured in bytes. If they are
+the same length it returns `a`.
+
+Reply with only the code, in a single ```rust block.
+'''
+[[task.check]]
+kind = "rust_compiles"
+weight = 1.0
+[[task.check]]
+kind = "rust_test"
+weight = 3.0
+test = '''
+#[test]
+fn picks_the_longer_and_prefers_a_on_a_tie() {
+    assert_eq!(longest("abcd", "xy"), "abcd");
+    assert_eq!(longest("ab", "wxyz"), "wxyz");
+    assert_eq!(longest("ab", "cd"), "ab");
+}
+'''
+
+# --- following an interface exactly, without code -----------------------------------
+#
+# A model that cannot be told "reply with only X" is expensive inside a harness, where
+# preamble ends up pasted into files and inflates every prompt that follows.
+
+[[task]]
+id = "json-shape"
+category = "format"
+split = "held-out"
+prompt = '''
+Here is a Rust function:
+
+    fn clamp(value: i64, lo: i64, hi: i64) -> i64 { value.max(lo).min(hi) }
+
+Reply with only a JSON object - no prose, no markdown fence - with exactly two keys:
+"name", the function's name as a string, and "params", the number of parameters as a
+number.
+'''
+[[task.check]]
+kind = "json"
+weight = 2.0
+keys = ["name", "params"]
+[[task.check]]
+kind = "contains"
+weight = 1.0
+value = "clamp"
+[[task.check]]
+kind = "max_words"
+weight = 1.0
+value = 8
+
+[[task]]
+id = "big-o-binary-search"
+category = "format"
+split = "dev"
+prompt = '''
+What is the worst-case time complexity of binary search over a sorted slice of n
+elements? Reply with only the big-O expression and nothing else.
+'''
+[[task.check]]
+kind = "contains_any"
+weight = 2.0
+ignore_case = true
+values = ["o(log n)", "o(logn)", "o(log(n))", "o(log_2 n)", "o(log2 n)", "o(log₂n)"]
+[[task.check]]
+kind = "max_words"
+weight = 1.0
+value = 4
+
+# --- reading code, and not inventing things -----------------------------------------
+
+[[task]]
+id = "no-such-method"
+category = "hallucination"
+split = "held-out"
+prompt = '''
+Does Rust's standard `Vec<T>` have a method named `sort_stable`? Answer with exactly
+one word: yes or no.
+'''
+[[task.check]]
+kind = "first_word"
+weight = 3.0
+value = "no"
+[[task.check]]
+kind = "max_words"
+weight = 1.0
+value = 3
+
+[[task]]
+id = "diff-observable-behaviour"
+category = "read"
+split = "held-out"
+prompt = '''
+This diff was applied inside a Rust function that builds and returns a `Vec<i64>`:
+
+```diff
+-    let mut out = Vec::new();
++    let mut out = Vec::with_capacity(xs.len());
+```
+
+Nothing else changed. Does this change the values the function returns? Answer with
+exactly one word: yes or no.
+'''
+[[task.check]]
+kind = "first_word"
+weight = 3.0
+value = "no"
+[[task.check]]
+kind = "max_words"
+weight = 1.0
+value = 3
+
+[[task]]
+id = "diagnose-borrow-error"
+category = "diagnose"
+split = "dev"
+prompt = '''
+This Rust does not compile:
+
+```rust
+let mut v = vec![1, 2, 3];
+let first = &v[0];
+v.push(4);
+println!("{first}");
+```
+
+rustc reports E0502. In one short sentence, say why.
+'''
+[[task.check]]
+kind = "contains_any"
+weight = 1.0
+ignore_case = true
+values = ["borrow", "borrowed", "reference"]
+[[task.check]]
+kind = "contains_any"
+weight = 1.0
+ignore_case = true
+values = ["mutable", "mutably", "mutate", "modif", "reallocat"]
+[[task.check]]
+kind = "max_words"
+weight = 1.0
+value = 60

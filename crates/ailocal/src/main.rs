@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use ailocal::{
-    auth, config::Config, download, gateway, gguf, harness, registry, registry::Fit, serve,
+    auth, config::Config, download, extras, gateway, gguf, harness, registry, registry::Fit, serve,
     service, source::Source, vram,
 };
 use clap::{Args, Parser, Subcommand};
@@ -42,6 +42,18 @@ enum Command {
     Service(ServiceCmd),
     /// Check prerequisites and bring everything up in one go.
     Setup(SetupArgs),
+    /// Optional companion tools, installed separately.
+    #[command(subcommand)]
+    Extras(ExtrasCmd),
+    /// Score models on a coding task set. Needs the `eval` extra.
+    ///
+    /// Everything after `eval` goes to `ailocal-eval`, including `--help`, so its own
+    /// options are what you see rather than clap's guess at them.
+    #[command(disable_help_flag = true)]
+    Eval {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Install the latest release in place.
     ///
     /// Arguments are forwarded to the install script, e.g. `ailocal update --check`.
@@ -67,6 +79,16 @@ struct SetupArgs {
     /// Do not install systemd units.
     #[arg(long)]
     skip_service: bool,
+}
+
+#[derive(Subcommand)]
+enum ExtrasCmd {
+    /// Show which extras exist and which are installed.
+    List,
+    /// Download an extra at this binary's version.
+    Install { name: String },
+    /// Delete an installed extra.
+    Remove { name: String },
 }
 
 #[derive(Subcommand)]
@@ -219,6 +241,12 @@ fn main() -> anyhow::Result<()> {
         Command::Service(ServiceCmd::Uninstall) => service_uninstall(),
         Command::Service(ServiceCmd::Status) => service_status(),
         Command::Setup(args) => setup(&args),
+        Command::Extras(ExtrasCmd::List) => extras_list(),
+        Command::Extras(ExtrasCmd::Install { name }) => extras_install(&name),
+        Command::Extras(ExtrasCmd::Remove { name }) => extras_remove(&name),
+        Command::Eval { args } => {
+            std::process::exit(extras::dispatch(named_extra("eval")?, &args)?)
+        }
         Command::Update { args } => std::process::exit(ailocal::update::run(&args)?),
         Command::Gateway(GatewayCmd::Check { url }) => gateway_check(&url),
         Command::Gateway(GatewayCmd::Key) => {
@@ -227,6 +255,67 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// Resolve an extra by name, or explain what the names are.
+fn named_extra(name: &str) -> anyhow::Result<&'static extras::Extra> {
+    extras::find(name).ok_or_else(|| {
+        let known: Vec<&str> = extras::EXTRAS.iter().map(|e| e.name).collect();
+        anyhow::anyhow!(
+            "no extra named {name:?}; known extras: {}",
+            known.join(", ")
+        )
+    })
+}
+
+fn extras_list() -> anyhow::Result<()> {
+    let core = env!("CARGO_PKG_VERSION");
+    println!("{:<10} {:<12} SUMMARY", "EXTRA", "VERSION");
+    for e in extras::EXTRAS {
+        let state = match extras::locate(e) {
+            None => "-".to_owned(),
+            Some(path) => extras::version_of(&path).unwrap_or_else(|| "installed".to_owned()),
+        };
+        println!("{:<10} {state:<12} {}", e.name, e.summary);
+    }
+
+    // Skew is worth naming explicitly. The two binaries share a release tag, so a
+    // mismatch means one of them was installed by hand and the report formats or task
+    // corpus may not line up.
+    let skewed: Vec<&str> = extras::EXTRAS
+        .iter()
+        .filter(|e| {
+            extras::locate(e)
+                .and_then(|p| extras::version_of(&p))
+                .is_some_and(|v| v != core)
+        })
+        .map(|e| e.name)
+        .collect();
+    if skewed.is_empty() {
+        println!("\nailocal {core}. Install one with `ailocal extras install <name>`.");
+    } else {
+        println!(
+            "\nailocal is {core} but {} is not - run `ailocal update` to match them.",
+            skewed.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn extras_install(name: &str) -> anyhow::Result<()> {
+    let extra = named_extra(name)?;
+    let code = extras::install(extra)?;
+    anyhow::ensure!(code == 0, "installing the {name} extra failed");
+    println!("\nTry: ailocal {name} --help");
+    Ok(())
+}
+
+fn extras_remove(name: &str) -> anyhow::Result<()> {
+    match extras::remove(named_extra(name)?)? {
+        Some(path) => println!("removed {}", path.display()),
+        None => println!("the {name} extra is not installed"),
+    }
+    Ok(())
 }
 
 fn budget() -> anyhow::Result<()> {
@@ -1010,6 +1099,7 @@ fn ps() -> anyhow::Result<()> {
             println!("{:<12} {}", "url", i.base_url());
             println!("{:<12} {}", "context", format_count(i.context));
             println!("{:<12} {}", "kv cache", i.cache_type);
+            println!("{:<12} {}", "reasoning", i.reasoning);
             println!("{:<12} {}", "pid", i.pid);
             println!("{:<12} {} MiB", "vram", ailocal::vram_used_mib()?);
         }
