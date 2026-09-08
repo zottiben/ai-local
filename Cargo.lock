@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "ailocal"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -23,7 +23,7 @@ dependencies = [
 
 [[package]]
 name = "ailocal-eval"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "ailocal",
  "anyhow",

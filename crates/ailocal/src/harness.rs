@@ -55,6 +55,34 @@ pub struct PiModel {
     pub reasoning: bool,
 }
 
+/// Every harness this knows how to configure.
+pub const NAMES: [&str; 2] = ["pi", "claude-code"];
+
+/// Whether `name` has already been pointed at our gateway.
+///
+/// Read-only, so that "what still needs doing" can be answered without writing
+/// anything. Pi is configured when its credential store holds our provider; Claude
+/// Code when the env file exists, since that file has no purpose other than this.
+#[must_use]
+pub fn is_configured(name: &str) -> bool {
+    match name {
+        "pi" => pi_auth_path().is_ok_and(|path| {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .is_some_and(|json| json.get(PI_PROVIDER_ID).is_some())
+        }),
+        "claude-code" => claude_code_env_path().is_ok_and(|path| path.is_file()),
+        _ => false,
+    }
+}
+
+/// The harnesses already pointed at us.
+#[must_use]
+pub fn configured() -> Vec<&'static str> {
+    NAMES.into_iter().filter(|n| is_configured(n)).collect()
+}
+
 /// Why a particular model was chosen, so the choice is visible rather than mysterious.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Chose {

@@ -8,6 +8,22 @@ curl -fsSL https://zottiben.github.io/ai-local/install.sh | sh
 ailocal setup --model ollama:gemma4:12b
 ```
 
+`setup` is the whole thing: it picks a model, starts the gateway as a background
+service, points your harnesses at it, and then proves it works by calling it. If you
+assemble it by hand instead, every command ends by naming the next one, and
+`ailocal status` says which link is missing:
+
+```
+$ ailocal status
+ok    models      2 runnable, default gemma4-12b-Q4_K_M
+MISS  gateway     http://127.0.0.1:8081 - not answering
+MISS  service     ailocal-gateway.service - not installed
+MISS  harnesses   none configured
+
+Next: ailocal service install   (nothing is serving yet - this starts the gateway
+                                and keeps it running)
+```
+
 Linux (x86_64/aarch64) or macOS (Apple Silicon and Intel). Needs
 [llama.cpp](https://github.com/ggml-org/llama.cpp):
 
@@ -69,6 +85,7 @@ desktop session dies.
 | | |
 | --- | --- |
 | `ailocal setup` | check prerequisites, install a model, start services, configure harnesses |
+| `ailocal status` | where you are, and the one command that gets you further |
 | `ailocal config data-dir [path]` | where weights, caches and datasets live |
 | `ailocal config gateway-port [n]` | which port the gateway listens on |
 | `ailocal model pick` | choose your model: what you have, plus what would fit |

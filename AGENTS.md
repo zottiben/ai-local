@@ -19,6 +19,7 @@ Inference is llama.cpp's `llama-server`, Vulkan backend. Models are GGUF from Hu
 - Choose which model to use: `ailocal model pick` (also sets `default_model`)
 - What is on disk and what fits: `ailocal model ls`
 - Run one: `ailocal serve <name>`, then `ailocal ps` / `ailocal stop`
+- Where am I, and what is missing: `ailocal status`
 - Expose it to harnesses: `ailocal gateway run` (key via `ailocal gateway key`)
 - Move the gateway off a busy port: `ailocal config gateway-port <n>`
 - Point a harness at it: `ailocal harness configure pi|claude-code [--model <name>]`

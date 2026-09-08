@@ -42,6 +42,8 @@ enum Command {
     Service(ServiceCmd),
     /// Check prerequisites and bring everything up in one go.
     Setup(SetupArgs),
+    /// Show where this machine is: model, gateway, services, harnesses.
+    Status,
     /// Optional companion tools, installed separately.
     #[command(subcommand)]
     Extras(ExtrasCmd),
@@ -253,14 +255,14 @@ fn main() -> anyhow::Result<()> {
         Command::Budget => budget(),
         Command::Model(ModelCmd::Ls) => model_ls(),
         Command::Model(ModelCmd::Pick) => model_pick().map(|picked| {
-            if let Some(name) = picked {
-                harness_next_step(&name);
+            if picked.is_some() {
+                print_next_step();
             }
         }),
         Command::Model(ModelCmd::Search { query, limit }) => model_search(&query.join(" "), limit),
         Command::Model(ModelCmd::Files { repo }) => model_files(&repo),
-        Command::Model(ModelCmd::Install(args)) => model_install(&args).map(|name| {
-            harness_next_step(&name);
+        Command::Model(ModelCmd::Install(args)) => model_install(&args).map(|_| {
+            print_next_step();
         }),
         Command::Model(ModelCmd::Rm { name }) => model_rm(&name),
         Command::Config(ConfigCmd::Show) => config_show(),
@@ -280,6 +282,7 @@ fn main() -> anyhow::Result<()> {
         Command::Service(ServiceCmd::Uninstall) => service_uninstall(),
         Command::Service(ServiceCmd::Status) => service_status(),
         Command::Setup(args) => setup(&args),
+        Command::Status => status(),
         Command::Extras(ExtrasCmd::List) => extras_list(),
         Command::Extras(ExtrasCmd::Install { name }) => extras_install(&name),
         Command::Extras(ExtrasCmd::Remove { name }) => extras_remove(&name),
@@ -803,8 +806,171 @@ fn repoint_model_service(cfg: &Config) {
 /// Every other step of this flow ends by naming the next one - `model search` points at
 /// `model files`, which points at `model install` - and this is where that chain used
 /// to stop.
-fn harness_next_step(name: &str) {
-    println!("\nNext: ailocal harness configure pi --model {name}   (or claude-code)");
+/// The whole picture in one command.
+///
+/// The pieces were all inspectable already - `ps`, `service status`, `gateway check`,
+/// `model ls` - but only if you knew which to run and how to read them together.
+/// Someone whose harness will not answer needs one command that says which link is
+/// broken.
+fn status() -> anyhow::Result<()> {
+    let cfg = Config::load()?;
+    let mark = |ok: bool| if ok { "ok  " } else { "MISS" };
+
+    let models = runnable_models(&cfg).unwrap_or_default();
+    println!(
+        "{}  models      {}",
+        mark(!models.is_empty()),
+        if models.is_empty() {
+            "none installed that can run here".to_owned()
+        } else {
+            format!(
+                "{} runnable, default {}",
+                models.len(),
+                cfg.default_model.as_deref().unwrap_or("not set")
+            )
+        }
+    );
+
+    match serve::running() {
+        Ok(Some(i)) => println!(
+            "ok    loaded      {} at {} context, reasoning {}",
+            i.model,
+            format_count(i.context),
+            i.reasoning
+        ),
+        _ => println!("-     loaded      nothing resident (the gateway loads on demand)"),
+    }
+
+    let answering = gateway::answers_as_gateway(&cfg.gateway_host, cfg.gateway_port);
+    println!(
+        "{}  gateway     http://{}:{} - {}",
+        mark(answering),
+        gateway::loopback_for(&cfg.gateway_host),
+        cfg.gateway_port,
+        if answering {
+            "answering".to_owned()
+        } else {
+            match gateway::port_status(&cfg.gateway_host, cfg.gateway_port) {
+                gateway::PortStatus::Taken => "port held by something else".to_owned(),
+                _ => "not answering".to_owned(),
+            }
+        }
+    );
+
+    for unit in service::service_names() {
+        let active = service::is_active(unit);
+        println!(
+            "{}  service     {unit} - {}",
+            mark(active),
+            if active {
+                "running"
+            } else if service::is_enabled(unit) {
+                "installed but not running"
+            } else {
+                "not installed"
+            }
+        );
+    }
+
+    let configured = harness::configured();
+    println!(
+        "{}  harnesses   {}",
+        mark(!configured.is_empty()),
+        if configured.is_empty() {
+            "none configured".to_owned()
+        } else {
+            configured.join(", ")
+        }
+    );
+
+    match next_step(&cfg).describe() {
+        Some(line) => println!("\n{line}"),
+        None => println!("\nEverything is in place."),
+    }
+    Ok(())
+}
+
+/// What still has to happen before a harness can answer a prompt.
+///
+/// Worked out from the machine's actual state rather than assumed. The hardcoded
+/// version of this pointed from "a model is installed" straight at `harness configure`,
+/// which skipped the gateway entirely - so following the tool's own advice produced a
+/// configured harness talking to nothing, and the first sign of trouble was Pi
+/// answering a prompt with "Connection error".
+#[derive(Debug, PartialEq, Eq)]
+enum NextStep {
+    InstallModel,
+    /// Nothing is serving, and no service exists to do it.
+    StartGateway,
+    /// A service exists but is not answering.
+    FixGateway,
+    ConfigureHarness,
+    /// Everything is in place.
+    Ready,
+}
+
+impl NextStep {
+    /// Decide from the parts rather than by probing, so this is testable.
+    const fn from_state(
+        has_model: bool,
+        gateway_answering: bool,
+        service_installed: bool,
+        harness_configured: bool,
+    ) -> Self {
+        if !has_model {
+            return Self::InstallModel;
+        }
+        if !gateway_answering {
+            return if service_installed {
+                Self::FixGateway
+            } else {
+                Self::StartGateway
+            };
+        }
+        if !harness_configured {
+            return Self::ConfigureHarness;
+        }
+        Self::Ready
+    }
+
+    fn describe(&self) -> Option<String> {
+        Some(match self {
+            Self::InstallModel => {
+                "Next: ailocal model pick   (choose a model for this machine)".to_owned()
+            }
+            Self::StartGateway => "Next: ailocal service install   (nothing is serving yet - \
+                 this starts the gateway and keeps it running)"
+                .to_owned(),
+            Self::FixGateway => format!(
+                "Next: the gateway service is installed but not answering.\n\
+                 \x20     ailocal gateway check      says what is wrong\n\
+                 \x20     {}",
+                service::log_hint()
+            ),
+            Self::ConfigureHarness => {
+                "Next: ailocal harness configure pi   (or claude-code)".to_owned()
+            }
+            Self::Ready => return None,
+        })
+    }
+}
+
+/// Inspect this machine and work out what is still missing.
+fn next_step(cfg: &Config) -> NextStep {
+    NextStep::from_state(
+        runnable_models(cfg).is_ok_and(|m| !m.is_empty()),
+        gateway::answers_as_gateway(&cfg.gateway_host, cfg.gateway_port),
+        service::is_enabled(service::GATEWAY_UNIT) || service::is_active(service::GATEWAY_UNIT),
+        !harness::configured().is_empty(),
+    )
+}
+
+/// Print the next step, if there is one.
+fn print_next_step() {
+    let Ok(cfg) = Config::load() else { return };
+    if let Some(line) = next_step(&cfg).describe() {
+        println!("\n{line}");
+    }
 }
 
 fn model_search(query: &str, limit: usize) -> anyhow::Result<()> {
@@ -1076,8 +1242,8 @@ fn harness_configure(name: &str, url: &str, wanted: Option<&str>) -> anyhow::Res
 
     // A harness stores this URL and only finds out it is wrong when a prompt fails
     // with a bare "Connection error", which says nothing about the port. Far better to
-    // say it here, while there is still context.
-    warn_if_gateway_is_not_answering(&cfg, url);
+    // say it here, while there is still context - and better still to offer the fix.
+    let cfg = offer_to_start_the_gateway(cfg, url)?;
 
     let loaded = serve::running()?.map(|i| i.model);
     let (preferred, why) = harness::preferred(
@@ -1151,13 +1317,43 @@ fn harness_configure(name: &str, url: &str, wanted: Option<&str>) -> anyhow::Res
     Ok(())
 }
 
+/// Make sure there is a gateway before pointing a harness at one, offering to start it.
+///
+/// This is the moment the whole flow used to fall apart: the harness gets configured
+/// against a URL nothing answers, and the first symptom is "Connection error" from
+/// inside Pi, which mentions neither the gateway nor the port. Since the fix is one
+/// command, ask rather than describe.
+///
+/// Returns the config, reloaded if starting the service changed it.
+fn offer_to_start_the_gateway(cfg: Config, url: &str) -> anyhow::Result<Config> {
+    if gateway::answers_as_gateway(&cfg.gateway_host, cfg.gateway_port) {
+        return Ok(cfg);
+    }
+
+    let installed =
+        service::is_enabled(service::GATEWAY_UNIT) || service::is_active(service::GATEWAY_UNIT);
+
+    if !installed && ailocal::prompt::interactive() {
+        println!("The gateway is not running, so a harness pointed at it cannot answer.");
+        if ailocal::prompt::confirm("Install and start it now?", true)? {
+            service_install(false)?;
+            println!();
+            return Config::load();
+        }
+        println!();
+    }
+
+    warn_if_gateway_is_not_answering(&cfg, url);
+    println!("  Configuring anyway - the harness will work once the gateway is up.\n");
+    Ok(cfg)
+}
+
 /// Say so, in terms that name the cause, when the gateway a harness is about to be
 /// pointed at is not going to answer.
 ///
 /// Not a refusal: writing the config is still the right thing when the gateway is
 /// merely not started yet, and `setup` configures harnesses as part of a sequence that
-/// brings everything up. But a harness that cannot reach the gateway reports only
-/// "Connection error", with no mention of a port, so the diagnosis has to happen here.
+/// brings everything up.
 fn warn_if_gateway_is_not_answering(cfg: &Config, url: &str) {
     if gateway::answers_as_gateway(&cfg.gateway_host, cfg.gateway_port) {
         return;
@@ -1188,7 +1384,6 @@ fn warn_if_gateway_is_not_answering(cfg: &Config, url: &str) {
              \x20 or `ailocal gateway run` in another terminal."
         ),
     }
-    println!("  Configuring anyway - the harness will work once the gateway is up.\n");
 }
 
 /// The other model names, for a "you also have these" line.
@@ -1519,6 +1714,18 @@ fn gateway_check(url: &str) -> anyhow::Result<()> {
         };
 
     println!("checking {base}");
+
+    // Four identical "error sending request" lines say the same thing four times and
+    // none of them says what to do. When the connection itself fails, the auth
+    // assertions are meaningless - report the one real problem instead.
+    if client.get(format!("{base}/health")).send().is_err() {
+        println!("  FAIL  nothing is listening on {base}");
+        let cfg = Config::load()?;
+        println!();
+        warn_if_gateway_is_not_answering(&cfg, base);
+        anyhow::bail!("the gateway is not reachable");
+    }
+
     check("health, unauthenticated", 200, &|| {
         Ok(client
             .get(format!("{base}/health"))
@@ -1578,6 +1785,28 @@ fn service_install(no_start: bool) -> anyhow::Result<()> {
         for unit in &units {
             service::enable(unit)?;
             println!("  enabled and started {unit}");
+        }
+
+        // "Started" only means the job forked. Waiting for the listener is the
+        // difference between this command reporting the truth and reporting a hope.
+        if gateway::wait_until_answering(
+            &cfg.gateway_host,
+            cfg.gateway_port,
+            std::time::Duration::from_secs(20),
+        ) {
+            println!(
+                "  answering on http://{}:{}",
+                gateway::loopback_for(&cfg.gateway_host),
+                cfg.gateway_port
+            );
+        } else {
+            println!(
+                "\nWARNING: {} started but nothing is answering on port {}.\n\
+                 \x20        {}",
+                service::GATEWAY_UNIT,
+                cfg.gateway_port,
+                service::log_hint()
+            );
         }
     }
 
@@ -1751,4 +1980,87 @@ fn truncate(s: &str, max: usize) -> String {
     }
     let keep: String = s.chars().take(max.saturating_sub(1)).collect();
     format!("{keep}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exact sequence a fresh machine walks, in order.
+    #[test]
+    fn the_next_step_follows_the_setup_sequence() {
+        assert_eq!(
+            NextStep::from_state(false, false, false, false),
+            NextStep::InstallModel
+        );
+        assert_eq!(
+            NextStep::from_state(true, false, false, false),
+            NextStep::StartGateway
+        );
+        assert_eq!(
+            NextStep::from_state(true, true, true, false),
+            NextStep::ConfigureHarness
+        );
+        assert_eq!(
+            NextStep::from_state(true, true, true, true),
+            NextStep::Ready
+        );
+    }
+
+    /// The bug this replaced: with a model installed and no gateway, the advice was
+    /// "configure a harness", which produced a harness pointed at nothing and a
+    /// "Connection error" at the first prompt.
+    #[test]
+    fn a_model_without_a_gateway_does_not_send_you_to_the_harness() {
+        let step = NextStep::from_state(true, false, false, false);
+        assert_ne!(step, NextStep::ConfigureHarness);
+        let advice = step.describe().unwrap();
+        assert!(advice.contains("service install"), "got: {advice}");
+    }
+
+    /// A harness configured against a dead gateway is still broken, so the gateway
+    /// outranks it however far along the rest is.
+    #[test]
+    fn a_dead_gateway_outranks_an_already_configured_harness() {
+        assert_eq!(
+            NextStep::from_state(true, false, true, true),
+            NextStep::FixGateway
+        );
+        assert_eq!(
+            NextStep::from_state(true, false, false, true),
+            NextStep::StartGateway
+        );
+    }
+
+    /// "Not installed" and "installed but broken" need opposite advice - one is a
+    /// command to run, the other is a log to read.
+    #[test]
+    fn a_missing_service_and_a_broken_one_are_told_apart() {
+        let missing = NextStep::from_state(true, false, false, false)
+            .describe()
+            .unwrap();
+        let broken = NextStep::from_state(true, false, true, false)
+            .describe()
+            .unwrap();
+        assert!(missing.contains("service install"), "got: {missing}");
+        assert!(!broken.contains("service install"), "got: {broken}");
+        assert!(broken.contains("gateway check"), "got: {broken}");
+    }
+
+    #[test]
+    fn a_ready_machine_is_told_nothing() {
+        assert!(
+            NextStep::from_state(true, true, true, true)
+                .describe()
+                .is_none()
+        );
+    }
+
+    /// clap's own consistency check, so a duplicated flag fails the build rather than
+    /// the first run.
+    #[test]
+    fn the_cli_is_well_formed() {
+        use clap::CommandFactory as _;
+        Cli::command().debug_assert();
+    }
 }
