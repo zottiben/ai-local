@@ -85,9 +85,10 @@ gemma4-12b and qwen3-14b emit chain-of-thought into `reasoning_content` and only
 `finish_reason: length` - gemma4 burned ~700 tokens thinking about "say hello in three
 words" and never reached an answer.
 
-`reasoning = "off"` in the config (or `ailocal serve --reasoning off`) turns it into a
-direct answerer: the same prompt then returns code in 1.4 s. Whether reasoning earns
-its latency on real coding tasks is a question for the PR11 eval, not a guess.
+`reasoning = "off"` is therefore the config default, and it is the measured answer
+rather than a guess: on the PR11 suite gemma4-12b scored 95% off against 45% on, at
+4.6x the wall clock, with 7 of 14 answers empty. Re-measure per model with
+`ailocal eval run --reasoning off --reasoning on` before changing it.
 
 ### 4. ROCm never touches the inference path
 Inference is Vulkan. gfx1102 ROCm is flaky (upstream segfaults, hipBLASLt reports the

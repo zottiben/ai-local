@@ -1819,7 +1819,31 @@ fn gateway_check(url: &str) -> anyhow::Result<()> {
 }
 
 fn service_install(no_start: bool) -> anyhow::Result<()> {
-    let cfg = Config::load()?;
+    let mut cfg = Config::load()?;
+
+    // The model unit is only written when a model is named, so without one the gateway
+    // comes up alone and nothing is resident - every first prompt then pays a cold
+    // model load on top of processing the harness's system prompt. That is the
+    // difference between a few seconds and a few minutes, and it used to happen in
+    // silence.
+    if cfg.default_model.is_none() {
+        match runnable_models(&cfg)?.first() {
+            Some(first) => {
+                cfg.default_model = Some(first.id.clone());
+                cfg.save()?;
+                println!(
+                    "default model set to {} so it is loaded before you need it",
+                    first.id
+                );
+            }
+            None => println!(
+                "note: no installed model can run here, so only the gateway is installed.\n\
+                 \x20     Nothing will be resident, and the first request will wait for a\n\
+                 \x20     model to load. `ailocal model pick` fixes that."
+            ),
+        }
+    }
+
     let exe = unit_binary()?;
 
     let units = service::install(

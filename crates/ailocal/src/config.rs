@@ -267,8 +267,19 @@ fn default_cache_type() -> String {
     "q8_0".to_owned()
 }
 
+/// Reasoning is off unless asked for.
+///
+/// Measured, not assumed. On the PR11 coding suite gemma4-12b scored 95% with
+/// reasoning off and 45% with it on, took 4.6x the wall clock, and returned an empty
+/// answer on 7 of 14 tasks - the thinking consumed the whole token budget and the
+/// client saw nothing at all. Quadrupling the budget still left 6 tasks empty, so it is
+/// not a budget that can be tuned around.
+///
+/// `auto` was the default for exactly as long as it took to measure it. Anyone who
+/// wants thinking can set `reasoning = "on"`, and a model where it earns its latency
+/// can be shown to with `ailocal eval run --reasoning off --reasoning on`.
 fn default_reasoning() -> String {
-    "auto".to_owned()
+    "off".to_owned()
 }
 
 fn default_reasoning_budget() -> i64 {
@@ -505,7 +516,7 @@ mod tests {
         let c: Config = toml::from_str(r#"models_dir = "/tmp/models""#).unwrap();
         assert_eq!(c.models_dir, Path::new("/tmp/models"));
         assert_eq!(c.cache_type, "q8_0");
-        assert_eq!(c.reasoning, "auto");
+        assert_eq!(c.reasoning, "off");
         assert_eq!(c.reasoning_budget, -1);
     }
 
@@ -572,6 +583,19 @@ mod tests {
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(back.models_dir, Path::new("/scratch/weights"));
         assert_eq!(back.hf_home, c.hf_home);
+    }
+
+    /// A fresh machine must not get the setting the eval showed to be far worse: it
+    /// costs several times the latency and returns empty answers, which reads as a
+    /// broken model rather than a configuration choice.
+    #[test]
+    fn reasoning_is_off_until_asked_for() {
+        assert_eq!(Config::default().reasoning, "off");
+        assert_eq!(toml::from_str::<Config>("").unwrap().reasoning, "off");
+
+        // ...but an explicit choice is still honoured.
+        let explicit: Config = toml::from_str(r#"reasoning = "on""#).unwrap();
+        assert_eq!(explicit.reasoning, "on");
     }
 
     /// A typo in a key should be reported, not silently ignored into a default.

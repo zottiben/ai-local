@@ -140,6 +140,33 @@ Re-run it after installing a model: the harness keeps a cached catalogue, so a n
 is not visible to it until that is rewritten. The gateway needs no such nudge - it
 rescans on every request.
 
+## Why the first prompt is slow, and what to do about it
+
+Three costs stack on a first turn, and two of them are avoidable. Measured on an
+RX 7600 XT with gemma4-12b and a 9,700-token system prompt, which is the size a coding
+harness actually sends:
+
+| | first turn | same prompt again |
+| --- | --- | --- |
+| `reasoning = "off"` | 31.5s | 15.9s |
+| `reasoning = "on"` | 52.2s | 36.0s |
+
+Plus a cold model load if nothing is resident - about 5s here with the weights in page
+cache, considerably longer reading 6 GB off an SSD for the first time.
+
+- **Keep the model resident.** `ailocal service install` loads it at boot and holds it
+  there, so no request ever pays for the load. Without it the gateway loads on demand
+  and the first prompt waits.
+- **Leave reasoning off.** It is the default because the eval measured it: 95% versus
+  45% on the coding suite, at 4.6x the wall clock.
+- **The prompt cache does the rest.** llama.cpp reuses the common prefix between turns,
+  which is why the second turn above is half the first. Only the first turn of a session
+  pays full prompt processing.
+
+That leaves prompt processing of the harness's system prompt as the irreducible part.
+It is why a local model feels slower than a hosted one on the first turn and comparable
+afterwards.
+
 ## The gateway
 
 One port serves both protocols, because harnesses disagree about which to speak:
