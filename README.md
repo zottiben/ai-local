@@ -198,14 +198,30 @@ It is appended to whatever system prompt the harness sends rather than replacing
 the harness's own prompt is what makes its tools work - and inserted as a system message
 only when there is none.
 
-Worth knowing what this does and does not do. Nothing reads `AGENTS.md` "automatically":
-the harness reads it and puts it in the prompt, and a smaller model is simply less
-reliable about honouring a convention it was never trained on. An instruction like the
-above converts that convention into an explicit tool call, which is a much easier thing
-to follow. It is not a fine-tuning problem - see the note on retrieval versus adapters.
-
 Every token here is processed on the first turn of every session, and a small model given
 instructions that argue with the harness's follows neither well. A sentence or two.
+
+### What actually happens to AGENTS.md
+
+The file is loaded by the *harness*, not the model - Codex's docs say "Codex reads
+`AGENTS.md` files before doing any work", and Claude Code's say the files "are read at
+session start and delivered to Claude". Measured here with `--log-requests`, Pi does the
+same: it inlines the file into a `developer` message wrapped in `<project_instructions
+path="...">`, and gemma4-12b then answers from it correctly.
+
+So a local model does get your AGENTS.md. What differs is fidelity: asked to repeat a
+distinctive token from that file, gemma4-12b corrupted it on two runs out of three. That
+is a model-quality difference rather than a plumbing one, and it is what the
+`instruction-from-context` eval task exists to measure.
+
+If you want to see it for yourself:
+
+```
+ailocal gateway run --log-requests    # writes <data_dir>/gateway-requests.jsonl
+```
+
+It records what the harness sent, before this gateway changes anything. Off by default -
+it is a transcript of your work.
 
 ### Thinking, per request
 

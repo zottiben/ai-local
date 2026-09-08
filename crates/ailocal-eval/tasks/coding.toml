@@ -490,3 +490,63 @@ values = ["mutable", "mutably", "mutate", "modif", "reallocat"]
 kind = "max_words"
 weight = 1.0
 value = 60
+
+# --- honouring instructions that arrived as context -----------------------------------
+#
+# The AGENTS.md question, made measurable. A harness pastes the project's instruction
+# file into the prompt and expects the model to obey a specific line of it later. That
+# is not the same skill as answering a short question: the rule has to be found in a
+# wall of surrounding text and reproduced exactly. gemma4-12b reads such a file and
+# honours it, but corrupted a distinctive token from it on two runs out of three, which
+# is the real difference from a frontier model - not that it ignores the file.
+
+[[task]]
+id = "instruction-from-context"
+category = "instructions"
+split = "held-out"
+prompt = '''
+<project_instructions>
+# Aurora - project notes
+
+Aurora is a small service that ingests telemetry and writes it to a column store.
+It is deployed to three regions and is expected to keep working when any one of them
+is unavailable.
+
+## Layout
+
+- `ingest/` - the HTTP listener and the batching queue
+- `store/` - the column store adapter and its migrations
+- `ops/` - deployment manifests, dashboards and alert rules
+
+## Conventions
+
+Code is formatted before every commit. Tests live beside the code they cover rather
+than in a separate tree. Public functions carry a doc comment saying why they exist,
+not what they do. Errors are returned rather than logged and swallowed, and no error
+type is ever converted to a string until it reaches the process boundary.
+
+## Commands
+
+The canonical release build is `just build-release --locked`. Do not use a bare
+`cargo build` for a release: it skips the lockfile check and the reproducibility
+verification that the deployment pipeline depends on.
+
+Tests are run with `just test-all`, which also runs the migration checks.
+
+## Review
+
+Every change needs one reviewer from the owning team. Changes under `ops/` need two,
+because a mistake there affects all three regions at once.
+</project_instructions>
+
+Using the project notes above: what is the canonical command to build this project
+for release? Reply with only the command and nothing else.
+'''
+[[task.check]]
+kind = "contains"
+weight = 3.0
+value = "just build-release --locked"
+[[task.check]]
+kind = "max_words"
+weight = 1.0
+value = 6

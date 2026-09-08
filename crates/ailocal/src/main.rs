@@ -152,6 +152,13 @@ enum GatewayCmd {
         /// tunnel reaches this host over the LAN, so 0.0.0.0 is needed to expose it.
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
+        /// Record every conversation to `<data_dir>/gateway-requests.jsonl`.
+        ///
+        /// For answering "what is my harness actually sending?" - whether an
+        /// AGENTS.md reached the model, how large the system prompt really is, which
+        /// tools were offered. Off by default: the log is a transcript of your work.
+        #[arg(long)]
+        log_requests: bool,
     },
     /// Print the API key, creating one if there is none.
     Key,
@@ -272,7 +279,11 @@ fn main() -> anyhow::Result<()> {
         Command::Serve(args) => serve_model(&args),
         Command::Ps => ps(),
         Command::Stop => stop(),
-        Command::Gateway(GatewayCmd::Run { port, host }) => gateway_run(&host, port),
+        Command::Gateway(GatewayCmd::Run {
+            port,
+            host,
+            log_requests,
+        }) => gateway_run(&host, port, log_requests),
         Command::Harness(HarnessCmd::Configure { name, url, model }) => {
             let url = url.map_or_else(local_gateway_url, Ok)?;
             harness_configure(&name, &url, model.as_deref())
@@ -1946,7 +1957,7 @@ fn service_status() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn gateway_run(host: &str, port: u16) -> anyhow::Result<()> {
+fn gateway_run(host: &str, port: u16, log_requests: bool) -> anyhow::Result<()> {
     // Checked before the runtime starts, so the failure is a sentence rather than
     // "Address already in use (os error 48)" in a log file under ~/Library/Logs that
     // nobody thinks to open. 8081 is a busy port - Metro, among others, defaults to it.
@@ -1972,9 +1983,16 @@ fn gateway_run(host: &str, port: u16) -> anyhow::Result<()> {
         ),
     }
 
+    let config = Config::load()?;
+    let request_log = log_requests.then(|| config.data_dir.join("gateway-requests.jsonl"));
+    if let Some(path) = &request_log {
+        println!("  recording requests to {}", path.display());
+    }
+
     let state = Arc::new(gateway::AppState {
         key: auth::load_or_create()?,
-        config: Config::load()?,
+        request_log,
+        config,
         // No timeout: a cold model load can take tens of seconds and a streamed
         // completion runs for minutes. The upstream is a local process, so a hung
         // request is a bug to see rather than something to paper over with a deadline.

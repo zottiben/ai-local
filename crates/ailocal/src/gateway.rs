@@ -28,6 +28,65 @@ pub struct AppState {
     pub key: String,
     pub config: Config,
     pub client: reqwest::Client,
+    /// Where to record incoming conversations, if asked to.
+    pub request_log: Option<std::path::PathBuf>,
+}
+
+/// Append a conversation to the request log, exactly as the harness sent it.
+///
+/// Recorded *before* this gateway changes anything, so the log answers "what is my
+/// harness actually sending?" rather than showing our own edits back to us. That is
+/// otherwise unanswerable from either end - the harness shows you its own view, the
+/// model shows you its answer, and the wire between them is the only place the truth
+/// lives. It settled whether Pi puts AGENTS.md in the prompt (it does, in a `developer`
+/// message) which no amount of reading either side's documentation could.
+///
+/// Off unless asked for, because a prompt log is a transcript of your work.
+fn record_request(path: &std::path::Path, endpoint: &str, body: &serde_json::Value) {
+    let messages = body["messages"].as_array().map_or_else(Vec::new, |all| {
+        all.iter()
+            .map(|m| {
+                serde_json::json!({
+                    "role": m["role"],
+                    // Content is a string for text and an array for anything richer,
+                    // so measure the serialised form rather than report zero for every
+                    // multimodal message.
+                    "chars": m["content"]
+                        .as_str()
+                        .map_or_else(|| m["content"].to_string().len(), str::len),
+                    "content": m["content"],
+                })
+            })
+            .collect()
+    });
+
+    let line = serde_json::json!({
+        "at": crate::gateway::now_rfc3339(),
+        "endpoint": endpoint,
+        "model": body["model"],
+        "tools": body["tools"].as_array().map_or(0, Vec::len),
+        "messages": messages,
+    });
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).ok();
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        && let Ok(text) = serde_json::to_string(&line)
+    {
+        use std::io::Write as _;
+        writeln!(file, "{text}").ok();
+    }
+}
+
+/// Seconds since the epoch, which is all a log line needs to be orderable.
+fn now_rfc3339() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// What is holding a port.
@@ -523,10 +582,16 @@ fn inject_system_prompt(body: &mut serde_json::Value, extra: &str) {
         return;
     };
 
-    if let Some(system) = messages.iter_mut().find(|m| m["role"] == "system")
-        && let Some(text) = system["content"].as_str()
+    // `developer` as well as `system`: OpenAI renamed the role for newer models and Pi
+    // uses the new name, so matching only `system` appended nothing and inserted a
+    // second instruction block instead - two sets of instructions arguing with each
+    // other, which is the one outcome this is meant to avoid.
+    if let Some(existing) = messages
+        .iter_mut()
+        .find(|m| matches!(m["role"].as_str(), Some("system" | "developer")))
+        && let Some(text) = existing["content"].as_str()
     {
-        system["content"] = serde_json::Value::String(format!("{text}\n\n{extra}"));
+        existing["content"] = serde_json::Value::String(format!("{text}\n\n{extra}"));
         return;
     }
     messages.insert(0, serde_json::json!({ "role": "system", "content": extra }));
@@ -553,6 +618,9 @@ async fn proxy(State(state): State<Arc<AppState>>, request: Request) -> ApiResul
     // Only conversations get rewritten. `/v1/completions` and `/v1/embeddings` have no
     // messages and no chat template, so there is nothing here that applies to them.
     let body = if path.ends_with("/chat/completions") {
+        if let Some(log) = &state.request_log {
+            record_request(log, &path, &payload);
+        }
         apply_thinking_request(&mut payload);
         if let Some(extra) = &state.config.system_prompt {
             inject_system_prompt(&mut payload, extra);
@@ -686,6 +754,29 @@ mod tests {
         );
         assert!(system.contains("Read AGENTS.md first."), "got: {system}");
         assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+    }
+
+    /// Pi sends `developer`, OpenAI's newer name for the system role. Missing it meant
+    /// our instruction arrived as a second, competing block instead of being appended -
+    /// found by logging what Pi actually sends rather than assuming.
+    #[test]
+    fn a_developer_role_counts_as_the_system_prompt() {
+        let mut body = serde_json::json!({
+            "messages": [
+                {"role": "developer", "content": "<project_instructions>x</project_instructions>"},
+                {"role": "user", "content": "hi"},
+            ]
+        });
+        inject_system_prompt(&mut body, "Read AGENTS.md first.");
+
+        assert_eq!(
+            body["messages"].as_array().unwrap().len(),
+            2,
+            "must append, not add a second instruction message"
+        );
+        let text = body["messages"][0]["content"].as_str().unwrap();
+        assert!(text.starts_with("<project_instructions>"), "got: {text}");
+        assert!(text.ends_with("Read AGENTS.md first."), "got: {text}");
     }
 
     #[test]

@@ -133,3 +133,5 @@ diagnose-borrow-error = '''
 `first` is an immutable borrow of `v` that is still live when `push` needs to borrow
 `v` mutably.
 '''
+
+instruction-from-context = "just build-release --locked"
