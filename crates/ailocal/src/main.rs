@@ -317,7 +317,8 @@ fn extras_install(name: &str) -> anyhow::Result<()> {
     let extra = named_extra(name)?;
     let code = extras::install(extra)?;
     anyhow::ensure!(code == 0, "installing the {name} extra failed");
-    println!("\nTry: ailocal {name} --help");
+    // No closing hint here: the install script prints one already, and it is also what
+    // the `curl | sh --extra` path relies on.
     Ok(())
 }
 
