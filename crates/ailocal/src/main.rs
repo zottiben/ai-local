@@ -446,13 +446,26 @@ fn restart_gateway_service(cfg: &Config) -> anyhow::Result<()> {
 }
 
 fn budget() -> anyhow::Result<()> {
-    let desktop = ailocal::vram_used_mib()?;
-    let budget = vram::Budget::new(desktop);
+    let launch = serve::budget_for_next_launch()?;
+    let in_use = ailocal::vram_used_mib()?;
 
-    println!("ceiling          {:>6} MiB", vram::CEILING_MIB);
-    println!("desktop          {desktop:>6} MiB");
+    println!("ceiling          {:>6} MiB", launch.ceiling_mib);
+    println!("in use now       {in_use:>6} MiB");
     println!("compute buffers  {:>6} MiB", vram::COMPUTE_BUFFER_MIB);
-    println!("available        {:>6} MiB", budget.available_mib());
+    println!("available        {:>6} MiB", launch.available_mib());
+
+    // Reporting live usage alone reads as "almost nothing is free" whenever a model is
+    // resident, which contradicts `model ls` saying that same model fits. The number
+    // that decides what can be loaded is the one measured against the baseline from
+    // before the current model loaded, since starting another evicts it.
+    if let Ok(Some(instance)) = serve::running() {
+        println!(
+            "\n{} holds {} MiB of that, and would be evicted by the next load - so\n\
+             the figure above is what a launch actually gets, not what is idle now.",
+            instance.model,
+            in_use.saturating_sub(launch.desktop_mib)
+        );
+    }
     Ok(())
 }
 
@@ -857,6 +870,21 @@ fn status() -> anyhow::Result<()> {
         }
     );
 
+    // What the gateway advertises, not what is on disk. This is the list a harness
+    // actually sees, and the two can disagree - a model that is installed but judged
+    // not to fit is filtered out here, which looks from inside Pi like the model
+    // simply vanishing from its picker.
+    if answering {
+        match advertised_models(&cfg) {
+            Ok(names) if names.is_empty() => println!(
+                "MISS  advertised   none - the gateway is serving but offers no model\n\
+                 \x20                  `ailocal model ls` shows what it rejected and why"
+            ),
+            Ok(names) => println!("ok    advertised  {}", names.join(", ")),
+            Err(e) => println!("MISS  advertised  could not ask the gateway: {e}"),
+        }
+    }
+
     for unit in service::service_names() {
         let active = service::is_active(unit);
         println!(
@@ -888,6 +916,33 @@ fn status() -> anyhow::Result<()> {
         None => println!("\nEverything is in place."),
     }
     Ok(())
+}
+
+/// The model names the gateway is offering right now.
+///
+/// Asked over HTTP rather than computed locally, because a harness gets this list from
+/// the gateway and the point is to see what it sees.
+fn advertised_models(cfg: &Config) -> anyhow::Result<Vec<String>> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let body: serde_json::Value = client
+        .get(format!(
+            "http://{}:{}/v1/models",
+            gateway::loopback_for(&cfg.gateway_host),
+            cfg.gateway_port
+        ))
+        .bearer_auth(auth::load_or_create()?)
+        .send()?
+        .error_for_status()?
+        .json()?;
+
+    Ok(body["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["id"].as_str().map(str::to_owned))
+        .collect())
 }
 
 /// What still has to happen before a harness can answer a prompt.

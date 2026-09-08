@@ -44,8 +44,15 @@ pub struct Instance {
     /// Recorded so a later launch can budget against what would be free *after*
     /// evicting this one. Reading current usage instead makes the running model look
     /// like a permanent cost and refuses every replacement.
+    /// `None` when it could not be measured, which is not the same as zero.
+    ///
+    /// It has to be an option. As a bare `u64`, zero meant both "never recorded" and
+    /// "measured nothing else resident" - and a device that reports all of its memory
+    /// free when idle records exactly zero, so the guard against the first case threw
+    /// away the second. The budget then fell back to live usage, counting the running
+    /// model as a permanent cost and concluding it no longer fits.
     #[serde(default)]
-    pub desktop_mib: u64,
+    pub desktop_mib: Option<u64>,
     /// `--reasoning` this server was launched with.
     ///
     /// A launch-time flag with no per-request equivalent, so the only way to know
@@ -84,9 +91,9 @@ pub fn budget_for_next_launch() -> anyhow::Result<Budget> {
     // With a model already resident, that memory is not a permanent cost - starting
     // another evicts it - so budget against the baseline recorded when it loaded.
     if let Some(instance) = running()?
-        && instance.desktop_mib > 0
+        && let Some(baseline) = instance.desktop_mib
     {
-        budget.desktop_mib = instance.desktop_mib;
+        budget.desktop_mib = baseline;
     }
     Ok(budget)
 }
@@ -345,7 +352,7 @@ fn spawn(
     if let Some(old) = running()? {
         terminate(old.pid)?;
         std::fs::remove_file(state_path()?).ok();
-        wait_for_vram_release(old.desktop_mib);
+        wait_for_vram_release(old.desktop_mib.unwrap_or(budget.desktop_mib));
     }
 
     let log = state_path()?.with_file_name("server.log");
@@ -355,7 +362,9 @@ fn spawn(
     let out = std::fs::File::create(&log).with_context(|| format!("creating {}", log.display()))?;
 
     // Sampled after eviction, so it reflects the desktop alone.
-    let desktop_mib = crate::vram_used_mib().unwrap_or(budget.desktop_mib);
+    // `ok()` rather than a fallback: a reading that failed is unknown, and recording a
+    // guess as though it were measured is what makes the next launch budget wrongly.
+    let desktop_mib = crate::vram_used_mib().ok();
 
     let mut cmd = std::process::Command::new("llama-server");
     cmd.arg("-m")
@@ -547,7 +556,7 @@ mod tests {
             port: 8080,
             context: 4096,
             cache_type: "q8_0".into(),
-            desktop_mib,
+            desktop_mib: Some(desktop_mib),
             reasoning: "auto".into(),
         }
     }
@@ -574,7 +583,7 @@ mod tests {
     #[test]
     fn a_swap_is_budgeted_against_the_post_eviction_baseline() {
         let running = instance(900);
-        let budget = Budget::new(running.desktop_mib);
+        let budget = Budget::new(running.desktop_mib.unwrap());
         let m = model("qwen3-14b", 8836, Some(qwen3_14b()), Some(40_960));
         assert!(plan_context(&m, &budget, &Options::default()).is_ok());
 
@@ -583,12 +592,39 @@ mod tests {
         assert!(plan_context(&m, &naive, &Options::default()).is_err());
     }
 
-    /// State written before `desktop_mib` existed must still load.
+    /// State written before `desktop_mib` existed must still load, and must be
+    /// distinguishable from a measurement that came back zero.
     #[test]
     fn older_state_files_without_a_baseline_still_parse() {
         let json = r#"{"pid":1,"model":"m","path":"/tmp/m.gguf","host":"127.0.0.1",
                        "port":8080,"context":4096,"cache_type":"q8_0"}"#;
         let i: Instance = serde_json::from_str(json).unwrap();
-        assert_eq!(i.desktop_mib, 0);
+        assert_eq!(i.desktop_mib, None, "unrecorded must not read as zero");
+    }
+
+    /// A device with nothing else resident records a baseline of zero, and that is a
+    /// measurement like any other.
+    ///
+    /// Treating it as "unknown" is what broke unified memory: the recorded baseline
+    /// was discarded, the budget re-measured live with the model already loaded, and
+    /// the model that was serving perfectly well was judged not to fit - so it vanished
+    /// from the gateway's list and from every harness catalogue built off it.
+    #[test]
+    fn a_measured_baseline_of_zero_is_still_a_measurement() {
+        let json = r#"{"pid":1,"model":"m","path":"/tmp/m.gguf","host":"127.0.0.1",
+                       "port":8080,"context":4096,"cache_type":"q8_0","desktop_mib":0}"#;
+        let i: Instance = serde_json::from_str(json).unwrap();
+        assert_eq!(i.desktop_mib, Some(0));
+
+        // The whole device is available to the next launch, not none of it.
+        let budget = Budget {
+            ceiling_mib: 20_000,
+            desktop_mib: i.desktop_mib.unwrap(),
+        };
+        let m = model("qwen3-14b", 8836, Some(qwen3_14b()), Some(40_960));
+        assert!(
+            plan_context(&m, &budget, &Options::default()).is_ok(),
+            "a model that is already serving must still be judged to fit"
+        );
     }
 }
