@@ -30,6 +30,109 @@ pub struct AppState {
     pub client: reqwest::Client,
 }
 
+/// What is holding a port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortStatus {
+    /// Nothing is listening; the gateway can have it.
+    Free,
+    /// A gateway of ours is already there.
+    Ours,
+    /// Something else is listening.
+    ///
+    /// 8081 is a popular port - React Native's Metro bundler defaults to it - so on a
+    /// development machine this is not unusual, and it has to be named rather than
+    /// left as a bind error in a log file nobody reads.
+    Taken,
+}
+
+/// The address a local client should use to reach a gateway bound to `host`.
+///
+/// A wildcard bind is not an address you can connect to, so probing `0.0.0.0` would
+/// report the port free while the gateway is sitting on it.
+#[must_use]
+pub fn loopback_for(host: &str) -> &str {
+    match host {
+        "0.0.0.0" | "::" | "[::]" | "" => "127.0.0.1",
+        other => other,
+    }
+}
+
+/// Find out whether the gateway can bind `host:port`, and who has it if not.
+///
+/// Binding is the honest test - it is the same syscall the gateway will make, so it
+/// cannot disagree with what happens a moment later the way a connect probe can.
+#[must_use]
+pub fn port_status(host: &str, port: u16) -> PortStatus {
+    if std::net::TcpListener::bind((host, port)).is_ok() {
+        return PortStatus::Free;
+    }
+    if answers_as_gateway(host, port) {
+        PortStatus::Ours
+    } else {
+        PortStatus::Taken
+    }
+}
+
+/// Whether whatever is on this port behaves like one of our gateways.
+///
+/// Two probes rather than one: plenty of things answer `/health` with 200, but a
+/// service that also rejects an unauthenticated `/v1/models` with 401 is ours to a
+/// degree worth acting on.
+#[must_use]
+pub fn answers_as_gateway(host: &str, port: u16) -> bool {
+    let base = format!("http://{}:{port}", loopback_for(host));
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+    else {
+        return false;
+    };
+
+    let healthy = client
+        .get(format!("{base}/health"))
+        .send()
+        .is_ok_and(|r| r.status().is_success());
+    if !healthy {
+        return false;
+    }
+    client
+        .get(format!("{base}/v1/models"))
+        .send()
+        .is_ok_and(|r| r.status() == StatusCode::UNAUTHORIZED)
+}
+
+/// How many ports past the preferred one to try before giving up.
+const PORT_SEARCH_RANGE: u16 = 20;
+
+/// A port the gateway can actually have, starting from `preferred`.
+///
+/// Returns `preferred` when it is free or already ours, so an existing setup is never
+/// moved out from under its harness configuration.
+#[must_use]
+pub fn usable_port(host: &str, preferred: u16) -> Option<u16> {
+    (preferred..preferred.saturating_add(PORT_SEARCH_RANGE))
+        .find(|&port| matches!(port_status(host, port), PortStatus::Free | PortStatus::Ours))
+}
+
+/// Wait for a gateway to start answering, up to `limit`.
+///
+/// A service manager reports success as soon as it has forked, which is well before
+/// the listener exists - so anything that checks immediately after starting the
+/// service races it and reports a healthy gateway as broken.
+#[must_use]
+pub fn wait_until_answering(host: &str, port: u16, limit: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        if answers_as_gateway(host, port) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
 /// An error rendered in the shape OpenAI clients expect.
 struct ApiError {
     status: StatusCode,
@@ -424,5 +527,59 @@ mod tests {
     fn api_errors_render_in_the_openai_shape() {
         let resp = ApiError::new(StatusCode::UNAUTHORIZED, "nope").into_response();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// A wildcard bind is not something a client can connect to. Probing it directly
+    /// would report the port free while the gateway is sitting on it.
+    #[test]
+    fn a_wildcard_bind_is_probed_over_loopback() {
+        assert_eq!(loopback_for("0.0.0.0"), "127.0.0.1");
+        assert_eq!(loopback_for("::"), "127.0.0.1");
+        assert_eq!(loopback_for(""), "127.0.0.1");
+        assert_eq!(loopback_for("127.0.0.1"), "127.0.0.1");
+        assert_eq!(loopback_for("192.168.1.5"), "192.168.1.5");
+    }
+
+    #[test]
+    fn an_unused_port_is_free() {
+        // Port 0 asks the OS for any free port, so this binds and releases one.
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        assert_eq!(port_status("127.0.0.1", port), PortStatus::Free);
+    }
+
+    /// The case that sent a Mac in circles: something else already on the port. It has
+    /// to be distinguishable from our own gateway, because the two need opposite
+    /// responses - move aside, or leave it alone.
+    #[test]
+    fn a_port_held_by_something_else_is_taken() {
+        let squatter = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = squatter.local_addr().unwrap().port();
+        assert_eq!(port_status("127.0.0.1", port), PortStatus::Taken);
+        drop(squatter);
+    }
+
+    #[test]
+    fn the_search_skips_a_port_someone_else_holds() {
+        let squatter = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let taken = squatter.local_addr().unwrap().port();
+        let found = usable_port("127.0.0.1", taken).expect("a free port above it");
+        assert!(found > taken, "{found} should be past the occupied {taken}");
+        drop(squatter);
+    }
+
+    #[test]
+    fn waiting_for_a_gateway_that_never_arrives_gives_up() {
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let began = std::time::Instant::now();
+        assert!(!wait_until_answering(
+            "127.0.0.1",
+            port,
+            std::time::Duration::from_millis(400)
+        ));
+        assert!(began.elapsed() < std::time::Duration::from_secs(5));
     }
 }

@@ -356,6 +356,21 @@ pub fn start(service: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Where to look when a service will not start.
+///
+/// The two platforms keep this in completely different places, and "check the logs" is
+/// useless advice without the path.
+#[must_use]
+pub fn log_hint() -> String {
+    match manager() {
+        Manager::Systemd => format!("journalctl --user -u {GATEWAY_UNIT} -n 50"),
+        Manager::Launchd => log_dir().map_or_else(
+            |_| "~/Library/Logs/ailocal/".to_owned(),
+            |dir| format!("{}/{GATEWAY_LABEL}.log", dir.display()),
+        ),
+    }
+}
+
 /// Whether a service is currently running.
 #[must_use]
 pub fn is_active(service: &str) -> bool {

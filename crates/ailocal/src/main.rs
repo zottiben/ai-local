@@ -76,6 +76,11 @@ struct SetupArgs {
     #[arg(long)]
     model: Option<String>,
 
+    /// Port for the gateway. Defaults to the configured one, moving off it only if
+    /// something else already has it.
+    #[arg(long)]
+    port: Option<u16>,
+
     /// Do not touch harness configuration.
     #[arg(long)]
     skip_harness: bool,
@@ -116,8 +121,13 @@ enum HarnessCmd {
         /// Which harness: `pi` or `claude-code`.
         name: String,
         /// Gateway URL the harness should call.
-        #[arg(long, default_value = "http://127.0.0.1:8081")]
-        url: String,
+        ///
+        /// Defaults to the configured `gateway_port` over loopback. It has to come
+        /// from the config rather than a constant: changing the port is the fix for a
+        /// port conflict, and a hardcoded default meant the harness kept being pointed
+        /// at the old one.
+        #[arg(long)]
+        url: Option<String>,
         /// Which model to point it at.
         ///
         /// Only Claude Code is pinned to one - Pi is given the whole list and picks
@@ -146,10 +156,7 @@ enum GatewayCmd {
     /// Check a gateway is reachable and correctly authenticated.
     ///
     /// Point it at the public hostname to verify the tunnel end to end.
-    Check {
-        #[arg(default_value = "http://127.0.0.1:8081")]
-        url: String,
-    },
+    Check { url: Option<String> },
 }
 
 #[derive(Args)]
@@ -233,6 +240,10 @@ enum ConfigCmd {
     /// gigabytes is `mv`, and doing it silently inside a config command would be a
     /// surprising amount of I/O. It says what to move instead.
     DataDir { path: Option<std::path::PathBuf> },
+    /// Show or change the port the gateway listens on.
+    ///
+    /// The escape hatch when something else already owns 8081.
+    GatewayPort { port: Option<u16> },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -255,11 +266,13 @@ fn main() -> anyhow::Result<()> {
         Command::Config(ConfigCmd::Show) => config_show(),
         Command::Config(ConfigCmd::Init) => config_init(),
         Command::Config(ConfigCmd::DataDir { path }) => config_data_dir(path),
+        Command::Config(ConfigCmd::GatewayPort { port }) => config_gateway_port(port),
         Command::Serve(args) => serve_model(&args),
         Command::Ps => ps(),
         Command::Stop => stop(),
         Command::Gateway(GatewayCmd::Run { port, host }) => gateway_run(&host, port),
         Command::Harness(HarnessCmd::Configure { name, url, model }) => {
+            let url = url.map_or_else(local_gateway_url, Ok)?;
             harness_configure(&name, &url, model.as_deref())
         }
         Command::Harness(HarnessCmd::Unconfigure { name }) => harness_unconfigure(&name),
@@ -274,13 +287,29 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(extras::dispatch(named_extra("eval")?, &args)?)
         }
         Command::Update { args } => std::process::exit(ailocal::update::run(&args)?),
-        Command::Gateway(GatewayCmd::Check { url }) => gateway_check(&url),
+        Command::Gateway(GatewayCmd::Check { url }) => {
+            let url = url.map_or_else(local_gateway_url, Ok)?;
+            gateway_check(&url)
+        }
         Command::Gateway(GatewayCmd::Key) => {
             println!("{}", auth::load_or_create()?);
             eprintln!("stored in {}", auth::key_path()?.display());
             Ok(())
         }
     }
+}
+
+/// The URL a client on this machine should use to reach our gateway.
+///
+/// Always loopback, even when the gateway binds `0.0.0.0` for the tunnel: a wildcard
+/// bind is not an address you can connect to.
+fn local_gateway_url() -> anyhow::Result<String> {
+    let cfg = Config::load()?;
+    Ok(format!(
+        "http://{}:{}",
+        gateway::loopback_for(&cfg.gateway_host),
+        cfg.gateway_port
+    ))
 }
 
 /// Resolve an extra by name, or explain what the names are.
@@ -343,6 +372,74 @@ fn extras_remove(name: &str) -> anyhow::Result<()> {
         None => println!("the {name} extra is not installed"),
     }
     Ok(())
+}
+
+fn config_gateway_port(port: Option<u16>) -> anyhow::Result<()> {
+    let mut cfg = Config::load()?;
+
+    let Some(wanted) = port else {
+        let status = gateway::port_status(&cfg.gateway_host, cfg.gateway_port);
+        println!("gateway port  {}", cfg.gateway_port);
+        println!(
+            "status        {}",
+            match status {
+                gateway::PortStatus::Ours => "an ailocal gateway is listening",
+                gateway::PortStatus::Free => "nothing is listening",
+                gateway::PortStatus::Taken => "IN USE by something that is not ailocal",
+            }
+        );
+        if status == gateway::PortStatus::Taken {
+            println!(
+                "\nThe gateway cannot start while that is true. Move it:\n\
+                 \x20   ailocal config gateway-port {}",
+                gateway::usable_port(&cfg.gateway_host, cfg.gateway_port)
+                    .unwrap_or(cfg.gateway_port + 1)
+            );
+        }
+        return Ok(());
+    };
+
+    if wanted == cfg.gateway_port {
+        println!("the gateway port is already {wanted}");
+        return Ok(());
+    }
+    anyhow::ensure!(
+        gateway::port_status(&cfg.gateway_host, wanted) != gateway::PortStatus::Taken,
+        "port {wanted} is in use by something else; pick another"
+    );
+
+    cfg.gateway_port = wanted;
+    println!("wrote {}", cfg.save()?.display());
+
+    // The unit bakes the port into its ExecStart, so the config alone would leave the
+    // service on the old one.
+    if service::is_enabled(service::GATEWAY_UNIT) || service::is_active(service::GATEWAY_UNIT) {
+        match restart_gateway_service(&cfg) {
+            Ok(()) => println!("restarted {} on port {wanted}", service::GATEWAY_UNIT),
+            Err(e) => println!("note: could not restart {}: {e:#}", service::GATEWAY_UNIT),
+        }
+    }
+
+    // Harnesses hold the URL in their own config, so they do not follow on their own.
+    println!("\nNext: re-point your harnesses at the new port");
+    println!("  ailocal harness configure pi        (and claude-code)");
+    Ok(())
+}
+
+/// Rewrite the gateway unit for the current config and restart it.
+fn restart_gateway_service(cfg: &Config) -> anyhow::Result<()> {
+    let exe = unit_binary()?;
+    service::install(
+        &exe,
+        &cfg.gateway_host,
+        cfg.gateway_port,
+        cfg.default_model.as_deref(),
+    )?;
+    service::reload()?;
+    if service::is_active(service::GATEWAY_UNIT) {
+        service::stop(service::GATEWAY_UNIT)?;
+    }
+    service::start(service::GATEWAY_UNIT)
 }
 
 fn budget() -> anyhow::Result<()> {
@@ -977,6 +1074,11 @@ fn harness_configure(name: &str, url: &str, wanted: Option<&str>) -> anyhow::Res
         "no installed model can run here; `ailocal model ls` shows why"
     );
 
+    // A harness stores this URL and only finds out it is wrong when a prompt fails
+    // with a bare "Connection error", which says nothing about the port. Far better to
+    // say it here, while there is still context.
+    warn_if_gateway_is_not_answering(&cfg, url);
+
     let loaded = serve::running()?.map(|i| i.model);
     let (preferred, why) = harness::preferred(
         &models,
@@ -1049,6 +1151,46 @@ fn harness_configure(name: &str, url: &str, wanted: Option<&str>) -> anyhow::Res
     Ok(())
 }
 
+/// Say so, in terms that name the cause, when the gateway a harness is about to be
+/// pointed at is not going to answer.
+///
+/// Not a refusal: writing the config is still the right thing when the gateway is
+/// merely not started yet, and `setup` configures harnesses as part of a sequence that
+/// brings everything up. But a harness that cannot reach the gateway reports only
+/// "Connection error", with no mention of a port, so the diagnosis has to happen here.
+fn warn_if_gateway_is_not_answering(cfg: &Config, url: &str) {
+    if gateway::answers_as_gateway(&cfg.gateway_host, cfg.gateway_port) {
+        return;
+    }
+
+    println!("WARNING: nothing is answering as a gateway on {url}");
+    match gateway::port_status(&cfg.gateway_host, cfg.gateway_port) {
+        gateway::PortStatus::Taken => println!(
+            "  Port {} is held by something that is not ailocal, so the gateway cannot\n\
+             \x20 start. Move it with `ailocal config gateway-port {}` and re-run this.",
+            cfg.gateway_port,
+            gateway::usable_port(&cfg.gateway_host, cfg.gateway_port)
+                .unwrap_or(cfg.gateway_port + 1)
+        ),
+        // The service is up but nothing answers on the configured port. Either it is
+        // still starting, or - the case worth naming - the unit was written for a
+        // different port, which is what happens when `gateway_port` is edited by hand
+        // without reinstalling the service.
+        _ if service::is_active(service::GATEWAY_UNIT) => println!(
+            "  {} is running, but not on port {}. If you changed the port, the unit\n\
+             \x20 still has the old one - `ailocal service install` rewrites it.\n\
+             \x20 Otherwise it may just be starting; `ailocal gateway check` will say.",
+            service::GATEWAY_UNIT,
+            cfg.gateway_port
+        ),
+        _ => println!(
+            "  The gateway is not running. Start it with `ailocal service install`,\n\
+             \x20 or `ailocal gateway run` in another terminal."
+        ),
+    }
+    println!("  Configuring anyway - the harness will work once the gateway is up.\n");
+}
+
 /// The other model names, for a "you also have these" line.
 fn others(models: &[harness::PiModel], chosen: &str) -> Vec<String> {
     models
@@ -1115,6 +1257,56 @@ fn resolve_data_dir(args: &SetupArgs) -> anyhow::Result<Config> {
 
     println!("   wrote {}", cfg.save()?.display());
     Ok(cfg)
+}
+
+/// Make sure the gateway has a port it can actually bind before anything is built on
+/// top of it.
+///
+/// 8081 is a popular default - Metro uses it, among others - and a machine where
+/// something else already owns it used to fail invisibly: the service manager reported
+/// the agent started, the harness was configured against a port nothing was listening
+/// on, and the only symptom was a bare "Connection error" the first time a prompt was
+/// sent. Moving aside automatically is better than that, and saying so is the whole
+/// point.
+fn settle_gateway_port(args: &SetupArgs) -> anyhow::Result<()> {
+    let mut cfg = Config::load()?;
+    let wanted = args.port.unwrap_or(cfg.gateway_port);
+
+    println!("\n3. gateway port");
+    let port = match gateway::port_status(&cfg.gateway_host, wanted) {
+        gateway::PortStatus::Free => wanted,
+        gateway::PortStatus::Ours => {
+            println!("   ok    {wanted}, where a gateway of ours is already listening");
+            wanted
+        }
+        gateway::PortStatus::Taken => {
+            // An explicitly requested port is a decision, so report it rather than
+            // quietly using a different one.
+            anyhow::ensure!(
+                args.port.is_none(),
+                "port {wanted} is in use by something else; pick another with --port"
+            );
+            let free = gateway::usable_port(&cfg.gateway_host, wanted).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "port {wanted} is in use and so are the next {} - free one, or pass \
+                     --port",
+                    20
+                )
+            })?;
+            println!("   busy  {wanted} is held by something else, moving to {free}");
+            free
+        }
+    };
+
+    if port != cfg.gateway_port {
+        cfg.gateway_port = port;
+        cfg.save()?;
+    }
+    if port == wanted && gateway::port_status(&cfg.gateway_host, port) == gateway::PortStatus::Free
+    {
+        println!("   ok    {port} is free");
+    }
+    Ok(())
 }
 
 /// Bring a fresh machine up: check what is needed, then do the rest.
@@ -1184,7 +1376,9 @@ fn setup(args: &SetupArgs) -> anyhow::Result<()> {
         "prerequisites missing - install them and re-run `ailocal setup`"
     );
 
-    println!("\n3. models");
+    settle_gateway_port(args)?;
+
+    println!("\n4. models");
     let mut models = registry::scan(&cfg.models_dir)?;
     if models.is_empty() {
         match &args.model {
@@ -1221,13 +1415,16 @@ fn setup(args: &SetupArgs) -> anyhow::Result<()> {
     }
 
     if !args.skip_service {
-        println!("\n4. services");
+        println!("\n5. services");
         service_install(false)?;
     }
 
+    // Re-read: the port may have moved at step 3, and the model at step 4.
+    let cfg = Config::load()?;
+    let url = local_gateway_url()?;
+
     if !args.skip_harness {
-        println!("\n5. harnesses");
-        let url = format!("http://{}:{}", "127.0.0.1", cfg.gateway_port);
+        println!("\n6. harnesses");
         for harness in ["pi", "claude-code"] {
             match harness_configure(harness, &url, None) {
                 Ok(()) => {}
@@ -1237,7 +1434,31 @@ fn setup(args: &SetupArgs) -> anyhow::Result<()> {
         }
     }
 
-    println!("\nReady. `ailocal ps` shows what is loaded, `ailocal gateway check` verifies auth.");
+    if args.skip_service {
+        println!("\nReady. Start the gateway with `ailocal gateway run`, then check it");
+        println!("with `ailocal gateway check`.");
+        return Ok(());
+    }
+
+    // The step that turns "everything reported success" into "it actually works".
+    // Without it a fresh machine could finish setup with a dead gateway and only find
+    // out when a harness answered a prompt with "Connection error".
+    println!("\n7. checking it works");
+    if !gateway::wait_until_answering(
+        &cfg.gateway_host,
+        cfg.gateway_port,
+        std::time::Duration::from_secs(20),
+    ) {
+        println!("   FAIL  no gateway answering on {url}");
+        println!("         logs: {}", service::log_hint());
+        anyhow::bail!(
+            "the gateway did not come up. Everything else is configured, so fixing it \
+             and re-running `ailocal setup` will finish the job."
+        );
+    }
+    gateway_check(&url)?;
+
+    println!("\nReady. `ailocal ps` shows what is loaded.");
     Ok(())
 }
 
@@ -1414,6 +1635,31 @@ fn service_status() -> anyhow::Result<()> {
 }
 
 fn gateway_run(host: &str, port: u16) -> anyhow::Result<()> {
+    // Checked before the runtime starts, so the failure is a sentence rather than
+    // "Address already in use (os error 48)" in a log file under ~/Library/Logs that
+    // nobody thinks to open. 8081 is a busy port - Metro, among others, defaults to it.
+    match gateway::port_status(host, port) {
+        gateway::PortStatus::Free => {}
+        gateway::PortStatus::Ours => anyhow::bail!(
+            "an ailocal gateway is already listening on {host}:{port}.\n\
+             Use it as it is, or stop it first ({}).",
+            if service::is_active(service::GATEWAY_UNIT) {
+                "it is running as a service"
+            } else {
+                "it was started by hand"
+            }
+        ),
+        gateway::PortStatus::Taken => anyhow::bail!(
+            "port {port} is already in use by something else, so the gateway cannot \
+             start.\n\
+             Free it, or move the gateway:\n\
+             \x20   ailocal config gateway-port {}\n\
+             That updates the service too; re-run `ailocal harness configure` \
+             afterwards so your harnesses follow.",
+            gateway::usable_port(host, port).unwrap_or(port + 1)
+        ),
+    }
+
     let state = Arc::new(gateway::AppState {
         key: auth::load_or_create()?,
         config: Config::load()?,

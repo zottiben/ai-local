@@ -70,6 +70,7 @@ desktop session dies.
 | --- | --- |
 | `ailocal setup` | check prerequisites, install a model, start services, configure harnesses |
 | `ailocal config data-dir [path]` | where weights, caches and datasets live |
+| `ailocal config gateway-port [n]` | which port the gateway listens on |
 | `ailocal model pick` | choose your model: what you have, plus what would fit |
 | `ailocal model search <query>` | find GGUF repos on Hugging Face |
 | `ailocal model files <owner/repo>` | list quantisations and which of them fit |
@@ -134,6 +135,31 @@ Requests for a model that is not resident swap it in; only one fits at a time.
 Authentication is a bearer key, which is what every harness already sends, so the
 gateway can sit behind a tunnel without anything else in front of it. See
 [docs/tunnel.md](docs/tunnel.md).
+
+### If the port is taken
+
+8081 is a popular default - React Native's Metro bundler uses it, among others - so on
+a development machine something may already own it. `ailocal setup` checks before it
+builds anything on top, and moves aside:
+
+```
+3. gateway port
+   busy  8081 is held by something else, moving to 8082
+```
+
+It only moves for a port held by *something else*; a gateway of ours already listening
+is left exactly where it is. `--port` picks one explicitly, and is an error rather than
+a suggestion if that port is occupied too.
+
+Afterwards, `ailocal config gateway-port` reports who holds the port and `ailocal config
+gateway-port <n>` moves it, rewriting and restarting the service. Harnesses store the
+URL themselves, so re-run `ailocal harness configure` to bring them along - and
+`harness configure` warns when it is about to write a URL nothing is answering on,
+since the alternative is discovering it as a bare "Connection error" at the first
+prompt.
+
+Setup finishes by actually calling the gateway rather than assuming the service manager
+starting a job means it worked.
 
 ## Finding a model
 
