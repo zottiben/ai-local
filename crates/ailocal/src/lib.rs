@@ -21,6 +21,33 @@ pub mod source;
 pub mod update;
 pub mod vram;
 
+/// Free space on the filesystem holding `path`, in MiB.
+///
+/// Walks up to the nearest ancestor that exists, so it answers for a directory that has
+/// not been created yet - which is exactly when it is asked, while someone is choosing
+/// where to put thirty gigabytes of weights.
+///
+/// Returns `None` rather than an error: this informs a choice, it does not gate one, and
+/// a filesystem that will not answer `statvfs` is not a reason to refuse to continue.
+#[must_use]
+pub fn free_mib(path: &std::path::Path) -> Option<u64> {
+    let existing = path.ancestors().find(|p| p.exists())?;
+    let stat = rustix::fs::statvfs(existing).ok()?;
+    // f_bavail is what a non-root user may actually use, which is smaller than f_bfree
+    // and is the number that decides whether a download completes.
+    Some(stat.f_bavail.saturating_mul(stat.f_frsize) / (1024 * 1024))
+}
+
+/// Render a byte count in whichever unit reads best, for space rather than for weights.
+#[must_use]
+pub fn format_mib(mib: u64) -> String {
+    if mib >= 1024 {
+        format!("{:.0} GB", mib as f64 / 1024.0)
+    } else {
+        format!("{mib} MB")
+    }
+}
+
 /// VRAM currently in use, in MiB.
 ///
 /// This is the footprint of everything that is not the model we are about to load, and
@@ -89,4 +116,44 @@ pub fn primary_device() -> anyhow::Result<device::Device> {
                  Metal is built in on macOS) and check `llama-server --list-devices`"
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The point of this is to answer for a directory that does not exist yet, since
+    /// that is the state it is asked about - while someone decides where to put a model.
+    #[test]
+    fn free_space_answers_for_a_directory_not_yet_created() {
+        let absent = std::env::temp_dir().join("ailocal-definitely-absent/models/deeper");
+        assert!(!absent.exists());
+        assert!(
+            free_mib(&absent).is_some(),
+            "should have reported the filesystem holding its nearest existing parent"
+        );
+    }
+
+    #[test]
+    fn free_space_is_reported_for_a_real_directory() {
+        let free = free_mib(std::path::Path::new("/")).expect("root filesystem");
+        assert!(
+            free > 0,
+            "a mounted filesystem should report some free space"
+        );
+    }
+
+    /// A path with no existing ancestor at all cannot be measured, and that is a
+    /// missing answer rather than a failure.
+    #[test]
+    fn an_unrooted_relative_path_reports_nothing() {
+        assert_eq!(free_mib(std::path::Path::new("")), None);
+    }
+
+    #[test]
+    fn sizes_read_in_the_unit_that_suits_them() {
+        assert_eq!(format_mib(512), "512 MB");
+        assert_eq!(format_mib(1024), "1 GB");
+        assert_eq!(format_mib(325 * 1024), "325 GB");
+    }
 }

@@ -84,6 +84,54 @@ pub fn parse_choice(input: &str, len: usize) -> Option<usize> {
     (1..=len).contains(&n).then(|| n - 1)
 }
 
+/// Ask for a line of text, falling back to `default` on an empty answer.
+///
+/// Expands a leading `~/`, because someone typing a path at a prompt is not running a
+/// shell and will not get it expanded for them - and a literal `~` directory appearing
+/// in the home directory is a confusing way to find that out.
+///
+/// # Errors
+/// If the terminal cannot be read.
+pub fn ask(question: &str, default: &str) -> anyhow::Result<String> {
+    print!("{question} [{default}] ");
+    std::io::stdout().flush().ok();
+
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    let answer = line.trim();
+    Ok(if answer.is_empty() {
+        default.to_owned()
+    } else {
+        expand_home(answer)
+    })
+}
+
+/// Expand a leading `~` against `HOME`.
+#[must_use]
+pub fn expand_home(input: &str) -> String {
+    let Some(rest) = input.strip_prefix('~') else {
+        return input.to_owned();
+    };
+    // `~foo` is another user's home, which we do not resolve - leave it be rather than
+    // silently turn it into a subdirectory of this user's.
+    if !(rest.is_empty() || rest.starts_with('/')) {
+        return input.to_owned();
+    }
+    match std::env::var_os("HOME") {
+        Some(home) => format!("{}{rest}", home.to_string_lossy()),
+        None => input.to_owned(),
+    }
+}
+
+/// Whether there is a human present to answer a prompt.
+///
+/// Without this a script or a CI run blocks forever on a question nobody will see, or
+/// takes an empty stdin as a deliberate choice.
+#[must_use]
+pub fn interactive() -> bool {
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
 /// Ask a yes/no question, defaulting to `default` on an empty answer.
 ///
 /// # Errors
@@ -118,5 +166,28 @@ mod tests {
         for input in ["", "\n", "0", "4", "abc", "-1", "1.5"] {
             assert_eq!(parse_choice(input, 3), None, "for {input:?}");
         }
+    }
+
+    #[test]
+    fn a_leading_tilde_becomes_the_home_directory() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(expand_home("~/models"), format!("{home}/models"));
+        assert_eq!(expand_home("~"), home);
+    }
+
+    #[test]
+    fn paths_without_a_tilde_are_untouched() {
+        assert_eq!(
+            expand_home("/mnt/kingston/ailocal"),
+            "/mnt/kingston/ailocal"
+        );
+        assert_eq!(expand_home("relative/path"), "relative/path");
+    }
+
+    /// `~other` is another user's home. We do not resolve it, and must not quietly
+    /// rewrite it into a subdirectory of this user's.
+    #[test]
+    fn another_users_home_is_left_alone() {
+        assert_eq!(expand_home("~other/models"), "~other/models");
     }
 }

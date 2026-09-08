@@ -24,6 +24,28 @@ macOS uses to stay responsive:
 sudo sysctl iogpu.wired_limit_mb=28000   # session only; =0 restores the default
 ```
 
+## Where things go
+
+Models are large - one is 5-30 GB - so `ailocal setup` asks where to put them before it
+downloads anything, and shows the free space where it is about to write.
+
+One setting decides all of it:
+
+```
+ailocal config data-dir                    # show it, with free space
+ailocal config data-dir /mnt/big/ailocal   # move it
+ailocal setup --data-dir /mnt/big/ailocal  # or choose up front, unattended
+```
+
+It defaults to `~/.ailocal`, holding `models/`, `hf/` and `eval/`. Any of those can be
+pinned individually in `~/.config/ailocal/config.toml` if, say, only the weights belong
+on a scratch volume - setting the root afterwards leaves a path you chose yourself alone.
+
+`HF_HOME` is always set from this, never left to the Hugging Face default of
+`~/.cache/huggingface` - which is how one download fills a home partition.
+
+Changing the root does not move what is already downloaded; it tells you what to `mv`.
+
 ## What it does
 
 ```
@@ -47,6 +69,7 @@ desktop session dies.
 | | |
 | --- | --- |
 | `ailocal setup` | check prerequisites, install a model, start services, configure harnesses |
+| `ailocal config data-dir [path]` | where weights, caches and datasets live |
 | `ailocal model pick` | choose interactively from models ranked for your hardware |
 | `ailocal model search <query>` | find GGUF repos on Hugging Face |
 | `ailocal model files <owner/repo>` | list quantisations and which of them fit |
@@ -155,7 +178,7 @@ Its catch is quant coverage - mostly just the default `Q4_K_M` per size. When yo
 specific quantisation to make something fit, that comes from Hugging Face.
 
 Neither source needs the vendor's CLI installed. For gated or rate-limited Hugging Face
-repos, put a token at `$HF_HOME/token` (`/mnt/kingston/ailocal/hf/token` by default).
+repos, put a token at `$HF_HOME/token` (`~/.ailocal/hf/token` by default).
 
 ## Extras
 

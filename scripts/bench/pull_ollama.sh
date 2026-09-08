@@ -10,7 +10,11 @@
 set -euo pipefail
 NAME=${1:?model name, e.g. qwen3}
 TAG=${2:?tag, e.g. 14b}
-OUT=${3:-/mnt/kingston/ailocal/models/${NAME}-${TAG}.gguf}
+# Same default as the CLI: AILOCAL_DATA_DIR, else ~/.ailocal. This is a bench script,
+# so it does not read the config file - pass an outfile if yours points elsewhere.
+DATA_DIR=${AILOCAL_DATA_DIR:-$HOME/.ailocal}
+OUT=${3:-${DATA_DIR}/models/${NAME}-${TAG}.gguf}
+mkdir -p "$(dirname "$OUT")"
 REG=https://registry.ollama.ai/v2/library
 
 DIG=$(curl -sf --max-time 20 "${REG}/${NAME}/manifests/${TAG}" | python3 -c "

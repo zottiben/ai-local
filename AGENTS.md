@@ -9,7 +9,8 @@ Inference is llama.cpp's `llama-server`, Vulkan backend. Models are GGUF from Hu
 **Layout**
 - `crates/` - Rust workspace (CLI, registry, gateway)
 - `python/` - training sidecar, its own uv-managed venv, never the system interpreter
-- `/mnt/kingston/ailocal/` - all weights, adapters, datasets and caches. Not in this repo.
+- `$data_dir` - all weights, adapters, datasets and caches. Not in this repo. Defaults
+  to `~/.ailocal`; **on this machine it is `/mnt/kingston/ailocal`** (see rule 1).
 
 **Commands** (from repo root)
 - Build / lint / test: `cargo build`, `cargo clippy -- -D warnings`, `cargo test`
@@ -28,16 +29,19 @@ run against.
 
 ## Hard rules
 
-### 1. Nothing large is written outside /mnt/kingston
-`/` has ~17 GB free and `/home` ~13 GB. A single model download fills either one.
-`/mnt/kingston` has 325 GB.
+### 1. Nothing large is written outside the configured data dir
+Every large artifact goes under `Config::data_dir`, never a library default and never a
+hardcoded path. `models_dir`, `hf_home` and `eval_dir` derive from it, so one setting
+moves everything. A new absolute path in the source is a bug: this runs on more than one
+machine and their disks differ.
 
-```
-HF_HOME=/mnt/kingston/ailocal/hf
-```
+Any code path touching the Hugging Face hub must set `HF_HOME` from the config. The
+library default is `~/.cache/huggingface`, which is how a single download fills a home
+partition.
 
-Any code path that touches the Hugging Face hub must set this explicitly. The library
-default is `~/.cache/huggingface`, which is on the 13 GB partition.
+**On this machine** `data_dir = /mnt/kingston/ailocal`, because `/` has ~17 GB free and
+`/home` ~13 GB while kingston has 325 GB. A single model fills either of the first two.
+That is a fact about this box, not a default - `~/.ailocal` is, and `ailocal setup` asks.
 
 ### 1b. Hugging Face is slow here; prefer the Ollama registry
 Measured from Adelaide: `registry.ollama.ai` 79-97 MB/s, `huggingface.co` 0.016-2.7 MB/s
@@ -48,7 +52,7 @@ IQ3/Q3 still has to come from HF (use plain authenticated `curl -C -`, not `hf`)
 
 ### 2. Never use the system Python
 It is 3.14.6 and no ML library ships wheels for it. The sidecar gets its own 3.11/3.12
-venv under `/mnt/kingston/ailocal/venv`, created and verified by the Rust CLI.
+venv under `$data_dir/venv`, created and verified by the Rust CLI.
 
 ### 3. Never exceed 14400 MiB of VRAM, and size weights against ~10 GiB
 The card has 16368 MiB and the desktop holds ~900 MiB at idle, but it allocates *new*

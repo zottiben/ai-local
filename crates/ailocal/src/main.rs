@@ -68,6 +68,10 @@ enum Command {
 
 #[derive(Args)]
 struct SetupArgs {
+    /// Where weights, caches and datasets go. Asked for if not given.
+    #[arg(long)]
+    data_dir: Option<std::path::PathBuf>,
+
     /// Model to install if none are present, e.g. `ollama:gemma4:12b`.
     #[arg(long)]
     model: Option<String>,
@@ -216,6 +220,12 @@ enum ConfigCmd {
     Show,
     /// Write the current configuration to disk.
     Init,
+    /// Show or change where weights, caches and datasets live.
+    ///
+    /// Changing it does not move anything already downloaded - moving tens of
+    /// gigabytes is `mv`, and doing it silently inside a config command would be a
+    /// surprising amount of I/O. It says what to move instead.
+    DataDir { path: Option<std::path::PathBuf> },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -231,6 +241,7 @@ fn main() -> anyhow::Result<()> {
         Command::Model(ModelCmd::Rm { name }) => model_rm(&name),
         Command::Config(ConfigCmd::Show) => config_show(),
         Command::Config(ConfigCmd::Init) => config_init(),
+        Command::Config(ConfigCmd::DataDir { path }) => config_data_dir(path),
         Command::Serve(args) => serve_model(&args),
         Command::Ps => ps(),
         Command::Stop => stop(),
@@ -342,6 +353,56 @@ fn config_show() -> anyhow::Result<()> {
 fn config_init() -> anyhow::Result<()> {
     let path = Config::load()?.save()?;
     println!("wrote {}", path.display());
+    Ok(())
+}
+
+fn config_data_dir(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+    let mut cfg = Config::load()?;
+
+    let Some(new_root) = path else {
+        for (label, dir) in [
+            ("data", &cfg.data_dir),
+            ("models", &cfg.models_dir),
+            ("hf cache", &cfg.hf_home),
+            ("eval", &cfg.eval_dir),
+        ] {
+            println!(
+                "{label:<9} {:<44} {}",
+                dir.display(),
+                ailocal::free_mib(dir).map_or_else(
+                    || "?".into(),
+                    |m| format!("{} free", ailocal::format_mib(m))
+                )
+            );
+        }
+        return Ok(());
+    };
+
+    let old_models = cfg.models_dir.clone();
+    cfg.set_data_dir(new_root);
+    std::fs::create_dir_all(&cfg.models_dir)
+        .map_err(|e| anyhow::anyhow!("cannot create {}: {e}", cfg.models_dir.display()))?;
+    println!("wrote {}", cfg.save()?.display());
+    println!(
+        "models now expected in {} ({} free)",
+        cfg.models_dir.display(),
+        ailocal::free_mib(&cfg.models_dir).map_or_else(|| "?".into(), ailocal::format_mib)
+    );
+
+    // Nothing is moved, so say plainly what is now in the wrong place rather than let
+    // `ailocal model ls` come back empty and look like the models were lost.
+    if old_models != cfg.models_dir
+        && let Ok(existing) = registry::scan(&old_models)
+        && !existing.is_empty()
+    {
+        println!(
+            "\n{} model(s) are still in {}. Move them across to keep them:\n  mv {}/*.gguf {}/",
+            existing.len(),
+            old_models.display(),
+            old_models.display(),
+            cfg.models_dir.display()
+        );
+    }
     Ok(())
 }
 
@@ -775,6 +836,42 @@ fn harness_unconfigure(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Settle where the large files go, writing a config if there is not one yet.
+///
+/// Asked rather than assumed, because the default cannot be right for everyone: model
+/// weights are tens of gigabytes and the only machine that knows where there is room is
+/// this one. `--data-dir` answers it for a script; a terminal gets a prompt; anything
+/// else takes the default rather than blocking on a question nobody will see.
+fn resolve_data_dir(args: &SetupArgs) -> anyhow::Result<Config> {
+    let path = Config::path()?;
+    let mut cfg = Config::load()?;
+
+    if let Some(chosen) = &args.data_dir {
+        cfg.set_data_dir(chosen.clone());
+        println!("   wrote {}", cfg.save()?.display());
+        return Ok(cfg);
+    }
+
+    if path.exists() {
+        println!("   ok    {}", path.display());
+        return Ok(cfg);
+    }
+
+    if ailocal::prompt::interactive() {
+        let default = cfg.data_dir.display().to_string();
+        println!(
+            "   Models are large - a single one is 5-30 GB. Where should they live?\n\
+             \x20  {default} has {} free.",
+            ailocal::free_mib(&cfg.data_dir).map_or_else(|| "?".into(), ailocal::format_mib)
+        );
+        let answer = ailocal::prompt::ask("   Data directory", &default)?;
+        cfg.set_data_dir(std::path::PathBuf::from(answer));
+    }
+
+    println!("   wrote {}", cfg.save()?.display());
+    Ok(cfg)
+}
+
 /// Bring a fresh machine up: check what is needed, then do the rest.
 fn setup(args: &SetupArgs) -> anyhow::Result<()> {
     let mut blocked = false;
@@ -821,18 +918,21 @@ fn setup(args: &SetupArgs) -> anyhow::Result<()> {
         }
     }
 
-    println!("\n2. config");
-    let path = Config::path()?;
-    if path.exists() {
-        println!("   ok    {}", path.display());
-    } else {
-        println!("   wrote {}", Config::load()?.save()?.display());
+    println!("\n2. where things go");
+    let cfg = resolve_data_dir(args)?;
+    if let Err(e) = std::fs::create_dir_all(&cfg.models_dir) {
+        anyhow::bail!(
+            "cannot create {}: {e}\n\
+             Pick somewhere writable with `ailocal config data-dir <path>`, or re-run \
+             `ailocal setup --data-dir <path>`.",
+            cfg.models_dir.display()
+        );
     }
-    let cfg = Config::load()?;
-    if !cfg.models_dir.exists() {
-        std::fs::create_dir_all(&cfg.models_dir)?;
-        println!("   made  {}", cfg.models_dir.display());
-    }
+    println!(
+        "   ok    {} ({} free)",
+        cfg.models_dir.display(),
+        ailocal::free_mib(&cfg.models_dir).map_or_else(|| "?".into(), ailocal::format_mib)
+    );
 
     anyhow::ensure!(
         !blocked,
