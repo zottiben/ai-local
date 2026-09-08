@@ -74,6 +74,26 @@ pub struct Model {
     pub sliding_window: bool,
 }
 
+/// Find an installed model that is the artifact `stem` would be downloaded as.
+///
+/// An exact name match is the easy case. The other one matters more in practice: a
+/// file fetched earlier, or by hand, often carries the quantisation in its name where
+/// the reference would not. This machine holds `gemma4-12b-Q4_K_M.gguf` while
+/// `ollama:gemma4:12b` would store `gemma4-12b.gguf`, and the two are byte-for-byte the
+/// same blob - 7381382048 bytes either way. Offering to fetch seven gigabytes someone
+/// already has is the thing worth avoiding, so a name that extends the stem and a size
+/// that agrees to the megabyte counts as the same model.
+///
+/// The size check is what keeps this honest: different quantisations of one model
+/// differ by hundreds of megabytes, so `gemma4-12b-Q5_K_M` will not be mistaken for
+/// `gemma4-12b-Q4_K_M`.
+#[must_use]
+pub fn already_have<'a>(installed: &'a [Model], stem: &str, size_mib: u64) -> Option<&'a Model> {
+    installed
+        .iter()
+        .find(|m| m.name == stem || (m.name.starts_with(stem) && m.size_mib == size_mib))
+}
+
 impl Model {
     /// Largest context this model can hold under `budget`, or `None` if the weights
     /// alone do not fit or the metadata was unreadable.
@@ -151,6 +171,55 @@ pub fn scan(dir: &Path) -> anyhow::Result<Vec<Model>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn named(name: &str, size_mib: u64) -> Model {
+        Model {
+            name: name.into(),
+            path: PathBuf::from(format!("/tmp/{name}.gguf")),
+            size_mib,
+            arch: None,
+            trained_context: None,
+            kv: None,
+            sliding_window: false,
+        }
+    }
+
+    #[test]
+    fn an_exact_name_is_the_same_model() {
+        let installed = vec![named("qwen3-14b", 8846)];
+        assert!(already_have(&installed, "qwen3-14b", 8846).is_some());
+        assert!(already_have(&installed, "qwen3-8b", 4000).is_none());
+    }
+
+    /// The real case on this machine: `ollama:gemma4:12b` stores `gemma4-12b.gguf`,
+    /// but the copy already here is `gemma4-12b-Q4_K_M.gguf` and the two are the same
+    /// 7381382048 bytes. Re-downloading that is seven gigabytes wasted.
+    #[test]
+    fn a_quantisation_suffix_does_not_hide_a_model_we_have() {
+        let installed = vec![named("gemma4-12b-Q4_K_M", 7038)];
+        let found = already_have(&installed, "gemma4-12b", 7038).expect("same blob");
+        assert_eq!(found.name, "gemma4-12b-Q4_K_M");
+    }
+
+    /// ...but a different quantisation is a different file, and must still be offered.
+    #[test]
+    fn a_different_quantisation_is_a_different_model() {
+        let installed = vec![named("gemma4-12b-Q5_K_M", 8600)];
+        assert!(already_have(&installed, "gemma4-12b", 7038).is_none());
+    }
+
+    /// A longer name that merely shares a prefix is not the same model, and the size
+    /// is what has to prove it.
+    #[test]
+    fn a_shared_prefix_alone_is_not_enough() {
+        let installed = vec![named("qwen3-14b-instruct", 12000)];
+        assert!(already_have(&installed, "qwen3-14b", 8846).is_none());
+    }
+
+    #[test]
+    fn nothing_installed_matches_nothing() {
+        assert!(already_have(&[], "gemma4-12b", 7038).is_none());
+    }
 
     fn model(size_mib: u64, kv: KvLayout, trained: u64) -> Model {
         Model {

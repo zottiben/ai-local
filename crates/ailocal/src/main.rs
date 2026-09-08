@@ -113,11 +113,18 @@ enum ServiceCmd {
 enum HarnessCmd {
     /// Write the gateway into a harness's configuration.
     Configure {
-        /// Which harness. Currently `pi`.
+        /// Which harness: `pi` or `claude-code`.
         name: String,
         /// Gateway URL the harness should call.
         #[arg(long, default_value = "http://127.0.0.1:8081")]
         url: String,
+        /// Which model to point it at.
+        ///
+        /// Only Claude Code is pinned to one - Pi is given the whole list and picks
+        /// per session, so this just decides which one it offers first. Defaults to
+        /// `default_model`, then to whatever is loaded.
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Remove our entry from a harness's configuration.
     Unconfigure { name: String },
@@ -234,10 +241,16 @@ fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Budget => budget(),
         Command::Model(ModelCmd::Ls) => model_ls(),
-        Command::Model(ModelCmd::Pick) => model_pick().map(|_| ()),
+        Command::Model(ModelCmd::Pick) => model_pick().map(|picked| {
+            if let Some(name) = picked {
+                harness_next_step(&name);
+            }
+        }),
         Command::Model(ModelCmd::Search { query, limit }) => model_search(&query.join(" "), limit),
         Command::Model(ModelCmd::Files { repo }) => model_files(&repo),
-        Command::Model(ModelCmd::Install(args)) => model_install(&args),
+        Command::Model(ModelCmd::Install(args)) => model_install(&args).map(|name| {
+            harness_next_step(&name);
+        }),
         Command::Model(ModelCmd::Rm { name }) => model_rm(&name),
         Command::Config(ConfigCmd::Show) => config_show(),
         Command::Config(ConfigCmd::Init) => config_init(),
@@ -246,7 +259,9 @@ fn main() -> anyhow::Result<()> {
         Command::Ps => ps(),
         Command::Stop => stop(),
         Command::Gateway(GatewayCmd::Run { port, host }) => gateway_run(&host, port),
-        Command::Harness(HarnessCmd::Configure { name, url }) => harness_configure(&name, &url),
+        Command::Harness(HarnessCmd::Configure { name, url, model }) => {
+            harness_configure(&name, &url, model.as_deref())
+        }
         Command::Harness(HarnessCmd::Unconfigure { name }) => harness_unconfigure(&name),
         Command::Service(ServiceCmd::Install { no_start }) => service_install(no_start),
         Command::Service(ServiceCmd::Uninstall) => service_uninstall(),
@@ -466,64 +481,233 @@ fn http_client() -> anyhow::Result<reqwest::blocking::Client> {
         .build()?)
 }
 
-/// Offer the curated shortlist, ranked for this machine, and install what is chosen.
+/// Something the picker can offer.
+enum Pickable {
+    /// Already on disk. Choosing it costs nothing but a config write.
+    Installed {
+        name: String,
+        size_mib: u64,
+        context: u64,
+        /// The catalogue's description, when this is a model the catalogue knows.
+        summary: Option<&'static str>,
+    },
+    /// In the catalogue and not yet downloaded.
+    Remote(Box<ailocal::catalogue::Candidate>),
+}
+
+impl Pickable {
+    fn label(&self) -> String {
+        match self {
+            // Deliberately the same shape as Candidate::label, so the two halves of
+            // the list read as one list.
+            Self::Installed {
+                name,
+                size_mib,
+                context,
+                summary,
+            } => format!(
+                "{:<18} {:>5} GiB  {:>4}k context   on disk{}",
+                name,
+                size_mib / 1024,
+                context / 1024,
+                summary.map_or_else(String::new, |s| format!(" - {s}"))
+            ),
+            Self::Remote(c) => c.label(),
+        }
+    }
+}
+
+/// Offer what is installed and what could be, ranked for this machine, and make the
+/// choice the default model.
 ///
-/// Returns the installed model's name, so `setup` can carry straight on with it.
+/// This is the "which model am I using" command, not only the "download one" command.
+/// A model already on disk is offered as itself rather than as something to fetch
+/// again, so picking it is how you switch defaults - and re-picking the model you
+/// already have costs nothing.
+///
+/// Returns the chosen model's name.
 fn model_pick() -> anyhow::Result<Option<String>> {
+    let cfg = Config::load()?;
+    let cache: vram::CacheType = cfg.cache_type.parse()?;
     let budget = serve::budget_for_next_launch()
         .unwrap_or_else(|_| vram::Budget::new(ailocal::vram_used_mib().unwrap_or(900)));
     let available = budget.available_mib();
 
+    let on_disk = registry::scan(&cfg.models_dir)?;
+
     let client = http_client()?;
     println!("Checking what fits in {available} MiB ...");
     let mut candidates = ailocal::catalogue::resolve(&client, available);
-    anyhow::ensure!(!candidates.is_empty(), "could not reach the model registry");
 
-    // Reads a few MiB of each fitting model for its real attention geometry, because
-    // weight size does not predict usable context: a 12B with sliding-window attention
-    // holds six times what a 14B with full attention does.
-    println!("Measuring usable context ...");
-    let cache = Config::load()?.cache_type.parse()?;
-    ailocal::catalogue::measure(&client, &mut candidates, &budget, cache);
+    // Anything already downloaded is offered below as itself, so drop it from the
+    // download list rather than invite someone to fetch gigabytes they already have.
+    // Keep what the catalogue called it, to describe it in the list.
+    let mut described: Vec<(String, &'static str)> = Vec::new();
+    candidates.retain(|c| {
+        let Some(stem) = catalogue_stem(c) else {
+            return true;
+        };
+        match registry::already_have(&on_disk, &stem, c.size_mib) {
+            Some(have) => {
+                described.push((have.name.clone(), c.entry.summary));
+                false
+            }
+            None => true,
+        }
+    });
 
-    let options: Vec<String> = candidates
-        .iter()
-        .map(ailocal::catalogue::Candidate::label)
-        .collect();
-    let header = format!(
-        "Models for this machine ({available} MiB available). \
-         Anything else: ailocal model search <query>"
+    let mut options: Vec<Pickable> = Vec::new();
+    let mut unusable = 0;
+    for m in &on_disk {
+        match registry::assess(m.kv, m.trained_context, &budget, cache, m.size_mib) {
+            Fit::Fits(context) => options.push(Pickable::Installed {
+                name: m.name.clone(),
+                size_mib: m.size_mib,
+                context,
+                summary: described
+                    .iter()
+                    .find(|(name, _)| *name == m.name)
+                    .map(|(_, summary)| *summary),
+            }),
+            _ => unusable += 1,
+        }
+    }
+
+    // The registry being unreachable is only fatal with nothing installed - otherwise
+    // there is still a perfectly good choice to make offline.
+    anyhow::ensure!(
+        !candidates.is_empty() || !options.is_empty(),
+        "could not reach the model registry, and nothing is installed yet"
     );
 
-    let Some(index) = ailocal::prompt::choose(&header, &options)? else {
+    if !candidates.is_empty() {
+        // Reads a few MiB of each fitting model for its real attention geometry,
+        // because weight size does not predict usable context: a 12B with
+        // sliding-window attention holds six times what a 14B with full attention does.
+        println!("Measuring usable context ...");
+        ailocal::catalogue::measure(&client, &mut candidates, &budget, cache);
+    }
+    options.extend(
+        candidates
+            .into_iter()
+            .map(|c| Pickable::Remote(Box::new(c))),
+    );
+
+    let labels: Vec<String> = options.iter().map(Pickable::label).collect();
+    let header = format!(
+        "Models for this machine ({available} MiB available). \
+         Choosing one makes it the default. Anything else: ailocal model search <query>"
+    );
+    if unusable > 0 {
+        println!("({unusable} installed model(s) cannot run here; `ailocal model ls` shows why)");
+    }
+
+    let Some(index) = ailocal::prompt::choose(&header, &labels)? else {
         println!("Nothing selected.");
         return Ok(None);
     };
-    let chosen = &candidates[index];
 
-    if !chosen.fits() {
-        println!(
-            "\n{} needs {} MiB but only {available} MiB is free.",
-            chosen.entry.reference, chosen.size_mib
-        );
-        if !ailocal::prompt::confirm("Download it anyway?", false)? {
-            return Ok(None);
+    let name = match &options[index] {
+        Pickable::Installed { name, .. } => {
+            println!("\n{name} is already downloaded.");
+            name.clone()
         }
-    }
-    if !chosen.entry.note.is_empty() {
-        println!("\nnote: {}", chosen.entry.note);
+        Pickable::Remote(chosen) => {
+            if !chosen.fits() {
+                println!(
+                    "\n{} needs {} MiB but only {available} MiB is free.",
+                    chosen.entry.reference, chosen.size_mib
+                );
+                if !ailocal::prompt::confirm("Download it anyway?", false)? {
+                    return Ok(None);
+                }
+            }
+            if !chosen.entry.note.is_empty() {
+                println!("\nnote: {}", chosen.entry.note);
+            }
+            model_install(&InstallArgs {
+                reference: format!("ollama:{}", chosen.entry.reference),
+                force: !chosen.fits(),
+            })?
+        }
+    };
+
+    set_default_model(&name)?;
+    Ok(Some(name))
+}
+
+/// The filename stem a catalogue entry would be stored under, for spotting one that is
+/// already downloaded.
+fn catalogue_stem(candidate: &ailocal::catalogue::Candidate) -> Option<String> {
+    format!("ollama:{}", candidate.entry.reference)
+        .parse::<Source>()
+        .ok()
+        .map(|s| s.file_name().trim_end_matches(".gguf").to_owned())
+}
+
+/// Record `name` as the model this machine serves, and make that true.
+fn set_default_model(name: &str) -> anyhow::Result<()> {
+    let mut cfg = Config::load()?;
+    if cfg.default_model.as_deref() == Some(name) {
+        println!("{name} is already the default model.");
+        return Ok(());
     }
 
-    let reference = format!("ollama:{}", chosen.entry.reference);
-    model_install(&InstallArgs {
-        reference: reference.clone(),
-        force: !chosen.fits(),
-    })?;
+    cfg.default_model = Some(name.to_owned());
+    cfg.save()?;
+    println!("default model is now {name}");
+    repoint_model_service(&cfg);
+    Ok(())
+}
 
-    Ok(reference.parse::<Source>().ok().map(|s| {
-        // The registry keys models by filename stem, which is what `serve` wants.
-        s.file_name().trim_end_matches(".gguf").to_owned()
-    }))
+/// Point an installed model service at the configured default.
+///
+/// The unit embeds the model name in its `ExecStart`, so changing `default_model` in
+/// the config does nothing on its own - the service would keep serving the old model
+/// and would load it again at the next boot. Best-effort: a service that cannot be
+/// updated must not turn a successful download into a failed command.
+fn repoint_model_service(cfg: &Config) {
+    let installed =
+        service::is_enabled(service::MODEL_UNIT) || service::is_active(service::MODEL_UNIT);
+    if !installed {
+        return;
+    }
+
+    let outcome = (|| -> anyhow::Result<bool> {
+        let exe = unit_binary()?;
+        service::install(
+            &exe,
+            &cfg.gateway_host,
+            cfg.gateway_port,
+            cfg.default_model.as_deref(),
+        )?;
+        service::reload()?;
+        let running = service::is_active(service::MODEL_UNIT);
+        if running {
+            service::stop(service::MODEL_UNIT)?;
+            service::start(service::MODEL_UNIT)?;
+        }
+        Ok(running)
+    })();
+
+    match outcome {
+        Ok(true) => println!("  restarted {} on it", service::MODEL_UNIT),
+        Ok(false) => println!("  updated {}", service::MODEL_UNIT),
+        Err(e) => println!(
+            "  note: {} still points at the old model ({e:#})\n\
+             \x20       run `ailocal service install` to update it",
+            service::MODEL_UNIT
+        ),
+    }
+}
+
+/// The line that carries someone from "a model is on disk" to "my harness uses it".
+///
+/// Every other step of this flow ends by naming the next one - `model search` points at
+/// `model files`, which points at `model install` - and this is where that chain used
+/// to stop.
+fn harness_next_step(name: &str) {
+    println!("\nNext: ailocal harness configure pi --model {name}   (or claude-code)");
 }
 
 fn model_search(query: &str, limit: usize) -> anyhow::Result<()> {
@@ -611,7 +795,12 @@ fn preflight(
     )
 }
 
-fn model_install(args: &InstallArgs) -> anyhow::Result<()> {
+/// Download a model, returning the name the registry will know it by.
+///
+/// The name is what every later step needs - `serve`, `default_model`, a harness
+/// catalogue entry - so it is returned rather than left for the caller to re-derive
+/// from the reference.
+fn model_install(args: &InstallArgs) -> anyhow::Result<String> {
     let cfg = Config::load()?;
     let cache: vram::CacheType = cfg.cache_type.parse()?;
     let source: Source = args.reference.parse()?;
@@ -636,7 +825,14 @@ fn model_install(args: &InstallArgs) -> anyhow::Result<()> {
 
     // Read just the head to learn the architecture. A model that cannot hold a usable
     // context here should cost seconds to reject, not an hour of downloading.
-    let budget = vram::Budget::new(ailocal::vram_used_mib().unwrap_or(900));
+    //
+    // Budgeted against what a launch would get, not against live VRAM: with a model
+    // already resident, live usage counts weights that serving this one would evict.
+    // `model pick` sizes its list the same way, so using live usage here made the two
+    // disagree - the picker offered a model as fitting and the installer then refused
+    // to download it.
+    let budget = serve::budget_for_next_launch()
+        .unwrap_or_else(|_| vram::Budget::new(ailocal::vram_used_mib().unwrap_or(900)));
     let fit = preflight(&client, &artifact, &budget, cache, weights_mib);
 
     match fit {
@@ -672,7 +868,11 @@ fn model_install(args: &InstallArgs) -> anyhow::Result<()> {
             );
         }
     }
-    Ok(())
+
+    Ok(path.file_stem().map_or_else(
+        || artifact.file_name.clone(),
+        |s| s.to_string_lossy().into_owned(),
+    ))
 }
 
 fn model_rm(name: &str) -> anyhow::Result<()> {
@@ -740,20 +940,16 @@ fn serve_model(args: &ServeArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn harness_configure(name: &str, url: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        matches!(name, "pi" | "claude-code"),
-        "unknown harness {name:?}; expected `pi` or `claude-code`"
-    );
-
-    let cfg = Config::load()?;
+/// Every installed model that could actually run here, alphabetically.
+///
+/// Offering a model a harness cannot load only moves the failure later, so anything
+/// that does not fit is left out.
+fn runnable_models(cfg: &Config) -> anyhow::Result<Vec<harness::PiModel>> {
     let cache: vram::CacheType = cfg.cache_type.parse()?;
     let budget = serve::budget_for_next_launch()
         .unwrap_or_else(|_| vram::Budget::new(ailocal::vram_used_mib().unwrap_or(900)));
 
-    // Advertise only what can actually run, at the context it would actually get.
-    // Offering a model Pi cannot load just moves the failure later.
-    let models: Vec<harness::PiModel> = registry::scan(&cfg.models_dir)?
+    Ok(registry::scan(&cfg.models_dir)?
         .iter()
         .filter_map(|m| {
             match registry::assess(m.kv, m.trained_context, &budget, cache, m.size_mib) {
@@ -765,22 +961,54 @@ fn harness_configure(name: &str, url: &str) -> anyhow::Result<()> {
                 _ => None,
             }
         })
-        .collect();
+        .collect())
+}
 
+fn harness_configure(name: &str, url: &str, wanted: Option<&str>) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(name, "pi" | "claude-code"),
+        "unknown harness {name:?}; expected `pi` or `claude-code`"
+    );
+
+    let cfg = Config::load()?;
+    let mut models = runnable_models(&cfg)?;
     anyhow::ensure!(
         !models.is_empty(),
         "no installed model can run here; `ailocal model ls` shows why"
     );
 
+    let loaded = serve::running()?.map(|i| i.model);
+    let (preferred, why) = harness::preferred(
+        &models,
+        wanted,
+        cfg.default_model.as_deref(),
+        loaded.as_deref(),
+    )?;
+    let (preferred, why) = (preferred.clone(), why);
+
     let key = auth::load_or_create()?;
 
     if name == "claude-code" {
-        let first = &models[0];
         let (path, outcome) =
-            harness::configure_claude_code(url, &key, &first.id, first.context_window)?;
+            harness::configure_claude_code(url, &key, &preferred.id, preferred.context_window)?;
         match outcome {
             harness::Outcome::AlreadyConfigured => println!("claude-code env already current"),
             harness::Outcome::Configured { .. } => println!("wrote {}", path.display()),
+        }
+        // Claude Code takes exactly one model, so which one it got is the single most
+        // useful thing to say - and the thing that used to be decided invisibly.
+        println!(
+            "  model: {} ({} context) - {}",
+            preferred.id,
+            format_count(preferred.context_window),
+            why.why()
+        );
+        if models.len() > 1 {
+            println!(
+                "  others installed: {}",
+                others(&models, &preferred.id).join(", ")
+            );
+            println!("  change it with `ailocal harness configure claude-code --model <name>`");
         }
         println!("  source it in a shell, then run claude there:");
         println!("    source {} && claude", path.display());
@@ -790,6 +1018,13 @@ fn harness_configure(name: &str, url: &str) -> anyhow::Result<()> {
              \x20 ones you want on the local model."
         );
         return Ok(());
+    }
+
+    // Pi keeps the whole catalogue and chooses per session, so the preference only
+    // decides the order it sees them in - and which one the hint below names.
+    if let Some(at) = models.iter().position(|m| m.id == preferred.id) {
+        let chosen = models.remove(at);
+        models.insert(0, chosen);
     }
 
     match harness::configure_pi(url, &key, &models)? {
@@ -809,9 +1044,18 @@ fn harness_configure(name: &str, url: &str) -> anyhow::Result<()> {
     println!(
         "  try: pi --provider {} --model {}",
         harness::PI_PROVIDER_ID,
-        models[0].id
+        preferred.id
     );
     Ok(())
+}
+
+/// The other model names, for a "you also have these" line.
+fn others(models: &[harness::PiModel], chosen: &str) -> Vec<String> {
+    models
+        .iter()
+        .filter(|m| m.id != chosen)
+        .map(|m| m.id.clone())
+        .collect()
 }
 
 fn harness_unconfigure(name: &str) -> anyhow::Result<()> {
@@ -966,6 +1210,16 @@ fn setup(args: &SetupArgs) -> anyhow::Result<()> {
         println!("   ok    {} ({} GiB)", m.name, m.size_mib / 1024);
     }
 
+    // The model unit embeds a model name, so with no default there is no model service
+    // at all - the gateway would come up with nothing behind it. Also covers a default
+    // naming a model that has since been deleted.
+    let installed = Config::load()?.default_model;
+    if !installed.is_some_and(|d| models.iter().any(|m| m.name == d))
+        && let Some(first) = models.first()
+    {
+        set_default_model(&first.name)?;
+    }
+
     if !args.skip_service {
         println!("\n4. services");
         service_install(false)?;
@@ -975,7 +1229,7 @@ fn setup(args: &SetupArgs) -> anyhow::Result<()> {
         println!("\n5. harnesses");
         let url = format!("http://{}:{}", "127.0.0.1", cfg.gateway_port);
         for harness in ["pi", "claude-code"] {
-            match harness_configure(harness, &url) {
+            match harness_configure(harness, &url, None) {
                 Ok(()) => {}
                 // A harness that is not installed is not a failure of setup.
                 Err(e) => println!("   skip  {harness}: {e}"),

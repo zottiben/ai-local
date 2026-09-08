@@ -16,10 +16,11 @@ Inference is llama.cpp's `llama-server`, Vulkan backend. Models are GGUF from Hu
 - Build / lint / test: `cargo build`, `cargo clippy -- -D warnings`, `cargo test`
 - Plan: `aip status` (the build plan is in ai-planner, not in a markdown file)
 - Install a model: `ailocal model install ollama:<name>:<tag>` (or `hf:<owner>/<repo>/<file>`)
+- Choose which model to use: `ailocal model pick` (also sets `default_model`)
 - What is on disk and what fits: `ailocal model ls`
 - Run one: `ailocal serve <name>`, then `ailocal ps` / `ailocal stop`
 - Expose it to harnesses: `ailocal gateway run` (key via `ailocal gateway key`)
-- Point a harness at it: `ailocal harness configure pi|claude-code` (undo with `unconfigure`)
+- Point a harness at it: `ailocal harness configure pi|claude-code [--model <name>]`
 - Run it 24/7: `ailocal service install`, then `ailocal service status`
 - Score a model: `ailocal extras install eval`, then `ailocal eval run`
 - Check a model's real context limit: `scripts/bench/ctx_probe.sh <model.gguf> q8_0`

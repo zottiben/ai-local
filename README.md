@@ -70,7 +70,7 @@ desktop session dies.
 | --- | --- |
 | `ailocal setup` | check prerequisites, install a model, start services, configure harnesses |
 | `ailocal config data-dir [path]` | where weights, caches and datasets live |
-| `ailocal model pick` | choose interactively from models ranked for your hardware |
+| `ailocal model pick` | choose your model: what you have, plus what would fit |
 | `ailocal model search <query>` | find GGUF repos on Hugging Face |
 | `ailocal model files <owner/repo>` | list quantisations and which of them fit |
 | `ailocal model install <ref>` | resumable, checksum-verified download |
@@ -78,11 +78,49 @@ desktop session dies.
 | `ailocal serve <model>` | run it, sized to the VRAM budget |
 | `ailocal ps` / `stop` | what is loaded |
 | `ailocal gateway run` / `key` / `check` | the authenticated front end |
-| `ailocal harness configure pi\|claude-code` | point a harness at it |
+| `ailocal harness configure pi\|claude-code [--model X]` | point a harness at it |
 | `ailocal service install` / `status` | systemd user units for 24/7 |
 | `ailocal update` | install the latest release in place |
 | `ailocal extras list` / `install <name>` | optional companions, see below |
 | `ailocal eval run` | score a model on a coding suite (needs the `eval` extra) |
+
+## Choosing a model
+
+`ailocal model pick` is the "which model am I using" command, not only the "download
+one" command. It lists what is already on disk alongside what the catalogue offers,
+ranked by what this machine can actually run:
+
+```
+ 1) gemma4-12b-Q4_K_M   6 GiB   256k context   on disk - general + coding, very long context
+ 2) qwen3-14b           8 GiB    38k context   on disk - holds up well under long prompts
+ 3) mistral-nemo:12b    6 GiB    58k context   general purpose, modest footprint
+ 4) qwen3-coder:30b    17 GiB    will not fit  code specialist, mixture-of-experts
+```
+
+Picking one makes it the default: the config is updated and, if a model service is
+installed, its unit is rewritten and restarted onto it. Picking something you already
+have downloads nothing, so this is also how you switch between models.
+
+A model already on disk is recognised even when its filename does not match the
+reference - `ollama:gemma4:12b` would store `gemma4-12b.gguf`, and a
+`gemma4-12b-Q4_K_M.gguf` of exactly the same size is the same blob, so it is offered as
+itself rather than as seven gigabytes to fetch again.
+
+## Pointing a harness at it
+
+```
+ailocal harness configure pi
+ailocal harness configure claude-code --model qwen3-14b
+```
+
+Pi is given the whole catalogue and chooses per session. Claude Code takes exactly one
+`ANTHROPIC_MODEL`, so `--model` decides it; without one it uses `default_model`, then
+whatever is loaded, and only then falls back to alphabetical order. It prints which it
+chose and why, because pinning one model out of several is a decision worth showing.
+
+Re-run it after installing a model: the harness keeps a cached catalogue, so a new model
+is not visible to it until that is rewritten. The gateway needs no such nudge - it
+rescans on every request.
 
 ## The gateway
 

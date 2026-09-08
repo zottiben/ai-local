@@ -145,6 +145,45 @@ struct Raw {
     gateway_port: u16,
 }
 
+/// Point at the likely cause when a config will not parse.
+///
+/// Unknown keys are rejected so a typo is reported rather than silently ignored, but
+/// that same strictness makes a config written by a *newer* ailocal fail every command
+/// with nothing but "unknown field". Seen for real: a 0.2.0 service could not read the
+/// `data_dir` a 0.3 binary had written, and restart-looped with no hint of why.
+fn unknown_field_hint(text: &str) -> Option<String> {
+    // Only fields this build does not know about can produce that error, so a key we
+    // do not recognise is the thing worth naming.
+    const KNOWN: &[&str] = &[
+        "data_dir",
+        "models_dir",
+        "hf_home",
+        "eval_dir",
+        "cache_type",
+        "reasoning",
+        "reasoning_budget",
+        "default_model",
+        "gateway_host",
+        "gateway_port",
+    ];
+
+    let unknown: Vec<&str> = text
+        .lines()
+        .filter_map(|l| l.split_once('=').map(|(k, _)| k.trim()))
+        .filter(|k| !k.is_empty() && !k.starts_with('#') && !KNOWN.contains(k))
+        .collect();
+
+    (!unknown.is_empty()).then(|| {
+        format!(
+            "this ailocal ({}) does not know: {}\n\
+             If the config was written by a newer version, `ailocal update` will \
+             catch this binary up.",
+            env!("CARGO_PKG_VERSION"),
+            unknown.join(", ")
+        )
+    })
+}
+
 /// Work out the data root from paths named the way we would have named them.
 ///
 /// A config written before `data_dir` existed names each path individually and has no
@@ -298,19 +337,20 @@ impl Config {
 
     /// Load the config, falling back to defaults when the file does not exist.
     ///
-    /// A missing file is not an error - the defaults are correct for this machine and
-    /// writing one out is the user's choice, not a precondition for the tool working.
+    /// A missing file is not an error - the defaults are reasonable and writing one out
+    /// is the user's choice, not a precondition for the tool working.
     ///
     /// # Errors
     /// If the file exists but cannot be read or parsed.
     pub fn load() -> anyhow::Result<Self> {
-        use anyhow::Context as _;
-
         let path = Self::path()?;
         match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
-            }
+            Ok(text) => toml::from_str(&text).map_err(|e| {
+                anyhow::Error::new(e).context(unknown_field_hint(&text).map_or_else(
+                    || format!("parsing {}", path.display()),
+                    |hint| format!("parsing {}\n{hint}", path.display()),
+                ))
+            }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(anyhow::Error::new(e).context(format!("reading {}", path.display()))),
         }
@@ -538,5 +578,26 @@ mod tests {
     #[test]
     fn unknown_keys_are_rejected() {
         assert!(toml::from_str::<Config>(r#"model_dir = "/tmp""#).is_err());
+    }
+
+    /// The same strictness makes a config from a newer ailocal unreadable, which is
+    /// how a 0.2.0 service ended up restart-looping on a `data_dir` it had never heard
+    /// of. The error has to say that rather than just "unknown field".
+    #[test]
+    fn an_unrecognised_key_suggests_updating() {
+        let hint = unknown_field_hint("data_dir = \"/x\"\nfuture_setting = 3\n")
+            .expect("should have spotted the unknown key");
+        assert!(hint.contains("future_setting"), "got: {hint}");
+        assert!(hint.contains("ailocal update"), "got: {hint}");
+        assert!(
+            !hint.contains("data_dir"),
+            "a known key is not the problem: {hint}"
+        );
+    }
+
+    #[test]
+    fn a_config_of_known_keys_produces_no_hint() {
+        assert!(unknown_field_hint("data_dir = \"/x\"\ncache_type = \"q8_0\"\n").is_none());
+        assert!(unknown_field_hint("# just a comment\n").is_none());
     }
 }

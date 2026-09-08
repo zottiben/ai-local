@@ -55,6 +55,79 @@ pub struct PiModel {
     pub reasoning: bool,
 }
 
+/// Why a particular model was chosen, so the choice is visible rather than mysterious.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chose {
+    /// Named on the command line.
+    Requested,
+    /// `default_model` from the config.
+    Configured,
+    /// Whatever is loaded right now.
+    Loaded,
+    /// Nothing said anything, so the list order decided.
+    FirstAvailable,
+}
+
+impl Chose {
+    #[must_use]
+    pub const fn why(self) -> &'static str {
+        match self {
+            Self::Requested => "as requested",
+            Self::Configured => "the configured default_model",
+            Self::Loaded => "currently loaded",
+            Self::FirstAvailable => "first alphabetically, since nothing named one",
+        }
+    }
+}
+
+/// Pick the one model a single-model harness should be pointed at.
+///
+/// Claude Code takes one `ANTHROPIC_MODEL`, so something has to choose. Sorting the
+/// installed models and taking the first was silently wrong: install `qwen3-14b`
+/// alongside `gemma4-12b` and it keeps pinning gemma4 because `g` sorts before `q`,
+/// ignoring both the model you just installed and the configured default.
+///
+/// The order is what a person would expect: what you asked for, then what you
+/// configured, then what is actually running, and only then the arbitrary one.
+///
+/// # Errors
+/// If `wanted` names a model that is not in `models` - a typo there must not silently
+/// fall through to a different model.
+pub fn preferred<'a>(
+    models: &'a [PiModel],
+    wanted: Option<&str>,
+    configured: Option<&str>,
+    loaded: Option<&str>,
+) -> anyhow::Result<(&'a PiModel, Chose)> {
+    let find = |name: &str| models.iter().find(|m| m.id == name);
+
+    if let Some(name) = wanted {
+        let found = find(name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no model named {name:?} can run here; available: {}",
+                models
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+        return Ok((found, Chose::Requested));
+    }
+
+    if let Some(found) = configured.and_then(find) {
+        return Ok((found, Chose::Configured));
+    }
+    if let Some(found) = loaded.and_then(find) {
+        return Ok((found, Chose::Loaded));
+    }
+
+    models
+        .first()
+        .map(|m| (m, Chose::FirstAvailable))
+        .ok_or_else(|| anyhow::anyhow!("no model can run here"))
+}
+
 /// Largest completion Pi should request.
 ///
 /// Capped well below the context window: these are reasoning models, and an
@@ -302,6 +375,86 @@ fn write_atomically(path: &Path, contents: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// The bug this ordering exists to fix: `gemma4` sorts before `qwen3`, so taking
+    /// the first installed model pinned Claude Code to a model the user never chose.
+    #[test]
+    fn a_named_model_beats_alphabetical_order() {
+        let models = catalogue_of(&["gemma4-12b", "qwen3-14b"]);
+        let (chosen, why) = preferred(&models, Some("qwen3-14b"), None, None).unwrap();
+        assert_eq!(chosen.id, "qwen3-14b");
+        assert_eq!(why, Chose::Requested);
+    }
+
+    #[test]
+    fn the_configured_default_beats_alphabetical_order() {
+        let models = catalogue_of(&["gemma4-12b", "qwen3-14b"]);
+        let (chosen, why) = preferred(&models, None, Some("qwen3-14b"), None).unwrap();
+        assert_eq!(chosen.id, "qwen3-14b");
+        assert_eq!(why, Chose::Configured);
+    }
+
+    #[test]
+    fn what_is_loaded_beats_alphabetical_order() {
+        let models = catalogue_of(&["gemma4-12b", "qwen3-14b"]);
+        let (chosen, why) = preferred(&models, None, None, Some("qwen3-14b")).unwrap();
+        assert_eq!(chosen.id, "qwen3-14b");
+        assert_eq!(why, Chose::Loaded);
+    }
+
+    #[test]
+    fn an_explicit_request_outranks_everything_else() {
+        let models = catalogue_of(&["a", "b", "c"]);
+        let (chosen, _) = preferred(&models, Some("c"), Some("b"), Some("a")).unwrap();
+        assert_eq!(chosen.id, "c");
+    }
+
+    #[test]
+    fn the_configured_default_outranks_what_is_loaded() {
+        let models = catalogue_of(&["a", "b", "c"]);
+        let (chosen, _) = preferred(&models, None, Some("b"), Some("a")).unwrap();
+        assert_eq!(chosen.id, "b");
+    }
+
+    /// A default naming a model that cannot run here must not win, or the harness gets
+    /// pointed at something that will fail to load.
+    #[test]
+    fn a_hint_naming_an_unavailable_model_is_skipped() {
+        let models = catalogue_of(&["gemma4-12b"]);
+        let (chosen, why) = preferred(&models, None, Some("deleted-model"), None).unwrap();
+        assert_eq!(chosen.id, "gemma4-12b");
+        assert_eq!(why, Chose::FirstAvailable);
+    }
+
+    /// A typo in `--model` has to stop, not quietly configure a different model.
+    #[test]
+    fn an_explicit_request_for_an_unavailable_model_is_an_error() {
+        let models = catalogue_of(&["gemma4-12b", "qwen3-14b"]);
+        let err = preferred(&models, Some("qwen3-14"), None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("qwen3-14"), "got: {err}");
+        assert!(
+            err.contains("gemma4-12b, qwen3-14b"),
+            "must list what is available: {err}"
+        );
+    }
+
+    #[test]
+    fn nothing_installed_is_an_error_rather_than_a_panic() {
+        assert!(preferred(&[], None, None, None).is_err());
+    }
+
+    fn catalogue_of(names: &[&str]) -> Vec<PiModel> {
+        names
+            .iter()
+            .map(|id| PiModel {
+                id: (*id).to_owned(),
+                context_window: 4096,
+                reasoning: false,
+            })
+            .collect()
+    }
+
     use super::*;
 
     #[test]
