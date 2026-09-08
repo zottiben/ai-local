@@ -157,8 +157,9 @@ cache, considerably longer reading 6 GB off an SSD for the first time.
 - **Keep the model resident.** `ailocal service install` loads it at boot and holds it
   there, so no request ever pays for the load. Without it the gateway loads on demand
   and the first prompt waits.
-- **Leave reasoning off.** It is the default because the eval measured it: 95% versus
-  45% on the coding suite, at 4.6x the wall clock.
+- **Leave reasoning off.** It is the default because the eval measured it, and the
+  measurement is stronger than the latency headline: across three reasoning settings,
+  reasoning never beat `off` on a single task. See below.
 - **The prompt cache does the rest.** llama.cpp reuses the common prefix between turns,
   which is why the second turn above is half the first. Only the first turn of a session
   pays full prompt processing.
@@ -313,6 +314,7 @@ plausible Rust that does not work" is visibly different from "gets it right".
 ```
 ailocal eval run                                   # whatever is loaded
 ailocal eval run --reasoning off --reasoning on    # two arms, side by side
+ailocal eval run --reasoning on --reasoning-budget 512   # capped thinking
 ailocal eval run --model a --model b               # two models, side by side
 ailocal eval compare <run-a> <run-b>
 ```
@@ -321,6 +323,31 @@ ailocal eval compare <run-a> <run-b>
 ARM                                 SCORE   PASS   EMPTY    CUT   TOK/S
 gemma4-12b-Q4_K_M (reasoning off)     91%    86%       0      0    23.9
 ```
+
+### Does turning reasoning off make the model worse?
+
+On gemma4-12b, measured: no. Four arms over the same 14 tasks.
+
+| | score | empty answers |
+| --- | --- | --- |
+| off | 95% | 0 |
+| on, 1024-token answer budget | 45% | 7 |
+| on, 4096-token budget | 52% | 6 |
+| on, thinking capped at 512 | 82% | 0 |
+
+The headline understates it. Restricted to only the tasks where reasoning actually
+produced an answer, it scored *identically* to `off` - 89% against 89%, then 91%
+against 91% - with no task going either way. Capping thinking fixes the termination
+failure completely but still loses, and loses precisely the two hardest code-generation
+tasks.
+
+Across 42 task-arm comparisons, reasoning never beat `off` on a single task. The saved
+`reasoning_content` shows why: on the task it lost worst, the model degenerates into a
+loop - `Correct: write!(...) -> No.` repeated until the budget is gone - and then emits
+truncated code that will not compile.
+
+That is one model on single-turn tasks, so re-measure rather than assume. It is one
+command, and `--reasoning-budget` makes the middle setting measurable too.
 
 `EMPTY` and `CUT` are there because reasoning models fail in a way a score alone hides:
 chain-of-thought goes to `reasoning_content` and `content` stays empty until it is done,

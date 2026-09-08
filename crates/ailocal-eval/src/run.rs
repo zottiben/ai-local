@@ -43,6 +43,8 @@ pub struct Plan {
     /// of room". Those are different findings and the default budget cannot
     /// distinguish them.
     pub max_tokens: Option<u32>,
+    /// Cap on thinking tokens. `None` leaves the config's setting alone.
+    pub reasoning_budget: Option<i64>,
 }
 
 /// Temporary ownership of the model server.
@@ -137,6 +139,7 @@ pub fn ensure_loaded(config: &Config, plan: &Plan) -> anyhow::Result<serve::Inst
     if let Some(current) = serve::running()?
         && current.model == plan.model
         && current.reasoning == plan.reasoning
+        && plan.reasoning_budget.is_none()
         && is_answering(&current)
     {
         return Ok(current);
@@ -153,15 +156,22 @@ pub fn ensure_loaded(config: &Config, plan: &Plan) -> anyhow::Result<serve::Inst
             )
         })?;
 
+    let from_config = serve::Options::from_config(config)?;
     let options = serve::Options {
         reasoning: plan.reasoning.clone(),
-        ..serve::Options::from_config(config)?
+        reasoning_budget: plan
+            .reasoning_budget
+            .unwrap_or(from_config.reasoning_budget),
+        ..from_config
     };
     let budget = serve::budget_for_next_launch()?;
 
     eprintln!(
-        "loading {} with reasoning {} ...",
-        plan.model, plan.reasoning
+        "loading {} with reasoning {}{} ...",
+        plan.model,
+        plan.reasoning,
+        plan.reasoning_budget
+            .map_or_else(String::new, |cap| format!(" capped at {cap} tokens"))
     );
     serve::start(model, &budget, &options)
 }
@@ -216,6 +226,7 @@ pub fn arm(
             seed: plan.seed,
             exec: plan.allow_exec,
             max_tokens: plan.max_tokens,
+            reasoning_budget: plan.reasoning_budget,
         },
         corpus: CorpusRef {
             origin: corpus.origin.clone(),

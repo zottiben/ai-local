@@ -63,6 +63,15 @@ pub struct Arm {
     /// incompetence rather than as a budget that was too small.
     #[serde(default)]
     pub max_tokens: Option<u32>,
+
+    /// Cap on thinking tokens, if one was set.
+    ///
+    /// The middle setting between `on` and `off`: llama.cpp injects an
+    /// end-of-thinking tag once the cap is reached, so the model has to stop and
+    /// answer. Whether that buys the benefits of reasoning without the failure to
+    /// terminate is a question only measurement can settle.
+    #[serde(default)]
+    pub reasoning_budget: Option<i64>,
 }
 
 impl Arm {
@@ -99,10 +108,14 @@ impl Arm {
     /// How this arm reads in a table.
     #[must_use]
     pub fn label(&self) -> String {
-        match self.max_tokens {
-            None => format!("{} (reasoning {})", self.model, self.reasoning),
-            Some(n) => format!("{} (reasoning {}, {n} tok)", self.model, self.reasoning),
+        let mut how = format!("reasoning {}", self.reasoning);
+        if let Some(cap) = self.reasoning_budget {
+            how.push_str(&format!(" capped at {cap}"));
         }
+        if let Some(n) = self.max_tokens {
+            how.push_str(&format!(", {n} tok"));
+        }
+        format!("{} ({how})", self.model)
     }
 }
 
@@ -588,6 +601,7 @@ mod tests {
                 seed: 1,
                 exec: true,
                 max_tokens: None,
+                reasoning_budget: None,
             },
             corpus: CorpusRef {
                 origin: "built-in".to_owned(),
@@ -675,6 +689,20 @@ mod tests {
         assert!(!a.arm.label().contains("tok"));
         a.arm.max_tokens = Some(4096);
         assert!(a.arm.label().contains("4096 tok"), "got {}", a.arm.label());
+    }
+
+    /// A capped-thinking arm is a different arm, and the table has to say so or two
+    /// rows read as a contradiction rather than as two settings.
+    #[test]
+    fn a_capped_reasoning_arm_is_labelled_as_one() {
+        let mut a = report("a", &[Some(1.0)]);
+        a.arm.reasoning = "on".to_owned();
+        a.arm.reasoning_budget = Some(512);
+        assert!(
+            a.arm.label().contains("capped at 512"),
+            "got {}",
+            a.arm.label()
+        );
     }
 
     #[test]

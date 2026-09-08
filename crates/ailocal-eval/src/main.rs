@@ -105,6 +105,15 @@ struct RunArgs {
     #[arg(long)]
     max_tokens: Option<u32>,
 
+    /// Cap thinking at this many tokens, forcing the model to answer.
+    ///
+    /// The setting between `on` and `off`: llama.cpp closes the thought once the cap
+    /// is reached. Worth measuring before concluding that reasoning cannot pay - a
+    /// model that never stops thinking and one that reasons badly look identical from
+    /// the outside, and only this tells them apart.
+    #[arg(long)]
+    reasoning_budget: Option<i64>,
+
     /// Print the reports as JSON instead of tables.
     #[arg(long)]
     json: bool,
@@ -184,6 +193,7 @@ fn run_arms(args: &RunArgs) -> anyhow::Result<()> {
                 seed: args.seed,
                 allow_exec: !args.no_exec,
                 max_tokens: args.max_tokens,
+                reasoning_budget: args.reasoning_budget,
             };
             eprintln!("== {model}, reasoning {mode}");
             let report = run::arm(&config, &plan, &corpus, &selected)?;
@@ -487,6 +497,7 @@ mod tests {
             no_exec: false,
             seed: run::DEFAULT_SEED,
             max_tokens: None,
+            reasoning_budget: None,
             json: false,
         }
     }
