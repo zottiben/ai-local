@@ -370,6 +370,49 @@ pub fn parse_head(bytes: &[u8]) -> anyhow::Result<Metadata> {
 ///
 /// # Errors
 /// If the file cannot be read, or does not parse as GGUF.
+/// The chat-template variable llama.cpp uses to turn thinking on and off per request.
+const THINKING_TOGGLE: &[u8] = b"enable_thinking";
+
+/// How far in to look for it.
+///
+/// The chat template is metadata, so it is near the front of the file - but it sits
+/// *after* the tokeniser vocabulary, which for a 12B is several megabytes. gemma4's
+/// template starts past 8 MB, which is why the ordinary metadata read does not reach
+/// it. 64 MB clears both models here with room to spare, and is a sequential read of a
+/// file that is almost always in page cache.
+const TEMPLATE_SEARCH_BYTES: usize = 64 << 20;
+
+/// Whether this model's chat template can be told to think, per request.
+///
+/// Deliberately a substring search rather than a full metadata parse. The template is
+/// the last thing in the metadata and reaching it properly means parsing every
+/// preceding key including the vocabulary, which is most of the cost of reading the
+/// file. `enable_thinking` is a specific enough identifier that finding it in the
+/// header is conclusive, and this is asked once when writing a harness catalogue, not
+/// on the hot path.
+///
+/// A model that does not have it still accepts the request - llama.cpp ignores a
+/// template variable the template does not use - so a wrong answer here costs a
+/// control that does nothing, not an error.
+#[must_use]
+pub fn supports_thinking_toggle(path: &std::path::Path) -> bool {
+    use std::io::Read as _;
+
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = Vec::new();
+    if file
+        .take(TEMPLATE_SEARCH_BYTES as u64)
+        .read_to_end(&mut buf)
+        .is_err()
+    {
+        return false;
+    }
+    buf.windows(THINKING_TOGGLE.len())
+        .any(|w| w == THINKING_TOGGLE)
+}
+
 pub fn read_file(path: &std::path::Path, limit: usize) -> anyhow::Result<Metadata> {
     use std::io::Read as _;
 

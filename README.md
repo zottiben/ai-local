@@ -181,6 +181,52 @@ Authentication is a bearer key, which is what every harness already sends, so th
 gateway can sit behind a tunnel without anything else in front of it. See
 [docs/tunnel.md](docs/tunnel.md).
 
+### A house rule for every harness
+
+Harnesses build their own system prompt and have no notion of a per-machine one, so the
+gateway is the only place to add an instruction once and have every harness get it:
+
+```toml
+# ~/.config/ailocal/config.toml
+system_prompt = """
+If AGENTS.md or CLAUDE.md exists in the working directory, read it with your
+file-reading tool before your first substantive action, and follow it.
+"""
+```
+
+It is appended to whatever system prompt the harness sends rather than replacing it -
+the harness's own prompt is what makes its tools work - and inserted as a system message
+only when there is none.
+
+Worth knowing what this does and does not do. Nothing reads `AGENTS.md` "automatically":
+the harness reads it and puts it in the prompt, and a smaller model is simply less
+reliable about honouring a convention it was never trained on. An instruction like the
+above converts that convention into an explicit tool call, which is a much easier thing
+to follow. It is not a fine-tuning problem - see the note on retrieval versus adapters.
+
+Every token here is processed on the first turn of every session, and a small model given
+instructions that argue with the harness's follows neither well. A sentence or two.
+
+### Thinking, per request
+
+`--reasoning` is a llama-server launch flag, but it is a *default*, not a lock. The
+gateway translates a harness's thinking control into the one thing llama.cpp acts on:
+
+| what a harness sends | what llama.cpp needs |
+| --- | --- |
+| `reasoning_effort: "high"` (OpenAI) | `chat_template_kwargs: {enable_thinking: true}` |
+| `thinking: {type: "enabled"}` (Anthropic) | same |
+| `reasoning_effort: "none"`/`"minimal"` | `enable_thinking: false` |
+
+llama.cpp accepts `reasoning_effort` and ignores it, so without this translation a
+harness's thinking control does nothing at all - which looks exactly like a model that
+refuses to think. An explicit `chat_template_kwargs` from the caller always wins.
+
+Whether a model is offered the control at all comes from the model itself: the chat
+template is searched for an `enable_thinking` toggle. It used to come from the config's
+`reasoning` setting, which meant `reasoning = "off"` told harnesses the model was
+incapable of thinking rather than merely not doing it by default.
+
 ### If the port is taken
 
 8081 is a popular default - React Native's Metro bundler uses it, among others - so on

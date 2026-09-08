@@ -387,6 +387,14 @@ async fn messages(
 
     let mut translated = anthropic::request_to_openai(&request)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+
+    // Anthropic clients express thinking with a `thinking` block, which survives the
+    // translation above as-is; both paths need the same treatment to reach llama.cpp.
+    apply_thinking_request(&mut translated);
+    if let Some(extra) = &state.config.system_prompt {
+        inject_system_prompt(&mut translated, extra);
+    }
+
     if wants_stream {
         // Ask for usage on the final chunk so the reported output token count is the
         // server's rather than our estimate.
@@ -466,6 +474,64 @@ fn anthropic_event_stream(
     }
 }
 
+/// Translate a harness's "think about this" into the one knob llama.cpp acts on.
+///
+/// Measured against llama-server directly: `reasoning_effort` and Anthropic's
+/// `thinking` block are both accepted and both silently ignored, while
+/// `chat_template_kwargs: {"enable_thinking": true}` turns thinking on *even when the
+/// server was launched with `--reasoning off`*. So the launch flag is a default, not a
+/// lock, and a harness can drive this per request - it just has to be told in the right
+/// dialect.
+///
+/// An explicit `chat_template_kwargs` from the caller wins; this only fills in what the
+/// caller expressed some other way.
+fn apply_thinking_request(body: &mut serde_json::Value) {
+    // Anthropic: {"thinking": {"type": "enabled"}}. OpenAI: reasoning_effort, where
+    // "none" and "minimal" mean don't.
+    let wanted = match (&body["thinking"]["type"], &body["reasoning_effort"]) {
+        (serde_json::Value::String(t), _) => Some(t == "enabled"),
+        (_, serde_json::Value::String(effort)) => {
+            Some(!matches!(effort.as_str(), "none" | "off" | "minimal"))
+        }
+        _ => None,
+    };
+
+    let Some(wanted) = wanted else { return };
+    if !body["chat_template_kwargs"]["enable_thinking"].is_null() {
+        return;
+    }
+    if let Some(object) = body.as_object_mut() {
+        object
+            .entry("chat_template_kwargs")
+            .or_insert_with(|| serde_json::json!({}))["enable_thinking"] =
+            serde_json::Value::Bool(wanted);
+    }
+}
+
+/// Prepend a configured instruction to the conversation's system message.
+///
+/// Harnesses build their own system prompt and have no notion of a per-machine one, so
+/// this is the only place a local instruction can be added once and apply to all of
+/// them. Appended to the existing system message rather than replacing it - the
+/// harness's prompt is what makes its tools work - and inserted as a new first message
+/// only when there is none.
+fn inject_system_prompt(body: &mut serde_json::Value, extra: &str) {
+    if extra.trim().is_empty() {
+        return;
+    }
+    let Some(messages) = body["messages"].as_array_mut() else {
+        return;
+    };
+
+    if let Some(system) = messages.iter_mut().find(|m| m["role"] == "system")
+        && let Some(text) = system["content"].as_str()
+    {
+        system["content"] = serde_json::Value::String(format!("{text}\n\n{extra}"));
+        return;
+    }
+    messages.insert(0, serde_json::json!({ "role": "system", "content": extra }));
+}
+
 /// Forward a request to llama-server, preserving streaming.
 async fn proxy(State(state): State<Arc<AppState>>, request: Request) -> ApiResult<Response> {
     let path = request.uri().path().to_owned();
@@ -474,20 +540,35 @@ async fn proxy(State(state): State<Arc<AppState>>, request: Request) -> ApiResul
         .await
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, format!("reading body: {e}")))?;
 
-    let payload: serde_json::Value = serde_json::from_slice(&bytes)
+    let mut payload: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")))?;
 
     let model = payload["model"]
         .as_str()
-        .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "request has no \"model\" field"))?;
+        .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "request has no \"model\" field"))?
+        .to_owned();
 
-    let instance = ensure_loaded(&state, model).await?;
+    let instance = ensure_loaded(&state, &model).await?;
+
+    // Only conversations get rewritten. `/v1/completions` and `/v1/embeddings` have no
+    // messages and no chat template, so there is nothing here that applies to them.
+    let body = if path.ends_with("/chat/completions") {
+        apply_thinking_request(&mut payload);
+        if let Some(extra) = &state.config.system_prompt {
+            inject_system_prompt(&mut payload, extra);
+        }
+        serde_json::to_vec(&payload)
+            .map(axum::body::Bytes::from)
+            .unwrap_or(bytes)
+    } else {
+        bytes
+    };
 
     let upstream = state
         .client
         .post(format!("{}{path}", instance.base_url()))
         .header(header::CONTENT_TYPE, "application/json")
-        .body(bytes)
+        .body(body)
         .send()
         .await
         .map_err(|e| {
@@ -522,6 +603,106 @@ async fn proxy(State(state): State<Arc<AppState>>, request: Request) -> ApiResul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chat(extra: serde_json::Value) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        body
+    }
+
+    /// Measured against llama-server: it ignores `reasoning_effort` outright, and acts
+    /// only on `chat_template_kwargs`. Without this translation a harness's thinking
+    /// control does nothing at all, which is indistinguishable from the model refusing
+    /// to think.
+    #[test]
+    fn openai_reasoning_effort_becomes_the_knob_llama_cpp_reads() {
+        let mut body = chat(serde_json::json!({"reasoning_effort": "high"}));
+        apply_thinking_request(&mut body);
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
+    }
+
+    #[test]
+    fn effort_levels_that_mean_do_not_think_turn_it_off() {
+        for effort in ["none", "off", "minimal"] {
+            let mut body = chat(serde_json::json!({ "reasoning_effort": effort }));
+            apply_thinking_request(&mut body);
+            assert_eq!(
+                body["chat_template_kwargs"]["enable_thinking"], false,
+                "for {effort}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_anthropic_thinking_block_is_understood_too() {
+        let mut on = chat(serde_json::json!({"thinking": {"type": "enabled"}}));
+        apply_thinking_request(&mut on);
+        assert_eq!(on["chat_template_kwargs"]["enable_thinking"], true);
+
+        let mut off = chat(serde_json::json!({"thinking": {"type": "disabled"}}));
+        apply_thinking_request(&mut off);
+        assert_eq!(off["chat_template_kwargs"]["enable_thinking"], false);
+    }
+
+    /// A caller who already speaks llama.cpp's dialect has said exactly what it wants.
+    #[test]
+    fn an_explicit_template_kwarg_is_not_overridden() {
+        let mut body = chat(serde_json::json!({
+            "reasoning_effort": "high",
+            "chat_template_kwargs": {"enable_thinking": false},
+        }));
+        apply_thinking_request(&mut body);
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+    }
+
+    /// Saying nothing must stay saying nothing, so the server's launch flag decides.
+    #[test]
+    fn a_request_that_asks_for_nothing_is_left_alone() {
+        let mut body = chat(serde_json::json!({}));
+        apply_thinking_request(&mut body);
+        assert!(body["chat_template_kwargs"].is_null());
+    }
+
+    /// The harness's own system prompt is what makes its tools work, so ours is added
+    /// to it rather than put in its place.
+    #[test]
+    fn an_injected_instruction_is_appended_to_the_harness_prompt() {
+        let mut body = serde_json::json!({
+            "messages": [
+                {"role": "system", "content": "You are a coding agent."},
+                {"role": "user", "content": "hi"},
+            ]
+        });
+        inject_system_prompt(&mut body, "Read AGENTS.md first.");
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert!(
+            system.starts_with("You are a coding agent."),
+            "got: {system}"
+        );
+        assert!(system.contains("Read AGENTS.md first."), "got: {system}");
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn an_injected_instruction_becomes_the_system_prompt_when_there_is_none() {
+        let mut body = serde_json::json!({"messages": [{"role": "user", "content": "hi"}]});
+        inject_system_prompt(&mut body, "Read AGENTS.md first.");
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][0]["content"], "Read AGENTS.md first.");
+        assert_eq!(body["messages"][1]["role"], "user");
+    }
+
+    #[test]
+    fn an_empty_instruction_changes_nothing() {
+        let mut body = serde_json::json!({"messages": [{"role": "user", "content": "hi"}]});
+        inject_system_prompt(&mut body, "   ");
+        assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+    }
 
     #[test]
     fn api_errors_render_in_the_openai_shape() {

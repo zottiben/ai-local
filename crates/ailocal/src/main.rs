@@ -1274,7 +1274,11 @@ fn runnable_models(cfg: &Config) -> anyhow::Result<Vec<harness::PiModel>> {
                 Fit::Fits(ctx) => Some(harness::PiModel {
                     id: m.name.clone(),
                     context_window: ctx,
-                    reasoning: cfg.reasoning != "off",
+                    // What the model can do, not how the server happens to be launched
+                    // right now. Reporting the launch flag here is what left Pi
+                    // offering `off` as the only choice: `reasoning = "off"` in the
+                    // config became "this model cannot think" in the catalogue.
+                    reasoning: gguf::supports_thinking_toggle(&m.path),
                 }),
                 _ => None,
             }

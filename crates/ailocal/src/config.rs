@@ -100,6 +100,19 @@ pub struct Config {
     #[serde(default)]
     pub default_model: Option<String>,
 
+    /// An instruction appended to every conversation's system prompt.
+    ///
+    /// Harnesses build their own system prompt and have no notion of a per-machine
+    /// one, so the gateway is the only place a local instruction can be added once and
+    /// apply to all of them. It is appended rather than substituted, because the
+    /// harness's own prompt is what makes its tools work.
+    ///
+    /// Not free: every token here is processed on the first turn of every session, and
+    /// a small model given instructions that argue with the harness's follows neither
+    /// well. A sentence or two.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+
     /// Address the gateway service binds to.
     ///
     /// Loopback by default. A Cloudflare tunnel reaches this host over the LAN, so
@@ -139,6 +152,8 @@ struct Raw {
     reasoning_budget: i64,
     #[serde(default)]
     default_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    system_prompt: Option<String>,
     #[serde(default = "default_gateway_host")]
     gateway_host: String,
     #[serde(default = "default_gateway_port")]
@@ -163,6 +178,7 @@ fn unknown_field_hint(text: &str) -> Option<String> {
         "reasoning",
         "reasoning_budget",
         "default_model",
+        "system_prompt",
         "gateway_host",
         "gateway_port",
     ];
@@ -236,6 +252,7 @@ impl From<Raw> for Config {
             reasoning: raw.reasoning,
             reasoning_budget: raw.reasoning_budget,
             default_model: raw.default_model,
+            system_prompt: raw.system_prompt,
             gateway_host: raw.gateway_host,
             gateway_port: raw.gateway_port,
         }
@@ -257,6 +274,7 @@ impl From<Config> for Raw {
             reasoning: c.reasoning,
             reasoning_budget: c.reasoning_budget,
             default_model: c.default_model,
+            system_prompt: c.system_prompt,
             gateway_host: c.gateway_host,
             gateway_port: c.gateway_port,
         }
@@ -306,6 +324,7 @@ impl Default for Config {
             reasoning: default_reasoning(),
             reasoning_budget: default_reasoning_budget(),
             default_model: None,
+            system_prompt: None,
             gateway_host: default_gateway_host(),
             gateway_port: default_gateway_port(),
         }

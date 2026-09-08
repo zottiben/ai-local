@@ -23,6 +23,7 @@ Inference is llama.cpp's `llama-server`, Vulkan backend. Models are GGUF from Hu
 - Expose it to harnesses: `ailocal gateway run` (key via `ailocal gateway key`)
 - Move the gateway off a busy port: `ailocal config gateway-port <n>`
 - Point a harness at it: `ailocal harness configure pi|claude-code [--model <name>]`
+- Add a house rule to every harness: `system_prompt` in the config
 - Run it 24/7: `ailocal service install`, then `ailocal service status`
 - Score a model: `ailocal extras install eval`, then `ailocal eval run`
 - Check a model's real context limit: `scripts/bench/ctx_probe.sh <model.gguf> q8_0`
@@ -129,6 +130,18 @@ Claude Code is configured by **environment**, and `ailocal harness configure cla
 writes a file to `source` rather than touching `~/.claude/settings.json` - settings there
 apply to every Claude Code session on the machine, including ones meant for the real
 Anthropic API.
+
+### 7b. A harness's capabilities come from the model, not from our settings
+`models-store.json` advertises what the model can do. Reporting `reasoning` from the
+config's launch flag told Pi the model was incapable of thinking whenever
+`reasoning = "off"`, so `thinking` offered only `off` and `effort` was rejected. Detect
+from the model (`gguf::supports_thinking_toggle` searches the chat template for
+`enable_thinking`, which sits past the 8 MB metadata read for gemma4).
+
+`--reasoning` at launch is a default, not a lock. llama.cpp accepts `reasoning_effort`
+and silently ignores it; the only knob it acts on per request is
+`chat_template_kwargs.enable_thinking`, and the gateway translates both the OpenAI and
+Anthropic spellings into it.
 
 ### 8. Retrieval for facts, fine-tuning for behaviour
 Codebase knowledge is a retrieval problem, not a QLoRA problem. An adapter trained on a

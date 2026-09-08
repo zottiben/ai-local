@@ -1,6 +1,6 @@
 [package]
 name = "ailocal-eval"
-version = "0.3.7"
+version = "0.4.0"
 description = "Score local models on a coding task set, and compare two side by side"
 edition.workspace = true
 rust-version.workspace = true
