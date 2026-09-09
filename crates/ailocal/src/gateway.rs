@@ -328,25 +328,51 @@ async fn list_models(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde
 /// Pi requires only `id` and `status.value`, and treats anything other than
 /// `unloaded` as available. Models that cannot fit are still listed, so they are
 /// visible rather than mysteriously absent - loading one fails with the reason.
+///
+/// `meta` is not optional in practice even though Pi tolerates its absence. Pi reads
+/// `meta.n_ctx` for the context window and falls back to a flat 128000 without it, so
+/// omitting it had a harness auto-compacting a 256k session at half its window. The
+/// figure reported is the one a launch would actually get, not the trained maximum:
+/// promising a context this machine cannot hold only moves the failure later.
 async fn router_list(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    let cache: vram::CacheType = state
+        .config
+        .cache_type
+        .parse()
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+
     let models = registry::scan(&state.config.models_dir).map_err(|e| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("reading model directory: {e}"),
         )
     })?;
-    let loaded = serve::running().ok().flatten().map(|i| i.model);
+    let running = serve::running().ok().flatten();
+    let budget = serve::budget_for_next_launch()
+        .unwrap_or_else(|_| vram::Budget::new(crate::vram_used_mib().unwrap_or(900)));
 
     let data: Vec<serde_json::Value> = models
         .iter()
         .map(|m| {
-            let is_loaded = loaded.as_deref() == Some(m.name.as_str());
+            let live = running
+                .as_ref()
+                .filter(|i| i.model == m.name)
+                .map(|i| i.context);
+            let fits = match registry::assess(m.kv, m.trained_context, &budget, cache, m.size_mib) {
+                Fit::Fits(ctx) => Some(ctx),
+                _ => None,
+            };
+
             serde_json::json!({
                 "id": m.name,
                 "object": "model",
                 "owned_by": "ailocal",
                 "created": 0,
-                "status": { "value": if is_loaded { "loaded" } else { "unloaded" } },
+                "status": { "value": if live.is_some() { "loaded" } else { "unloaded" } },
+                "meta": {
+                    "n_ctx": live.or(fits),
+                    "n_ctx_train": m.trained_context,
+                },
             })
         })
         .collect();
@@ -544,14 +570,17 @@ fn anthropic_event_stream(
 ///
 /// An explicit `chat_template_kwargs` from the caller wins; this only fills in what the
 /// caller expressed some other way.
+///
+/// `minimal` means think briefly, not don't. It used to be read as off, which was a
+/// fair guess while the level was all we had - but a harness that asks for `minimal`
+/// now sends a `reasoning_budget_tokens` cap with it, and llama.cpp honours that, so
+/// the level and the budget contradicted each other. Only the two spellings that
+/// actually mean nothing turn thinking off.
 fn apply_thinking_request(body: &mut serde_json::Value) {
-    // Anthropic: {"thinking": {"type": "enabled"}}. OpenAI: reasoning_effort, where
-    // "none" and "minimal" mean don't.
+    // Anthropic: {"thinking": {"type": "enabled"}}. OpenAI: reasoning_effort.
     let wanted = match (&body["thinking"]["type"], &body["reasoning_effort"]) {
         (serde_json::Value::String(t), _) => Some(t == "enabled"),
-        (_, serde_json::Value::String(effort)) => {
-            Some(!matches!(effort.as_str(), "none" | "off" | "minimal"))
-        }
+        (_, serde_json::Value::String(effort)) => Some(!matches!(effort.as_str(), "none" | "off")),
         _ => None,
     };
 
@@ -696,7 +725,7 @@ mod tests {
 
     #[test]
     fn effort_levels_that_mean_do_not_think_turn_it_off() {
-        for effort in ["none", "off", "minimal"] {
+        for effort in ["none", "off"] {
             let mut body = chat(serde_json::json!({ "reasoning_effort": effort }));
             apply_thinking_request(&mut body);
             assert_eq!(
@@ -704,6 +733,33 @@ mod tests {
                 "for {effort}"
             );
         }
+    }
+
+    /// `minimal` arrives with a budget of its own, so it is the smallest amount of
+    /// thinking rather than none of it. Reading it as off silently discarded the
+    /// lowest rung of the harness's ladder.
+    #[test]
+    fn a_minimal_effort_still_thinks() {
+        for effort in ["minimal", "low", "medium", "high", "xhigh", "max"] {
+            let mut body = chat(serde_json::json!({ "reasoning_effort": effort }));
+            apply_thinking_request(&mut body);
+            assert_eq!(
+                body["chat_template_kwargs"]["enable_thinking"], true,
+                "for {effort}"
+            );
+        }
+    }
+
+    /// llama.cpp reads this one, so it has to survive the proxy untouched - it is the
+    /// only thing that makes one level differ from another.
+    #[test]
+    fn a_thinking_budget_is_passed_through() {
+        let mut body = chat(serde_json::json!({
+            "reasoning_effort": "low",
+            "reasoning_budget_tokens": 2048,
+        }));
+        apply_thinking_request(&mut body);
+        assert_eq!(body["reasoning_budget_tokens"], 2048);
     }
 
     #[test]

@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use anyhow::Context as _;
+
 use ailocal::{
     auth, config::Config, download, extras, gateway, gguf, harness, registry, registry::Fit, serve,
     service, source::Source, vram,
@@ -220,8 +222,24 @@ enum ModelCmd {
     },
     /// Download a model, checking it can actually run here first.
     Install(InstallArgs),
-    /// Delete a model from disk.
-    Rm { name: String },
+    /// Delete a model's weights from disk, and stop advertising it.
+    ///
+    /// Frees the tens of gigabytes a model occupies, so it asks first unless told not
+    /// to. Also unpicks what pointed at the model: the configured default, the
+    /// capability entry in a harness's config, and the running server if it is this
+    /// one - a deleted file that a harness still offers is a load failure later.
+    #[command(visible_aliases = ["remove", "delete"])]
+    Rm(RemoveArgs),
+}
+
+#[derive(Args)]
+struct RemoveArgs {
+    /// Model name as shown by `ailocal model ls`.
+    name: String,
+
+    /// Delete without asking. What a script wants; think before typing it.
+    #[arg(long, short = 'y')]
+    yes: bool,
 }
 
 #[derive(Args)]
@@ -271,7 +289,7 @@ fn main() -> anyhow::Result<()> {
         Command::Model(ModelCmd::Install(args)) => model_install(&args).map(|_| {
             print_next_step();
         }),
-        Command::Model(ModelCmd::Rm { name }) => model_rm(&name),
+        Command::Model(ModelCmd::Rm(args)) => model_rm(&args),
         Command::Config(ConfigCmd::Show) => config_show(),
         Command::Config(ConfigCmd::Init) => config_init(),
         Command::Config(ConfigCmd::DataDir { path }) => config_data_dir(path),
@@ -563,7 +581,7 @@ fn model_ls() -> anyhow::Result<()> {
     }
 
     println!(
-        "{:<28} {:>7}  {:<10} {:>9} {:>10} {:>11}",
+        "{:<28} {:>7}  {:<17} {:>9} {:>10} {:>11}  THINK",
         "NAME", "SIZE", "ARCH", "KV/TOK", "TRAINED", "MAX CTX"
     );
     for m in &models {
@@ -579,12 +597,20 @@ fn model_ls() -> anyhow::Result<()> {
             _ => "WILL NOT FIT".to_owned(),
         };
 
+        // The marker rides on ARCH rather than trailing the row: sliding-window
+        // attention is a property of the architecture, and left at the end it read as
+        // if it qualified whatever column happened to be last.
+        let arch = format!(
+            "{}{}",
+            m.arch.as_deref().unwrap_or("?"),
+            if m.sliding_window { " (swa)" } else { "" }
+        );
+
         println!(
-            "{:<28} {:>5} G  {:<10} {kv_per_token:>9} {trained:>10} {max_ctx:>11}{}",
+            "{:<28} {:>5} G  {arch:<17} {kv_per_token:>9} {trained:>10} {max_ctx:>11}  {}",
             truncate(&m.name, 28),
             m.size_mib / 1024,
-            m.arch.as_deref().unwrap_or("?"),
-            if m.sliding_window { "  (swa)" } else { "" },
+            gguf::thinking_support(&m.path).label(),
         );
     }
 
@@ -595,6 +621,14 @@ fn model_ls() -> anyhow::Result<()> {
              layers. This is why a 12B reaches 256k where a 27B stops near 16k."
         );
     }
+
+    // The one column a harness's thinking controls depend on, and the only place the
+    // answer is visible before `/effort` refuses. A `-` is the model, not a setting:
+    // its chat template has no thinking mode, so nothing can switch one on.
+    println!(
+        "\nTHINK is what the model's own chat template offers: `on/off` a switch,\n\
+         `effort` a level, `-` no thinking mode at all."
+    );
     Ok(())
 }
 
@@ -807,15 +841,25 @@ fn repoint_model_service(cfg: &Config) {
         )?;
         service::reload()?;
         let running = service::is_active(service::MODEL_UNIT);
+        let wanted = cfg.default_model.is_some();
         if running {
             service::stop(service::MODEL_UNIT)?;
-            service::start(service::MODEL_UNIT)?;
+            // Only start it again if there is something to serve. With no default
+            // model `install` deletes the definition, so starting would ask the
+            // service manager for a unit that no longer exists.
+            if wanted {
+                service::start(service::MODEL_UNIT)?;
+            }
         }
-        Ok(running)
+        Ok(running && wanted)
     })();
 
     match outcome {
         Ok(true) => println!("  restarted {} on it", service::MODEL_UNIT),
+        Ok(false) if cfg.default_model.is_none() => println!(
+            "  stopped {} - no default model left to preload",
+            service::MODEL_UNIT
+        ),
         Ok(false) => println!("  updated {}", service::MODEL_UNIT),
         Err(e) => println!(
             "  note: {} still points at the old model ({e:#})\n\
@@ -1204,16 +1248,102 @@ fn model_install(args: &InstallArgs) -> anyhow::Result<String> {
     ))
 }
 
-fn model_rm(name: &str) -> anyhow::Result<()> {
+/// Delete a model's weights, and everything that pointed at them.
+///
+/// Deleting the file is the easy half. The rest of the machine goes on believing the
+/// model is there: `default_model` still names it, so the model service loads it at the
+/// next boot; Pi still has a capability entry for it, so it stays in `/model` and fails
+/// on selection; llama-server may have it open right now. Each of those is a confusing
+/// failure minutes or a reboot away from the delete that caused it, so they are settled
+/// here.
+fn model_rm(args: &RemoveArgs) -> anyhow::Result<()> {
+    let name = args.name.as_str();
     let cfg = Config::load()?;
     let models = registry::scan(&cfg.models_dir)?;
     let model = models.iter().find(|m| m.name == name).ok_or_else(|| {
-        anyhow::anyhow!("no model named {name:?} in {}", cfg.models_dir.display())
+        anyhow::anyhow!(
+            "no model named {name:?} in {}; `ailocal model ls` shows what is installed",
+            cfg.models_dir.display()
+        )
     })?;
 
-    std::fs::remove_file(&model.path)?;
-    println!("removed {} ({} MiB)", model.path.display(), model.size_mib);
+    let loaded = serve::running()?.filter(|i| i.model == name);
+    println!("{} ({})", model.path.display(), format_size(model.size_mib));
+    if loaded.is_some() {
+        println!("  it is loaded right now, and will be stopped first");
+    }
+    if cfg.default_model.as_deref() == Some(name) {
+        println!("  it is the default model, which will be cleared");
+    }
+
+    // A re-download is 17 GB over a link that is not always fast, so the default is to
+    // ask. Without a terminal there is nobody to ask, and guessing yes on the strength
+    // of an empty stdin is not a thing to do to a model directory.
+    if !args.yes {
+        anyhow::ensure!(
+            ailocal::prompt::interactive(),
+            "refusing to delete {name:?} without confirmation; pass --yes"
+        );
+        if !ailocal::prompt::confirm("Delete it?", false)? {
+            println!("left alone");
+            return Ok(());
+        }
+    }
+
+    // Stop before unlinking. llama-server holds the file open and keeps serving from a
+    // deleted inode, so the model appears to work until something restarts it.
+    if loaded.is_some() {
+        serve::stop()?;
+        println!("stopped {name}");
+    }
+
+    std::fs::remove_file(&model.path)
+        .with_context(|| format!("deleting {}", model.path.display()))?;
+    println!(
+        "removed {}, freeing {}",
+        model.path.display(),
+        format_size(model.size_mib)
+    );
+
+    forget_removed_model(&cfg, name);
     Ok(())
+}
+
+/// Unpick the references to a model that has just been deleted.
+///
+/// Best-effort and reported, never fatal: the weights are already gone, so failing the
+/// command here would leave the user with no way to finish what it started.
+fn forget_removed_model(cfg: &Config, name: &str) {
+    if cfg.default_model.as_deref() == Some(name) {
+        let mut cfg = cfg.clone();
+        cfg.default_model = None;
+        match cfg.save() {
+            Ok(_) => {
+                println!("cleared default_model");
+                repoint_model_service(&cfg);
+            }
+            Err(e) => eprintln!("warning: could not clear default_model: {e:#}"),
+        }
+    }
+
+    match harness::forget_pi_model(name) {
+        Ok(true) => println!("removed pi's entry for it"),
+        Ok(false) => {}
+        Err(e) => eprintln!("warning: could not update pi's models.json: {e:#}"),
+    }
+
+    // Claude Code's env file pins exactly one model, and it is sourced by hand rather
+    // than read through us, so it cannot be quietly repointed - say what to run.
+    let names_it = harness::claude_code_env_path()
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .is_some_and(|env| env.contains(&format!("ANTHROPIC_MODEL={name}\n")));
+    if names_it {
+        println!(
+            "claude-code is still pointed at {name} - rerun\n\
+             \x20 `ailocal harness configure claude-code` to move it"
+        );
+    }
 }
 
 fn serve_model(args: &ServeArgs) -> anyhow::Result<()> {
@@ -1289,7 +1419,7 @@ fn runnable_models(cfg: &Config) -> anyhow::Result<Vec<harness::PiModel>> {
                     // right now. Reporting the launch flag here is what left Pi
                     // offering `off` as the only choice: `reasoning = "off"` in the
                     // config became "this model cannot think" in the catalogue.
-                    reasoning: gguf::supports_thinking_toggle(&m.path),
+                    thinking: gguf::thinking_support(&m.path),
                 }),
                 _ => None,
             }
@@ -1377,7 +1507,21 @@ fn harness_configure(name: &str, url: &str, wanted: Option<&str>) -> anyhow::Res
         }
     }
     for m in &models {
-        println!("  {} ({} context)", m.id, format_count(m.context_window));
+        println!(
+            "  {} ({} context, thinking {})",
+            m.id,
+            format_count(m.context_window),
+            m.thinking.label()
+        );
+    }
+    // Said here because the alternative is finding out from `/effort`, which reports
+    // it as the harness refusing a level rather than the model not having one.
+    if let Some(m) = models.iter().find(|m| !m.thinking.is_available()) {
+        println!(
+            "  {} has no thinking mode - its chat template has no `enable_thinking`,\n\
+             \x20 so `/thinking` and `/effort` in pi can only ever offer `off` for it.",
+            m.id
+        );
     }
     println!(
         "  try: pi --provider {} --model {}",
@@ -2075,6 +2219,18 @@ fn format_count(n: u64) -> String {
     }
 }
 
+/// Render a file size for a human about to decide whether to delete it.
+///
+/// Whole GiB above a gigabyte, MiB below it. Integer division alone renders a 400 MiB
+/// file as `0 GiB`, which is the wrong impression to give at a confirmation prompt.
+fn format_size(size_mib: u64) -> String {
+    if size_mib >= 1024 {
+        format!("{:.1} GiB", size_mib as f64 / 1024.0)
+    } else {
+        format!("{size_mib} MiB")
+    }
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_owned();
@@ -2086,6 +2242,15 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 400 MiB file must not read as `0 GiB` at a prompt asking to delete it.
+    #[test]
+    fn sizes_below_a_gigabyte_are_reported_in_mib() {
+        assert_eq!(format_size(400), "400 MiB");
+        assert_eq!(format_size(0), "0 MiB");
+        assert_eq!(format_size(1024), "1.0 GiB");
+        assert_eq!(format_size(17_699), "17.3 GiB");
+    }
 
     /// The exact sequence a fresh machine walks, in order.
     #[test]

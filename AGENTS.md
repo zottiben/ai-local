@@ -16,8 +16,9 @@ Inference is llama.cpp's `llama-server`, Vulkan backend. Models are GGUF from Hu
 - Build / lint / test: `cargo build`, `cargo clippy -- -D warnings`, `cargo test`
 - Plan: `aip status` (the build plan is in ai-planner, not in a markdown file)
 - Install a model: `ailocal model install ollama:<name>:<tag>` (or `hf:<owner>/<repo>/<file>`)
+- Delete one: `ailocal model rm <name>` (aliases `remove`, `delete`; `--yes` to skip the prompt)
 - Choose which model to use: `ailocal model pick` (also sets `default_model`)
-- What is on disk and what fits: `ailocal model ls`
+- What is on disk, what fits, and which can think: `ailocal model ls`
 - Run one: `ailocal serve <name>`, then `ailocal ps` / `ailocal stop`
 - Where am I, and what is missing: `ailocal status`
 - Expose it to harnesses: `ailocal gateway run` (key via `ailocal gateway key`)
@@ -115,7 +116,7 @@ sudo pacman -Syu <packages>
 
 `pacman -S` into a stale database is how a rolling-release install gets broken.
 
-### 7. Pi needs both a credential and a catalogue entry
+### 7. Pi needs three files, and only one of them is ours to keep
 Pi's llama.cpp provider is registered from the *cached model catalogue*, not from the
 credential. Writing only `~/.pi/agent/auth.json` leaves `--provider llama.cpp` failing
 with "Unknown provider" and `auth check` reporting `provider_not_found`. The catalogue
@@ -123,8 +124,21 @@ entry in `~/.pi/agent/models-store.json` needs `api: "openai-completions"` and
 `provider: "llama.cpp"`, and Pi strips a trailing `/v1` from `LLAMA_BASE_URL` before
 storing it - so store the stripped form or every run looks like a change.
 
-Both files hold live credentials for other providers. Always merge, never rewrite, and
-back up first.
+**`models-store.json` is a cache, so nothing about capability can live there.** Pi
+rebuilds it from our `<base>/models` on every refresh, through a function that hardcodes
+`reasoning: false`, `compat.supportsReasoningEffort: false` and
+`contextWindow: meta.n_ctx ?? 128000`. Anything we write there is gone the next time
+`/model` opens. Capability goes in `~/.pi/agent/models.json` under
+`providers["llama.cpp"].modelOverrides.<id>`, which Pi composes *over* the provider on
+every read. Proof: with the cache saying `reasoning: false, contextWindow: 128000`,
+`pi --list-models` reported `thinking yes` and `262.1K`.
+
+Our router listing must therefore also report `meta.n_ctx`, or Pi's own refresh caches a
+flat 128000 and auto-compacts a 256k session at half its window.
+
+All three files hold live credentials or hand-written config for other providers. Always
+merge, never rewrite, and back up first. `pi --list-models` prints a `thinking` column
+and the context window, which verifies both in one command.
 
 Claude Code is configured by **environment**, and `ailocal harness configure claude-code`
 writes a file to `source` rather than touching `~/.claude/settings.json` - settings there
@@ -132,16 +146,44 @@ apply to every Claude Code session on the machine, including ones meant for the 
 Anthropic API.
 
 ### 7b. A harness's capabilities come from the model, not from our settings
-`models-store.json` advertises what the model can do. Reporting `reasoning` from the
-config's launch flag told Pi the model was incapable of thinking whenever
-`reasoning = "off"`, so `thinking` offered only `off` and `effort` was rejected. Detect
-from the model (`gguf::supports_thinking_toggle` searches the chat template for
-`enable_thinking`, which sits past the 8 MB metadata read for gemma4).
+Reporting `reasoning` from the config's launch flag told Pi the model was incapable of
+thinking whenever `reasoning = "off"`, so `thinking` offered only `off` and `effort` was
+rejected. Detect from the model: `gguf::thinking_support` searches the chat template for
+`enable_thinking` and `reasoning_effort` (which sit past the 8 MB metadata read for
+gemma4) and answers `None`, `Toggle` or `Effort`. It agrees with llama-server's own
+`/props` `chat_template_caps` for both models here.
 
-`--reasoning` at launch is a default, not a lock. llama.cpp accepts `reasoning_effort`
-and silently ignores it; the only knob it acts on per request is
-`chat_template_kwargs.enable_thinking`, and the gateway translates both the OpenAI and
-Anthropic spellings into it.
+**Some models have no thinking mode, and that is not a bug to configure around.**
+qwen3-coder-30b's template mentions neither name, so `off` is the only level Pi can
+offer for it and no override changes that. `ailocal model ls` has a THINK column so this
+is visible before `/effort` refuses.
+
+`--reasoning` at launch is a default, not a lock. Per request llama.cpp acts on exactly
+two fields, both measured:
+
+- `chat_template_kwargs.enable_thinking` - the switch. It type-checks the value, which
+  is how you can tell it is read.
+- `reasoning_budget_tokens` - a real cap on the thinking. **Not** `thinking_budget_tokens`,
+  which Pi's docs name and llama-server accepts and silently ignores on
+  `/v1/chat/completions`. Measured on gemma4-12b: no budget 554 characters of
+  `reasoning_content`, budget 24 gives 88.
+
+`reasoning_effort` is accepted and ignored unless the template reads it, so the gateway
+translates it (and Anthropic's `thinking` block) into `enable_thinking` and passes the
+budget through untouched. That is what makes a level ladder mean something rather than
+being five spellings of "on": Pi pairs each level with a budget of 1024 / 2048 / 8192 /
+16384, clamped to `maxTokens` less 1024 kept back for the answer - so cap the advertised
+output below 17408 and `medium` and `high` collapse into one thing on the wire.
+
+Two consequences for the overrides we write:
+
+- `thinkingLevelMap.off` must be spelled `"none"`. With the key absent Pi sends *no*
+  field when thinking is off, which is indistinguishable from a harness that never
+  mentioned it, so llama-server stays on its launch default and `/thinking off` does
+  nothing.
+- `xhigh` and `max` are mapped to `null` for a toggle model. Pi folds both onto `high`
+  before choosing a budget, so offering them would be two controls that do nothing.
+  `/effort max` still works - it is an alias that resolves to the highest real level.
 
 ### 8. Retrieval for facts, fine-tuning for behaviour
 Codebase knowledge is a retrieval problem, not a QLoRA problem. An adapter trained on a

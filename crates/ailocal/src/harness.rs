@@ -8,10 +8,19 @@
 //! provider stores `{"type":"api_key","key":...,"env":{"LLAMA_BASE_URL":...}}` under
 //! the provider id, normalises the URL by stripping any trailing `/v1`, and then calls
 //! `<base>/models` for the catalogue and `<base>/v1/chat/completions` for inference.
+//!
+//! Which is why capability goes in a third file. `models-store.json` is Pi's *cache* of
+//! that `<base>/models` call, rebuilt from it on every refresh by a function that
+//! hardcodes `reasoning: false` - so anything we write there about what a model can do
+//! is erased the next time Pi opens `/model`. `models.json` is user configuration that
+//! Pi composes *over* the provider on every read, so that is where a capability has to
+//! be stated to survive.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
+
+use crate::gguf::Thinking;
 
 /// Pi's provider id for a llama.cpp-compatible server.
 pub const PI_PROVIDER_ID: &str = "llama.cpp";
@@ -42,6 +51,14 @@ pub fn pi_models_store_path() -> anyhow::Result<PathBuf> {
     pi_file("models-store.json")
 }
 
+/// Path to Pi's custom-model configuration.
+///
+/// # Errors
+/// If `HOME` is not set.
+pub fn pi_models_json_path() -> anyhow::Result<PathBuf> {
+    pi_file("models.json")
+}
+
 fn pi_file(name: &str) -> anyhow::Result<PathBuf> {
     let home = std::env::var_os("HOME").ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
     Ok(PathBuf::from(home).join(".pi/agent").join(name))
@@ -52,7 +69,8 @@ fn pi_file(name: &str) -> anyhow::Result<PathBuf> {
 pub struct PiModel {
     pub id: String,
     pub context_window: u64,
-    pub reasoning: bool,
+    /// What thinking control the model's own chat template exposes.
+    pub thinking: Thinking,
 }
 
 /// Every harness this knows how to configure.
@@ -158,14 +176,21 @@ pub fn preferred<'a>(
 
 /// Largest completion Pi should request.
 ///
-/// Capped well below the context window: these are reasoning models, and an
-/// over-generous cap mostly buys longer thinking rather than a longer answer.
-const MAX_OUTPUT_TOKENS: u64 = 8192;
+/// Has to leave room for the whole ladder to differ. Pi derives a thinking budget from
+/// the level - 1024, 2048, 8192, 16384 - then clamps it to `maxTokens` less 1024 kept
+/// back for the answer. Cap output at 8192 and `medium` and `high` both clamp to 7168,
+/// so two levels the user can select become one thing on the wire. 32768 keeps all
+/// four distinct, and is a ceiling rather than a demand.
+const MAX_OUTPUT_TOKENS: u64 = 32768;
 
 /// The catalogue entry Pi caches for a local model.
 ///
 /// `api` must be `openai-completions` and `provider` must be the llama.cpp id, or Pi
 /// filters the entry out when it refreshes.
+///
+/// Pi overwrites all of this from `<base>/models` at its next refresh, so it seeds the
+/// cache rather than settling anything. What must outlive a refresh goes in
+/// [`pi_model_override`].
 #[must_use]
 pub fn pi_model_entry(model: &PiModel, base_url: &str) -> serde_json::Value {
     serde_json::json!({
@@ -174,13 +199,81 @@ pub fn pi_model_entry(model: &PiModel, base_url: &str) -> serde_json::Value {
         "api": "openai-completions",
         "provider": PI_PROVIDER_ID,
         "baseUrl": format!("{}/v1", normalize_base_url(base_url)),
-        "reasoning": model.reasoning,
+        "reasoning": model.thinking.is_available(),
         "input": ["text"],
         // Local inference is free, and Pi renders these figures directly.
         "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
         "contextWindow": model.context_window,
         "maxTokens": model.context_window.min(MAX_OUTPUT_TOKENS),
     })
+}
+
+/// The per-request field llama.cpp actually reads to cap thinking.
+///
+/// Measured, because the obvious name is wrong: `thinking_budget_tokens` is accepted
+/// and silently ignored on `/v1/chat/completions` (it is only the internal name the
+/// `/v1/messages` converter uses), while `reasoning_budget_tokens` type-checks as a
+/// number and demonstrably shortens the thinking - 554 characters of
+/// `reasoning_content` unbudgeted against 88 at a budget of 24.
+const THINKING_BUDGET_FIELD: &str = "reasoning_budget_tokens";
+
+/// What Pi should believe about this model, in the file a refresh cannot touch.
+///
+/// `thinkingLevelMap` decides which levels the harness offers, and its values are what
+/// get sent. Three shapes, one per capability:
+///
+/// - no thinking: `reasoning: false`, and Pi offers `off` alone. Nothing here can
+///   change that, and pretending otherwise just moves the failure to `/effort`.
+/// - a switch: `off` has to be spelled out as `"none"`, because with the key absent Pi
+///   sends *no* field when thinking is off - indistinguishable from a harness that
+///   never mentioned it, which leaves llama-server on its launch default. The levels
+///   between are left at Pi's defaults and differ for real, since each carries a
+///   budget. `xhigh` and `max` are refused: Pi folds both onto `high` before looking
+///   the budget up, so offering them would be two controls that do nothing.
+/// - an effort dial: every level maps to itself and llama.cpp hands it to the template.
+#[must_use]
+pub fn pi_model_override(model: &PiModel) -> serde_json::Value {
+    let mut entry = serde_json::json!({
+        "reasoning": model.thinking.is_available(),
+        "contextWindow": model.context_window,
+        "maxTokens": model.context_window.min(MAX_OUTPUT_TOKENS),
+    });
+
+    let levels = match model.thinking {
+        Thinking::None => return entry,
+        Thinking::Toggle => serde_json::json!({
+            "off": "none",
+            "xhigh": serde_json::Value::Null,
+            "max": serde_json::Value::Null,
+        }),
+        Thinking::Effort => serde_json::json!({
+            "off": "none",
+            "minimal": "minimal",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max",
+        }),
+    };
+
+    entry["thinkingLevelMap"] = levels;
+    entry["compat"] = serde_json::json!({
+        "supportsReasoningEffort": true,
+        "thinkingTokenBudgetField": THINKING_BUDGET_FIELD,
+    });
+    entry
+}
+
+/// The whole `modelOverrides` block for a set of models.
+#[must_use]
+pub fn pi_model_overrides(models: &[PiModel]) -> serde_json::Value {
+    serde_json::Value::Object(
+        models
+            .iter()
+            .map(|m| (m.id.clone(), pi_model_override(m)))
+            .collect(),
+    )
 }
 
 /// The credential Pi expects for a llama.cpp server.
@@ -205,12 +298,15 @@ pub fn normalize_base_url(url: &str) -> String {
 
 /// Point Pi at our gateway.
 ///
-/// Writes two files, because the credential alone is not enough: Pi builds its provider
-/// registry from the cached model catalogue, so with no catalogue entry the provider
-/// does not exist at all and `--provider llama.cpp` fails with "Unknown provider".
+/// Writes three files, because no one of them is enough on its own. The credential
+/// alone leaves the provider unregistered, since Pi builds its provider registry from
+/// the cached model catalogue and `--provider llama.cpp` fails with "Unknown provider"
+/// without an entry there. The catalogue alone loses every capability at Pi's next
+/// refresh, which rebuilds it from `<base>/models` with `reasoning` hardcoded off.
+/// `models.json` is the only one of the three Pi composes rather than replaces.
 ///
 /// # Errors
-/// If either file cannot be read, is not a JSON object, or cannot be written.
+/// If a file cannot be read, is not a JSON object, or cannot be written.
 pub fn configure_pi(base_url: &str, api_key: &str, models: &[PiModel]) -> anyhow::Result<Outcome> {
     let credential = merge_json(
         &pi_auth_path()?,
@@ -230,10 +326,126 @@ pub fn configure_pi(base_url: &str, api_key: &str, models: &[PiModel]) -> anyhow
     });
     let catalogue = merge_json(&pi_models_store_path()?, PI_PROVIDER_ID, catalogue)?;
 
-    match (credential, catalogue) {
-        (None, None) => Ok(Outcome::AlreadyConfigured),
-        (a, b) => Ok(Outcome::Configured { backup: a.or(b) }),
+    let overrides = set_pi_overrides(pi_model_overrides(models))?;
+
+    match (credential, catalogue, overrides) {
+        (None, None, Outcome::AlreadyConfigured) => Ok(Outcome::AlreadyConfigured),
+        (a, b, c) => Ok(Outcome::Configured {
+            backup: a.or(b).or(match c {
+                Outcome::Configured { backup } => backup,
+                Outcome::AlreadyConfigured => None,
+            }),
+        }),
     }
+}
+
+/// Replace our `modelOverrides` block in Pi's `models.json`.
+///
+/// The block is rewritten whole rather than merged key by key, so a model that is no
+/// longer installed stops being described. Everything outside it - other providers,
+/// other keys on this one, a hand-written `apiKey` - is left exactly as found.
+///
+/// Unlike Pi's other two files this one need not already exist: it is optional
+/// configuration rather than state Pi maintains, so an absent file is created.
+fn set_pi_overrides(wanted: serde_json::Value) -> anyhow::Result<Outcome> {
+    let path = pi_models_json_path()?;
+    let mut root = read_json_object(&path)?;
+
+    if pi_overrides_in(&root) == Some(&wanted) {
+        return Ok(Outcome::AlreadyConfigured);
+    }
+
+    // No backup when we are creating the file - there is nothing yet to lose, and a
+    // zero-byte `.bak` reads as if there were.
+    let backup = path.exists().then(|| back_up(&path)).transpose()?;
+    object_at(&mut root, &path, &["providers", PI_PROVIDER_ID])?
+        .insert("modelOverrides".to_owned(), wanted);
+    write_json(&path, &root)?;
+    Ok(Outcome::Configured { backup })
+}
+
+/// Stop describing one model, leaving the rest of the block alone.
+///
+/// Returns whether anything was there to remove. For `ailocal model rm`: an override
+/// naming weights that no longer exist has Pi advertising a model it cannot load.
+///
+/// # Errors
+/// If `models.json` cannot be read, is not a JSON object, or cannot be written.
+pub fn forget_pi_model(id: &str) -> anyhow::Result<bool> {
+    let path = pi_models_json_path()?;
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let mut root = read_json_object(&path)?;
+    let Some(overrides) = pi_overrides_in(&root).and_then(serde_json::Value::as_object) else {
+        return Ok(false);
+    };
+    if !overrides.contains_key(id) {
+        return Ok(false);
+    }
+
+    let mut kept = overrides.clone();
+    kept.remove(id);
+    back_up(&path)?;
+    object_at(&mut root, &path, &["providers", PI_PROVIDER_ID])?
+        .insert("modelOverrides".to_owned(), serde_json::Value::Object(kept));
+    write_json(&path, &root)?;
+    Ok(true)
+}
+
+/// Our overrides block, if Pi's config has one.
+fn pi_overrides_in(root: &serde_json::Value) -> Option<&serde_json::Value> {
+    root.get("providers")?
+        .get(PI_PROVIDER_ID)?
+        .get("modelOverrides")
+}
+
+/// Read a JSON object file, treating absent or empty as `{}`.
+fn read_json_object(path: &Path) -> anyhow::Result<serde_json::Value> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    if raw.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+
+    let root: serde_json::Value =
+        serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+    anyhow::ensure!(root.is_object(), "{} is not a JSON object", path.display());
+    Ok(root)
+}
+
+/// Walk to a nested object, creating the levels that are missing.
+///
+/// Errors rather than panics when a level exists but holds something other than an
+/// object: this is somebody else's hand-edited config, and `value["k"] = v` on a
+/// string would take the process down with it.
+fn object_at<'a>(
+    root: &'a mut serde_json::Value,
+    path: &Path,
+    keys: &[&str],
+) -> anyhow::Result<&'a mut serde_json::Map<String, serde_json::Value>> {
+    let mut here = root;
+    for key in keys {
+        here = here
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("{} is not a JSON object", path.display()))?
+            .entry((*key).to_owned())
+            .or_insert_with(|| serde_json::json!({}));
+    }
+    here.as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("{:?} in {} is not an object", keys, path.display()))
+}
+
+/// Write a JSON document the way Pi writes its own: pretty, newline-terminated.
+fn write_json(path: &Path, root: &serde_json::Value) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    write_atomically(path, &format!("{}\n", serde_json::to_string_pretty(root)?))
 }
 
 /// Set `key` to `value` in a JSON object file, backing it up if that changes anything.
@@ -280,7 +492,7 @@ fn stable_part(value: &serde_json::Value) -> serde_json::Value {
     copy
 }
 
-/// Remove our entries from both of Pi's files, leaving everything else alone.
+/// Remove our entries from all three of Pi's files, leaving everything else alone.
 ///
 /// # Errors
 /// If a file cannot be read or written.
@@ -305,7 +517,50 @@ pub fn unconfigure_pi() -> anyhow::Result<bool> {
         )?;
         removed = true;
     }
-    Ok(removed)
+    Ok(unconfigure_pi_models_json()? || removed)
+}
+
+/// Take our capability statement back out of Pi's `models.json`.
+///
+/// Only ever removes what we put there. The provider key goes too once nothing else is
+/// on it, and the file goes once no provider is left - a `models.json` holding an empty
+/// `providers` is a file we created and then emptied, and leaving it behind would have
+/// `ailocal harness unconfigure pi` still visible in Pi's config directory.
+fn unconfigure_pi_models_json() -> anyhow::Result<bool> {
+    let path = pi_models_json_path()?;
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let mut root = read_json_object(&path)?;
+    if pi_overrides_in(&root).is_none() {
+        return Ok(false);
+    }
+
+    back_up(&path)?;
+    let providers = object_at(&mut root, &path, &["providers"])?;
+    if let Some(provider) = providers
+        .get_mut(PI_PROVIDER_ID)
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        provider.remove("modelOverrides");
+        if provider.is_empty() {
+            providers.remove(PI_PROVIDER_ID);
+        }
+    }
+
+    // Nothing of anyone else's left: no other provider, and no other top-level key.
+    let ours_alone = root["providers"]
+        .as_object()
+        .is_some_and(serde_json::Map::is_empty)
+        && root.as_object().is_some_and(|o| o.len() == 1);
+
+    if ours_alone {
+        std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+    } else {
+        write_json(&path, &root)?;
+    }
+    Ok(true)
 }
 
 /// Render the environment Claude Code needs to talk to the gateway.
@@ -473,14 +728,15 @@ mod tests {
     }
 
     fn catalogue_of(names: &[&str]) -> Vec<PiModel> {
-        names
-            .iter()
-            .map(|id| PiModel {
-                id: (*id).to_owned(),
-                context_window: 4096,
-                reasoning: false,
-            })
-            .collect()
+        names.iter().map(|id| model(id, Thinking::None)).collect()
+    }
+
+    fn model(id: &str, thinking: Thinking) -> PiModel {
+        PiModel {
+            id: id.to_owned(),
+            context_window: 4096,
+            thinking,
+        }
     }
 
     use super::*;
@@ -528,19 +784,160 @@ mod tests {
 
     #[test]
     fn pi_model_entries_carry_the_fields_pi_filters_on() {
-        let entry = pi_model_entry(
-            &PiModel {
-                id: "m".into(),
-                context_window: 1024,
-                reasoning: false,
-            },
-            "http://h:1",
-        );
+        let mut m = model("m", Thinking::None);
+        m.context_window = 1024;
+        let entry = pi_model_entry(&m, "http://h:1");
         // Pi drops catalogue entries that do not match both of these exactly.
         assert_eq!(entry["api"], "openai-completions");
         assert_eq!(entry["provider"], PI_PROVIDER_ID);
         assert_eq!(entry["baseUrl"], "http://h:1/v1");
         assert_eq!(entry["contextWindow"], 1024);
         assert_eq!(entry["maxTokens"], 1024);
+    }
+
+    /// The bug the override exists to fix: a model that can think was advertised as
+    /// unable to, so `/thinking` in pi offered `off` and nothing else.
+    #[test]
+    fn a_model_that_can_think_is_advertised_as_able_to() {
+        let entry = pi_model_override(&model("gemma4-12b", Thinking::Toggle));
+        assert_eq!(entry["reasoning"], true);
+        assert_eq!(entry["compat"]["supportsReasoningEffort"], true);
+    }
+
+    /// Without a mapping for `off`, pi omits the field entirely when thinking is off -
+    /// which the gateway cannot tell from a harness that never mentioned it, leaving
+    /// llama-server on whatever it was launched with.
+    #[test]
+    fn turning_thinking_off_is_something_pi_can_say() {
+        for thinking in [Thinking::Toggle, Thinking::Effort] {
+            let entry = pi_model_override(&model("m", thinking));
+            assert_eq!(entry["thinkingLevelMap"]["off"], "none", "{thinking:?}");
+        }
+    }
+
+    /// pi folds `xhigh` and `max` onto `high` before choosing a budget, so a switch has
+    /// nothing to put behind them. Offering them anyway is three levels that do the
+    /// same thing.
+    #[test]
+    fn a_switch_does_not_pretend_to_have_extended_levels() {
+        let entry = pi_model_override(&model("m", Thinking::Toggle));
+        assert!(entry["thinkingLevelMap"]["xhigh"].is_null());
+        assert!(entry["thinkingLevelMap"]["max"].is_null());
+        // The rungs in between are left unmapped on purpose: pi's own defaults apply,
+        // and each carries a distinct budget.
+        assert!(entry["thinkingLevelMap"].get("medium").is_none());
+    }
+
+    /// A template that reads a level gets every level, because llama.cpp hands it
+    /// straight through.
+    #[test]
+    fn an_effort_dial_gets_the_whole_ladder() {
+        let entry = pi_model_override(&model("m", Thinking::Effort));
+        for level in ["minimal", "low", "medium", "high", "xhigh", "max"] {
+            assert_eq!(entry["thinkingLevelMap"][level], level);
+        }
+    }
+
+    /// A model with no thinking mode must not be given controls for one - that is how
+    /// `/effort` ends up refusing a level the user was offered.
+    #[test]
+    fn a_model_without_thinking_is_given_no_thinking_controls() {
+        let entry = pi_model_override(&model("qwen3-coder-30b", Thinking::None));
+        assert_eq!(entry["reasoning"], false);
+        assert!(entry.get("thinkingLevelMap").is_none());
+        assert!(entry.get("compat").is_none());
+    }
+
+    /// The budget field is the only thing that makes one level differ from another, and
+    /// the plausible spelling is the wrong one - `thinking_budget_tokens` is accepted
+    /// and ignored by llama-server.
+    #[test]
+    fn the_budget_field_is_the_one_llama_cpp_reads() {
+        let entry = pi_model_override(&model("m", Thinking::Toggle));
+        assert_eq!(
+            entry["compat"]["thinkingTokenBudgetField"],
+            "reasoning_budget_tokens"
+        );
+    }
+
+    /// Cap the output too low and pi clamps `medium` and `high` to the same budget,
+    /// collapsing two levels the user can select into one thing on the wire. pi's
+    /// ladder and the 1024 tokens it keeps back for the answer are both measured.
+    #[test]
+    fn the_output_cap_leaves_the_levels_distinguishable() {
+        let room = MAX_OUTPUT_TOKENS.saturating_sub(1024);
+        let clamped: Vec<u64> = [1024_u64, 2048, 8192, 16384]
+            .iter()
+            .map(|budget| (*budget).min(room))
+            .collect();
+
+        let mut distinct = clamped.clone();
+        distinct.dedup();
+        assert_eq!(
+            clamped, distinct,
+            "two thinking levels clamp to one budget: {clamped:?}"
+        );
+    }
+
+    #[test]
+    fn overrides_are_keyed_by_model_id() {
+        let models = [
+            model("gemma4-12b", Thinking::Toggle),
+            model("qwen3-coder-30b", Thinking::None),
+        ];
+        let block = pi_model_overrides(&models);
+        assert_eq!(block["gemma4-12b"]["reasoning"], true);
+        assert_eq!(block["qwen3-coder-30b"]["reasoning"], false);
+        assert_eq!(block.as_object().unwrap().len(), 2);
+    }
+
+    /// Pi's config is the user's, and only the one key inside it is ours. Everything
+    /// else - another provider, a hand-written key on this one - has to survive.
+    #[test]
+    fn writing_overrides_leaves_the_rest_of_pi_s_config_alone() {
+        let mut root = serde_json::json!({
+            "providers": {
+                "ollama": { "baseUrl": "http://localhost:11434/v1" },
+                PI_PROVIDER_ID: { "headers": { "x-mine": "1" } },
+            },
+        });
+        let path = Path::new("models.json");
+
+        object_at(&mut root, path, &["providers", PI_PROVIDER_ID])
+            .unwrap()
+            .insert(
+                "modelOverrides".to_owned(),
+                pi_model_overrides(&[model("m", Thinking::Toggle)]),
+            );
+
+        assert_eq!(
+            root["providers"]["ollama"]["baseUrl"],
+            "http://localhost:11434/v1"
+        );
+        assert_eq!(root["providers"][PI_PROVIDER_ID]["headers"]["x-mine"], "1");
+        assert_eq!(
+            root["providers"][PI_PROVIDER_ID]["modelOverrides"]["m"]["reasoning"],
+            true
+        );
+    }
+
+    /// Somebody else's hand-edited config must produce an error naming the file, not a
+    /// panic from indexing a string with a key.
+    #[test]
+    fn a_provider_block_that_is_not_an_object_is_an_error() {
+        let mut root = serde_json::json!({ "providers": "oops" });
+        let err = object_at(&mut root, Path::new("models.json"), &["providers"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("models.json"), "got: {err}");
+    }
+
+    #[test]
+    fn missing_levels_of_the_path_are_created() {
+        let mut root = serde_json::json!({});
+        object_at(&mut root, Path::new("models.json"), &["providers", "p"])
+            .unwrap()
+            .insert("modelOverrides".to_owned(), serde_json::json!({}));
+        assert!(root["providers"]["p"]["modelOverrides"].is_object());
     }
 }

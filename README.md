@@ -66,15 +66,19 @@ Changing the root does not move what is already downloaded; it tells you what to
 
 ```
 $ ailocal model ls
-NAME                  SIZE  ARCH     KV/TOK   TRAINED   MAX CTX
-gemma4-12b-Q4_K_M      6 G  gemma4   11 KiB      256k      256k  (swa)
-qwen3-14b              8 G  qwen3   106 KiB       40k     39572
+NAME                  SIZE  ARCH          KV/TOK   TRAINED   MAX CTX  THINK
+gemma4-12b-Q4_K_M      6 G  gemma4 (swa)  11 KiB      256k      256k  on/off
+qwen3-14b              8 G  qwen3        106 KiB       40k     39572  -
 ```
 
-The interesting column is the last one. "Does it fit in VRAM" is the wrong question -
+The interesting column is MAX CTX. "Does it fit in VRAM" is the wrong question -
 weights and KV cache have to fit *together*, and the KV cache is what actually decides
 how much context you get. ailocal computes that from the model's own attention geometry
 and refuses loads that cannot work, rather than discovering the limit at runtime.
+
+THINK is the model's own thinking control, read from its chat template: a switch, an
+effort level, or nothing at all. It is what a harness's `/thinking` and `/effort` can
+offer, so a model with no thinking mode says so here rather than at the prompt.
 
 That matters more than it sounds: on AMD there is no graceful VRAM exhaustion. A model
 that over-allocates does not get an error - the compositor loses its framebuffer and the
@@ -92,7 +96,8 @@ desktop session dies.
 | `ailocal model search <query>` | find GGUF repos on Hugging Face |
 | `ailocal model files <owner/repo>` | list quantisations and which of them fit |
 | `ailocal model install <ref>` | resumable, checksum-verified download |
-| `ailocal model ls` / `rm` | what is on disk, and what fits |
+| `ailocal model ls` | what is on disk, what fits, and what can think |
+| `ailocal model rm <model>` | delete its weights, and stop advertising it |
 | `ailocal serve <model>` | run it, sized to the VRAM budget |
 | `ailocal ps` / `stop` | what is loaded |
 | `ailocal gateway run` / `key` / `check` | the authenticated front end |
