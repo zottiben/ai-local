@@ -106,6 +106,15 @@ reboot leaves the gateway down.
 `ailocal serve --foreground` exists for this: systemd must supervise llama-server
 directly, not a command that forks and returns.
 
+**Never spawn a tool by bare name.** A service gets whatever `PATH` its manager hands
+it, and launchd hands out `/usr/bin:/bin:/usr/sbin:/sbin` - no `/opt/homebrew/bin`, no
+`~/.local/bin`. Spawning `llama-server` by name worked from a shell and crash-looped the
+model unit, reporting "llama.cpp reports no GPU" the whole time because the device probe
+could not tell a binary it failed to run from a machine with no card. Resolve through
+`ailocal::llama_server()`, which tries `PATH` then the usual install directories.
+Reproduce a service's view with
+`env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin ailocal budget`.
+
 ### 6. Root steps go to the user, and Arch is never partially upgraded
 `sudo` needs a password, so the agent cannot install packages. Hand the user an exact
 command. It always syncs first:

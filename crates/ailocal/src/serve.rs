@@ -366,7 +366,8 @@ fn spawn(
     // guess as though it were measured is what makes the next launch budget wrongly.
     let desktop_mib = crate::vram_used_mib().ok();
 
-    let mut cmd = std::process::Command::new("llama-server");
+    let exe = crate::llama_server()?;
+    let mut cmd = std::process::Command::new(&exe);
     cmd.arg("-m")
         .arg(&model.path)
         .args(["-ngl", "99"])
@@ -390,7 +391,7 @@ fn spawn(
 
     let child = cmd
         .spawn()
-        .context("starting llama-server (is llama-cpp installed?)")?;
+        .with_context(|| format!("starting {}", exe.display()))?;
     let pid = child.id();
 
     let instance = Instance {
