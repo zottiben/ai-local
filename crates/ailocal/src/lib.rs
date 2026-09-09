@@ -93,34 +93,123 @@ pub fn can_poll_vram() -> bool {
     })
 }
 
+/// Directories to look in when `PATH` does not have llama-server.
+///
+/// A service runs with whatever `PATH` its manager hands it, and launchd hands out
+/// `/usr/bin:/bin:/usr/sbin:/sbin` - which contains no package manager's bin directory.
+/// These are where the installers this project documents actually put it.
+const LLAMA_SERVER_DIRS: [&str; 4] = [
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/home/linuxbrew/.linuxbrew/bin",
+    "/usr/bin",
+];
+
+/// Where llama-server is, as an absolute path, resolved once per process.
+///
+/// By path rather than by name, because spawning it by name works from a shell and
+/// fails under the service meant to keep it up: launchd's `PATH` is
+/// `/usr/bin:/bin:/usr/sbin:/sbin`, which holds neither `/opt/homebrew/bin` nor
+/// `~/.local/bin`. The model unit crash-looped on exactly that, and said
+/// "llama.cpp reports no GPU" while doing it - the device probe cannot tell a binary it
+/// failed to run from a machine with no card.
+///
+/// # Errors
+/// If it is on neither `PATH` nor any of the usual install directories.
+pub fn llama_server() -> anyhow::Result<std::path::PathBuf> {
+    static CACHE: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+
+    CACHE
+        .get_or_init(|| llama_server_candidates().into_iter().find(|p| p.is_file()))
+        .clone()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "llama-server not found - not on PATH, and not in {} or ~/.local/bin. \
+                 Install llama.cpp (macOS: `brew install llama.cpp`; Arch: \
+                 `sudo pacman -Syu llama-cpp ggml-vulkan`)",
+                LLAMA_SERVER_DIRS.join(", ")
+            )
+        })
+}
+
+/// Every place to look for llama-server, in order of preference.
+///
+/// `PATH` first, so a deliberately chosen build wins over a packaged one, then the
+/// install directories a service's `PATH` will not contain.
+fn llama_server_candidates() -> Vec<std::path::PathBuf> {
+    let on_path = std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let local = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .map(|h| h.join(".local/bin"));
+
+    on_path
+        .into_iter()
+        .chain(LLAMA_SERVER_DIRS.iter().map(std::path::PathBuf::from))
+        .chain(local)
+        .map(|dir| dir.join("llama-server"))
+        .collect()
+}
+
 /// The device a model would load onto, probed once per process.
 ///
 /// Memoised because probing spawns llama-server, and the answer cannot change while we
 /// run - a card is not hot-plugged mid-command.
 ///
 /// # Errors
-/// If llama.cpp reports no usable device.
+/// If llama-server cannot be found or run, or if it reports no usable device. Those are
+/// different problems with different fixes, so they are different messages: collapsing
+/// them into "no GPU" sent someone looking for a missing Vulkan package on a machine
+/// whose only fault was a service `PATH`.
 pub fn primary_device() -> anyhow::Result<device::Device> {
-    static CACHE: std::sync::OnceLock<Option<device::Device>> = std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<Result<device::Device, String>> = std::sync::OnceLock::new();
 
     CACHE
         .get_or_init(|| {
-            device::probe()
-                .ok()
-                .and_then(|d| device::primary(&d).cloned())
-        })
-        .clone()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
+            let devices = device::probe().map_err(|e| format!("{e:#}"))?;
+            device::primary(&devices).cloned().ok_or_else(|| {
                 "llama.cpp reports no GPU. Install a backend (ggml-vulkan on Linux; \
                  Metal is built in on macOS) and check `llama-server --list-devices`"
-            )
+                    .to_owned()
+            })
         })
+        .clone()
+        .map_err(|e| anyhow::anyhow!(e))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug this exists to fix: launchd hands a job
+    /// `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, so looking only there found no
+    /// llama-server and the model unit crash-looped.
+    #[test]
+    fn a_service_path_still_reaches_the_usual_install_directories() {
+        let candidates = llama_server_candidates();
+        for dir in LLAMA_SERVER_DIRS {
+            let wanted = std::path::Path::new(dir).join("llama-server");
+            assert!(candidates.contains(&wanted), "missing {}", wanted.display());
+        }
+    }
+
+    /// A build someone put on their PATH on purpose beats a packaged one, so the PATH
+    /// entries have to come first and in their own order.
+    #[test]
+    fn path_entries_are_tried_before_the_fallbacks() {
+        let on_path: Vec<_> = std::env::var_os("PATH")
+            .map(|paths| {
+                std::env::split_paths(&paths)
+                    .map(|d| d.join("llama-server"))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let candidates = llama_server_candidates();
+        assert_eq!(candidates[..on_path.len()], on_path[..]);
+        assert!(candidates.len() > on_path.len(), "fallbacks are appended");
+    }
 
     /// The point of this is to answer for a directory that does not exist yet, since
     /// that is the state it is asked about - while someone decides where to put a model.

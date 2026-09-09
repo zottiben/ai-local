@@ -1723,11 +1723,13 @@ fn setup(args: &SetupArgs) -> anyhow::Result<()> {
     let mut blocked = false;
 
     println!("1. prerequisites");
-    match ailocal::update::which("llama-server") {
-        Some(p) => println!("   ok    llama-server at {}", p.display()),
-        None => {
+    // The same resolver the rest of the process uses, or setup passes on a machine
+    // where every later command fails.
+    match ailocal::llama_server() {
+        Ok(p) => println!("   ok    llama-server at {}", p.display()),
+        Err(_) => {
             blocked = true;
-            println!("   MISS  llama-server not on PATH");
+            println!("   MISS  llama-server not found");
             if cfg!(target_os = "macos") {
                 println!("         macOS:  brew install llama.cpp");
             } else {

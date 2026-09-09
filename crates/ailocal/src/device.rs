@@ -68,10 +68,11 @@ pub struct Device {
 /// # Errors
 /// If llama-server is missing or cannot be run.
 pub fn probe() -> anyhow::Result<Vec<Device>> {
-    let output = Command::new("llama-server")
+    let exe = crate::llama_server()?;
+    let output = Command::new(&exe)
         .arg("--list-devices")
         .output()
-        .context("running llama-server --list-devices (is llama.cpp installed?)")?;
+        .with_context(|| format!("running {} --list-devices", exe.display()))?;
 
     // Backends log to stderr and the device list to stdout, but which stream carries
     // the list has moved between releases, so parse both.
