@@ -373,7 +373,10 @@ pub fn parse_head(bytes: &[u8]) -> anyhow::Result<Metadata> {
 /// The chat-template variable llama.cpp uses to turn thinking on and off per request.
 const THINKING_TOGGLE: &[u8] = b"enable_thinking";
 
-/// How far in to look for it.
+/// The one llama.cpp passes an effort *level* to, for templates that take one.
+const THINKING_EFFORT: &[u8] = b"reasoning_effort";
+
+/// How far in to look for them.
 ///
 /// The chat template is metadata, so it is near the front of the file - but it sits
 /// *after* the tokeniser vocabulary, which for a 12B is several megabytes. gemma4's
@@ -382,24 +385,56 @@ const THINKING_TOGGLE: &[u8] = b"enable_thinking";
 /// file that is almost always in page cache.
 const TEMPLATE_SEARCH_BYTES: usize = 64 << 20;
 
-/// Whether this model's chat template can be told to think, per request.
+/// What per-request thinking control a model's chat template exposes.
+///
+/// This is the model's own capability, not a setting of ours, and a harness has to be
+/// told which of the three it is: reporting a dial on a model that has only a switch
+/// offers controls that provably do nothing, and reporting nothing on a model that can
+/// think leaves the harness offering `off` as the only choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Thinking {
+    /// No thinking mode at all. qwen3-coder-30b is one of these.
+    None,
+    /// A boolean switch, `chat_template_kwargs.enable_thinking`. gemma4-12b.
+    Toggle,
+    /// An effort level the template itself reads, via llama.cpp's `reasoning_effort`.
+    Effort,
+}
+
+impl Thinking {
+    /// Whether the model can think at all.
+    #[must_use]
+    pub const fn is_available(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// One word for a table or a status line.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "-",
+            Self::Toggle => "on/off",
+            Self::Effort => "effort",
+        }
+    }
+}
+
+/// Which thinking control this model's chat template exposes.
 ///
 /// Deliberately a substring search rather than a full metadata parse. The template is
 /// the last thing in the metadata and reaching it properly means parsing every
 /// preceding key including the vocabulary, which is most of the cost of reading the
-/// file. `enable_thinking` is a specific enough identifier that finding it in the
-/// header is conclusive, and this is asked once when writing a harness catalogue, not
-/// on the hot path.
+/// file. Both names are specific enough that finding one in the header is conclusive,
+/// and this is asked once when writing a harness catalogue, not on the hot path.
 ///
-/// A model that does not have it still accepts the request - llama.cpp ignores a
-/// template variable the template does not use - so a wrong answer here costs a
-/// control that does nothing, not an error.
+/// It agrees with llama.cpp's own answer: `/props` reports `chat_template_caps`, and
+/// for both models here `supports_reasoning_effort` matches what this returns.
 #[must_use]
-pub fn supports_thinking_toggle(path: &std::path::Path) -> bool {
+pub fn thinking_support(path: &std::path::Path) -> Thinking {
     use std::io::Read as _;
 
     let Ok(file) = std::fs::File::open(path) else {
-        return false;
+        return Thinking::None;
     };
     let mut buf = Vec::new();
     if file
@@ -407,10 +442,24 @@ pub fn supports_thinking_toggle(path: &std::path::Path) -> bool {
         .read_to_end(&mut buf)
         .is_err()
     {
-        return false;
+        return Thinking::None;
     }
-    buf.windows(THINKING_TOGGLE.len())
-        .any(|w| w == THINKING_TOGGLE)
+    thinking_in_header(&buf)
+}
+
+/// The search itself, so it can be tested without a multi-gigabyte fixture.
+fn thinking_in_header(bytes: &[u8]) -> Thinking {
+    let holds = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+
+    // Effort first: a template that takes a level can also be switched off, and the
+    // level is the more capable of the two answers.
+    if holds(THINKING_EFFORT) {
+        Thinking::Effort
+    } else if holds(THINKING_TOGGLE) {
+        Thinking::Toggle
+    } else {
+        Thinking::None
+    }
 }
 
 pub fn read_file(path: &std::path::Path, limit: usize) -> anyhow::Result<Metadata> {
@@ -638,5 +687,57 @@ mod tests {
     fn rejects_non_gguf() {
         assert!(parse_head(b"NOPE____").is_err());
         assert!(parse_head(b"GG").is_err());
+    }
+
+    /// The measured shape of both models here: gemma4's template mentions
+    /// `enable_thinking`, qwen3-coder's mentions neither, and llama-server's own
+    /// `chat_template_caps` agrees with both answers.
+    #[test]
+    fn a_template_with_a_switch_reports_a_switch() {
+        let head = Builder::new()
+            .string(
+                "tokenizer.chat_template",
+                "{% if enable_thinking %}<think>{% endif %}",
+            )
+            .build();
+        assert_eq!(thinking_in_header(&head), Thinking::Toggle);
+    }
+
+    #[test]
+    fn a_template_with_no_thinking_reports_none() {
+        let head = Builder::new()
+            .string("tokenizer.chat_template", "{{ messages[0].content }}")
+            .build();
+        assert_eq!(thinking_in_header(&head), Thinking::None);
+    }
+
+    /// A level is the more capable answer, so a template offering both is a dial.
+    #[test]
+    fn an_effort_dial_outranks_the_switch_it_also_has() {
+        let head = Builder::new()
+            .string(
+                "tokenizer.chat_template",
+                "{% if enable_thinking %}{{ reasoning_effort }}{% endif %}",
+            )
+            .build();
+        assert_eq!(thinking_in_header(&head), Thinking::Effort);
+    }
+
+    /// A file that cannot be read is not a model that can think - and must not be a
+    /// panic either, since this runs over whatever is in the models directory.
+    #[test]
+    fn an_unreadable_file_reports_no_thinking() {
+        assert_eq!(
+            thinking_support(std::path::Path::new("/nonexistent/model.gguf")),
+            Thinking::None
+        );
+    }
+
+    #[test]
+    fn labels_distinguish_the_three_answers() {
+        assert_eq!(Thinking::None.label(), "-");
+        assert!(!Thinking::None.is_available());
+        assert!(Thinking::Toggle.is_available());
+        assert!(Thinking::Effort.is_available());
     }
 }
