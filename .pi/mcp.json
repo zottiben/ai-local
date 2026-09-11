@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "ai-planner": {
+      "directTools": false
+    }
+  }
+}

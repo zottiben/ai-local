@@ -156,11 +156,24 @@ const DISCRETE_RESERVE_MIB: u64 = 2048;
 
 /// Memory held back on a unified-memory device.
 ///
-/// Smaller because llama.cpp already reports macOS's `iogpu.wired_limit_mb` as the
-/// device total, and that cap exists precisely to keep memory for the rest of the
-/// system. Over-committing here degrades into paging rather than killing anything, so
-/// the reserve is about staying responsive, not about survival.
-const UNIFIED_RESERVE_MIB: u64 = 1024;
+/// A share of the total rather than a constant, because on unified memory the reserve
+/// is what the whole rest of the machine lives on. llama.cpp reports macOS's
+/// recommended working set as the device total, and that is already ~80% of physical
+/// RAM - so the flat 1024 MiB this used to hold back left a 64 GB Mac running its
+/// browser, editor and agents in the remaining 12 GB.
+///
+/// Measured on an M4 Max/64 GB on 2026-09-11, with a 30B loaded at its trained 256k
+/// context under the flat reserve: 17 GB in swap, 14 GB held by the compressor, 67 MB
+/// free. Over-committing here does degrade into paging rather than killing the
+/// session - but paging is not a mild outcome for a model. macOS compresses the
+/// weights while the server sits idle, so the next prompt pays to fault them back:
+/// 13.4 tok/s on the first request against 97.3 tok/s once resident.
+///
+/// A quarter leaves the rest of that machine ~24 GiB, which is what a desktop running
+/// a browser and an editor actually uses.
+fn unified_reserve_mib(total_mib: u64) -> u64 {
+    (total_mib / 4).max(1024)
+}
 
 /// What a load has to fit inside.
 #[derive(Debug, Clone, Copy)]
@@ -169,6 +182,18 @@ pub struct Budget {
     pub ceiling_mib: u64,
     /// Memory already held by everything that is not the model being loaded.
     pub desktop_mib: u64,
+    /// Largest context a launch may take, however much more would fit.
+    ///
+    /// Memory is not the only thing a long context costs. Attention is quadratic, so
+    /// the marginal prefill rate on the machine above fell from 582 tok/s at 8k to 48
+    /// tok/s at 57k - and a harness fills whatever window it is told about, so an
+    /// advertised 256k becomes a real 128k session that generates at 9 tok/s and
+    /// reprocesses for minutes whenever its cache is lost. The cache for a context
+    /// nobody reaches is also allocated up front and then paged out by the OS.
+    ///
+    /// `None` means whatever fits, which is the right answer for a card small enough
+    /// that memory caps the context first.
+    pub context_cap: Option<u64>,
 }
 
 impl Budget {
@@ -181,6 +206,16 @@ impl Budget {
         Self {
             ceiling_mib: CEILING_MIB,
             desktop_mib,
+            context_cap: None,
+        }
+    }
+
+    /// The same budget with a ceiling on how much context a launch may take.
+    #[must_use]
+    pub fn capped_at(self, context_cap: Option<u64>) -> Self {
+        Self {
+            context_cap,
+            ..self
         }
     }
 
@@ -192,7 +227,7 @@ impl Budget {
     #[must_use]
     pub fn for_device(device: &crate::device::Device) -> Self {
         let reserve = if device.backend.is_unified_memory() {
-            UNIFIED_RESERVE_MIB
+            unified_reserve_mib(device.total_mib)
         } else {
             DISCRETE_RESERVE_MIB
         };
@@ -201,6 +236,7 @@ impl Budget {
             // What the device reports free already excludes everything else resident,
             // so the baseline is whatever is missing from the total.
             desktop_mib: device.total_mib.saturating_sub(device.free_mib),
+            context_cap: None,
         }
     }
 
@@ -215,10 +251,16 @@ impl Budget {
             .saturating_sub(COMPUTE_BUFFER_MIB)
     }
 
-    /// Largest context that fits alongside `weights_mib`, or `None` if the weights
-    /// alone do not fit.
+    /// Largest context this budget allows alongside `weights_mib`, or `None` if the
+    /// weights alone do not fit.
     #[must_use]
     pub fn max_context(&self, kv: &KvLayout, cache: CacheType, weights_mib: u64) -> Option<u64> {
+        let fits = self.context_that_fits(kv, cache, weights_mib)?;
+        Some(self.context_cap.map_or(fits, |cap| fits.min(cap)))
+    }
+
+    /// Largest context the memory alone allows, before any cap on it.
+    fn context_that_fits(&self, kv: &KvLayout, cache: CacheType, weights_mib: u64) -> Option<u64> {
         let for_cache = self.available_mib().checked_sub(weights_mib)?;
         let budget_bytes = for_cache as f64 * 1024.0 * 1024.0 / SAFETY_FACTOR;
 
@@ -404,14 +446,44 @@ mod tests {
         assert!((b.ceiling_mib as i64 - CEILING_MIB as i64).abs() < 200);
     }
 
-    /// Unified memory is already capped by the OS, so it holds back less.
+    /// Unified memory holds back a share of the machine, not a token amount.
+    ///
+    /// The reserve here is everything the operating system, the browser and the
+    /// editor get. A flat 1024 MiB read as generous against a 16 GB card and left a
+    /// 64 GB Mac 17 GB into swap, which is the failure this scales to avoid.
     #[test]
-    fn a_unified_device_reserves_less() {
+    fn a_unified_device_reserves_a_share_of_its_total() {
         use crate::device::Backend;
         let metal = Budget::for_device(&device(Backend::Metal, 26_000, 25_900));
-        let discrete = Budget::for_device(&device(Backend::Vulkan, 26_000, 25_900));
-        assert!(metal.available_mib() > discrete.available_mib());
-        assert_eq!(metal.ceiling_mib, 26_000 - UNIFIED_RESERVE_MIB);
+        assert_eq!(metal.ceiling_mib, 26_000 - 6_500);
+
+        // Still not a cap that stops a big Mac being a big Mac: three quarters of a
+        // 52 GB working set is far more than any discrete card here offers.
+        let big = Budget::for_device(&device(Backend::Metal, 53_084, 53_000));
+        assert!(big.available_mib() > 38_000, "{}", big.available_mib());
+    }
+
+    /// A cap only ever lowers the answer, and never raises it past what fits.
+    #[test]
+    fn a_context_cap_applies_on_top_of_what_memory_allows() {
+        use crate::device::Backend;
+        let mac = Budget::for_device(&device(Backend::Metal, 53_084, 53_000));
+        let kv = KvLayout::dense(48, 4, 128, 128);
+        let uncapped = mac.max_context(&kv, CacheType::Q8_0, 17_697).unwrap();
+        assert!(uncapped > 131_072, "{uncapped}");
+
+        let capped = mac.capped_at(Some(131_072));
+        assert_eq!(
+            capped.max_context(&kv, CacheType::Q8_0, 17_697),
+            Some(131_072)
+        );
+
+        // A cap above what fits changes nothing - memory still decides.
+        let generous = mac.capped_at(Some(1 << 30));
+        assert_eq!(
+            generous.max_context(&kv, CacheType::Q8_0, 17_697),
+            Some(uncapped)
+        );
     }
 
     /// A 36 GB Mac should be able to run things this 16 GB card cannot.

@@ -92,6 +92,7 @@ desktop session dies.
 | `ailocal status` | where you are, and the one command that gets you further |
 | `ailocal config data-dir [path]` | where weights, caches and datasets live |
 | `ailocal config gateway-port [n]` | which port the gateway listens on |
+| `ailocal config max-context [tokens]` | cap the context window to trade length for speed |
 | `ailocal model pick` | choose your model: what you have, plus what would fit |
 | `ailocal model search <query>` | find GGUF repos on Hugging Face |
 | `ailocal model files <owner/repo>` | list quantisations and which of them fit |
@@ -141,37 +142,34 @@ Pi is given the whole catalogue and chooses per session. Claude Code takes exact
 whatever is loaded, and only then falls back to alphabetical order. It prints which it
 chose and why, because pinning one model out of several is a decision worth showing.
 
-Re-run it after installing a model: the harness keeps a cached catalogue, so a new model
-is not visible to it until that is rewritten. The gateway needs no such nudge - it
-rescans on every request.
+Re-run it after installing a model or changing `max_context`: the harness keeps a
+cached catalogue, so a new model or window is not visible until that is rewritten. The
+gateway needs no such nudge - it rescans on every request.
 
 ## Why the first prompt is slow, and what to do about it
 
-Three costs stack on a first turn, and two of them are avoidable. Measured on an
-RX 7600 XT with gemma4-12b and a 9,700-token system prompt, which is the size a coding
-harness actually sends:
+Three costs stack on a first turn: loading the model, faulting an idle model back into
+memory, and processing the harness prompt. All three are avoidable or reducible.
 
-| | first turn | same prompt again |
-| --- | --- | --- |
-| `reasoning = "off"` | 31.5s | 15.9s |
-| `reasoning = "on"` | 52.2s | 36.0s |
+- **Keep the model resident.** `ailocal service install` loads it at boot instead of on
+  the first request. On unified-memory Macs ailocal also locks the weights in memory;
+  otherwise macOS may compress an idle model and the next prompt has to fault it all
+  back. Measured on an M4 Max/64 GB: 13.4 tok/s after idle versus 97.3 tok/s once warm.
+- **Do not allocate context you will not use.** `max_context` defaults to 128k. Lower it
+  with `ailocal config max-context 65536` when a shorter session is worth faster turns;
+  a smaller KV cache also leaves the operating system enough memory not to swap.
+- **Keep MCP servers proxy-only.** A real fresh Pi request in this repo was 31,064 input
+  tokens with 56 direct MCP tools and took 91.6s. The same request through the MCP
+  adapter's `mcp`/`mcpScript` proxy was 17,834 tokens and took 40.0s. The tools remain
+  available on demand; only their schemas stop occupying every prompt.
+- **Leave reasoning off.** It is the default because the eval measured it: reasoning
+  never beat `off` on a task and often spent the answer budget before answering.
+- **Preserve the prefix.** llama.cpp's prompt cache makes a repeated 17,834-token Pi
+  prefix take 66ms instead of 40s. Keeping the tool surface stable lets that cache hit.
 
-Plus a cold model load if nothing is resident - about 5s here with the weights in page
-cache, considerably longer reading 6 GB off an SSD for the first time.
-
-- **Keep the model resident.** `ailocal service install` loads it at boot and holds it
-  there, so no request ever pays for the load. Without it the gateway loads on demand
-  and the first prompt waits.
-- **Leave reasoning off.** It is the default because the eval measured it, and the
-  measurement is stronger than the latency headline: across three reasoning settings,
-  reasoning never beat `off` on a single task. See below.
-- **The prompt cache does the rest.** llama.cpp reuses the common prefix between turns,
-  which is why the second turn above is half the first. Only the first turn of a session
-  pays full prompt processing.
-
-That leaves prompt processing of the harness's system prompt as the irreducible part.
-It is why a local model feels slower than a hosted one on the first turn and comparable
-afterwards.
+Run `scripts/bench/responsiveness.sh --idle 10` against a resident model to measure both
+the idle-first-request case and warm prompt/generation throughput on the current
+machine.
 
 ## The gateway
 

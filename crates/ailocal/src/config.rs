@@ -95,6 +95,13 @@ pub struct Config {
     #[serde(default = "default_reasoning_budget")]
     pub reasoning_budget: i64,
 
+    /// Largest context a launch will take, however much more would fit.
+    ///
+    /// Only ever a cap: a model trained shorter, or a card that cannot hold this
+    /// much, still decides. Raise it when a long window matters more than latency.
+    #[serde(default = "default_max_context")]
+    pub max_context: u64,
+
     /// Model the service unit loads at boot. `None` means load nothing and let the
     /// gateway pull one in on the first request.
     #[serde(default)]
@@ -150,6 +157,8 @@ struct Raw {
     reasoning: String,
     #[serde(default = "default_reasoning_budget")]
     reasoning_budget: i64,
+    #[serde(default = "default_max_context")]
+    max_context: u64,
     #[serde(default)]
     default_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -177,6 +186,7 @@ fn unknown_field_hint(text: &str) -> Option<String> {
         "cache_type",
         "reasoning",
         "reasoning_budget",
+        "max_context",
         "default_model",
         "system_prompt",
         "gateway_host",
@@ -251,6 +261,7 @@ impl From<Raw> for Config {
             cache_type: raw.cache_type,
             reasoning: raw.reasoning,
             reasoning_budget: raw.reasoning_budget,
+            max_context: raw.max_context,
             default_model: raw.default_model,
             system_prompt: raw.system_prompt,
             gateway_host: raw.gateway_host,
@@ -273,6 +284,7 @@ impl From<Config> for Raw {
             cache_type: c.cache_type,
             reasoning: c.reasoning,
             reasoning_budget: c.reasoning_budget,
+            max_context: c.max_context,
             default_model: c.default_model,
             system_prompt: c.system_prompt,
             gateway_host: c.gateway_host,
@@ -304,6 +316,27 @@ fn default_reasoning_budget() -> i64 {
     -1
 }
 
+/// The context a launch takes when the hardware would allow more.
+///
+/// Context is not free once it fits. The cache for the full window is allocated up
+/// front, attention over it is quadratic, and a harness fills whatever window it is
+/// told about - so "as much as fits" is a promise the machine then has to keep on
+/// every turn.
+///
+/// Measured on an M4 Max/64 GB running a 30B at its trained 256k on 2026-09-11: an
+/// 8.6 GB cache allocated for a window sessions never reached, the machine 17 GB into
+/// swap, generation at 9.5 tok/s once a session passed 100k tokens, and a first
+/// prompt of 57k tokens taking 588 s to process. Halving the window halves the cache
+/// and roughly halves the bandwidth every generated token costs.
+///
+/// 128k rather than something smaller because it is still a long window - the point
+/// is to stop promising one this hardware cannot serve at speed, not to make the
+/// model forget. Sessions that stay under 32k are far quicker again, and that is a
+/// job for the harness's own prompt: lower this to match once it is trimmed.
+fn default_max_context() -> u64 {
+    131_072
+}
+
 fn default_gateway_host() -> String {
     "127.0.0.1".to_owned()
 }
@@ -323,6 +356,7 @@ impl Default for Config {
             cache_type: default_cache_type(),
             reasoning: default_reasoning(),
             reasoning_budget: default_reasoning_budget(),
+            max_context: default_max_context(),
             default_model: None,
             system_prompt: None,
             gateway_host: default_gateway_host(),

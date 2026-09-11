@@ -81,12 +81,20 @@ impl Instance {
 /// starting another evicts it. Planning against current usage would count the outgoing
 /// model's VRAM as unavailable and refuse every swap.
 ///
+/// The configured context cap is applied here rather than at the spawn, because every
+/// figure a user or a harness is shown has to be the one a launch would actually take.
+/// `model ls`, the gateway's catalogue and the window Pi compacts against all come
+/// through this function; capping only the spawn would advertise a window the server
+/// does not have.
+///
 /// # Errors
-/// If VRAM usage cannot be read and no instance is running to supply a baseline.
+/// If VRAM usage cannot be read and no instance is running to supply a baseline, or
+/// the config cannot be parsed.
 pub fn budget_for_next_launch() -> anyhow::Result<Budget> {
     // The ceiling comes from the device: a 16 GB card and a 64 GB Mac cannot share a
     // hardcoded constant.
-    let mut budget = Budget::for_device(&crate::primary_device()?);
+    let mut budget = Budget::for_device(&crate::primary_device()?)
+        .capped_at(Some(crate::config::Config::load()?.max_context));
 
     // With a model already resident, that memory is not a permanent cost - starting
     // another evicts it - so budget against the baseline recorded when it loaded.
@@ -280,13 +288,35 @@ pub fn plan_context(model: &Model, budget: &Budget, opts: &Options) -> anyhow::R
         ),
     };
 
+    let capped_by_config = model.kv.is_some_and(|kv| {
+        budget.context_cap.is_some_and(|cap| {
+            cap == ceiling
+                && budget
+                    .capped_at(None)
+                    .max_context(&kv, opts.cache, model.size_mib)
+                    .map(|hardware| model.trained_context.map_or(hardware, |t| hardware.min(t)))
+                    .is_some_and(|without_cap| without_cap > cap)
+        })
+    });
+
     match opts.context {
         None => Ok(ceiling),
         Some(want) if want <= ceiling => Ok(want),
+        // A request the configuration refuses, not one the hardware does. Raising the
+        // cap rather than overriding it here keeps one answer to "how big is the
+        // window": the harnesses were told this number too.
+        Some(want) if capped_by_config => anyhow::bail!(
+            "requested {want} tokens of context but max_context is {ceiling}; raise it \
+             with `ailocal config max-context {want}` if the latency is worth it"
+        ),
+        Some(want) if model.trained_context == Some(ceiling) => anyhow::bail!(
+            "requested {want} tokens of context but {} was trained for {ceiling}",
+            model.name
+        ),
         Some(want) => anyhow::bail!(
             "requested {want} tokens of context but only {ceiling} fits within the \
-             {} MiB ceiling; over-committing VRAM kills the desktop session",
-            vram::CEILING_MIB
+             {} MiB ceiling; over-committing GPU memory can take down the desktop",
+            budget.ceiling_mib
         ),
     }
 }
@@ -379,6 +409,9 @@ fn spawn(
         .args(["-a", &model.name])
         .args(["--reasoning", &opts.reasoning])
         .arg("--no-webui");
+    if should_lock_weights() {
+        cmd.args(["--load-mode", "mlock"]);
+    }
     if stdio == Stdio::LogFile {
         cmd.stdout(out.try_clone()?).stderr(out);
     }
@@ -419,6 +452,25 @@ fn spawn(
             Err(e.context(format!("llama-server did not come up:\n{tail}")))
         }
     }
+}
+
+/// Whether to ask the OS to keep the weights resident.
+///
+/// On unified memory this is a correction rather than an optimisation. The weights
+/// are the same pages the GPU reads, so an idle server is a large, untouched
+/// allocation and macOS compresses it like any other - and then the next prompt pays
+/// to fault all of it back before it can answer. Measured on an M4 Max on 2026-09-11:
+/// 13.4 tok/s on the first request after an idle spell against 97.3 tok/s once
+/// resident, with 234 MB decompressed during a single three-second generation.
+///
+/// On a discrete card the host mapping is scratch the driver has already copied into
+/// VRAM. Locking it there would pin the weights a second time, in RAM the machine
+/// needs for everything else - fatal on the 8.5 GB box this also runs on.
+///
+/// A probe that fails answers no, because that is the choice that cannot make things
+/// worse.
+fn should_lock_weights() -> bool {
+    crate::primary_device().is_ok_and(|d| d.backend.is_unified_memory())
 }
 
 /// Give the driver a moment to hand back the evicted model's VRAM.
@@ -534,6 +586,18 @@ mod tests {
     }
 
     #[test]
+    fn names_the_config_when_it_is_the_only_reason_a_request_is_refused() {
+        let m = model("qwen3-14b", 8836, Some(qwen3_14b()), Some(40_960));
+        let budget = Budget::new(900).capped_at(Some(8192));
+        let opts = Options {
+            context: Some(16_384),
+            ..Options::default()
+        };
+        let err = plan_context(&m, &budget, &opts).unwrap_err();
+        assert!(err.to_string().contains("max_context"), "unexpected: {err}");
+    }
+
+    #[test]
     fn refuses_a_model_whose_weights_do_not_fit() {
         let m = model("devstral-24b", 13_660, Some(qwen3_14b()), Some(131_072));
         let err = plan_context(&m, &Budget::new(900), &Options::default()).unwrap_err();
@@ -621,6 +685,7 @@ mod tests {
         let budget = Budget {
             ceiling_mib: 20_000,
             desktop_mib: i.desktop_mib.unwrap(),
+            context_cap: None,
         };
         let m = model("qwen3-14b", 8836, Some(qwen3_14b()), Some(40_960));
         assert!(

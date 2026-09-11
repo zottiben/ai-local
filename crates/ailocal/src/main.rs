@@ -271,6 +271,12 @@ enum ConfigCmd {
     ///
     /// The escape hatch when something else already owns 8081.
     GatewayPort { port: Option<u16> },
+    /// Show or change the largest context a launch will take.
+    ///
+    /// Only ever a cap - the model's training and this machine's memory still
+    /// decide. Lower it to make a model answer faster, raise it to let a session run
+    /// longer before the harness compacts it.
+    MaxContext { tokens: Option<u64> },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -294,6 +300,7 @@ fn main() -> anyhow::Result<()> {
         Command::Config(ConfigCmd::Init) => config_init(),
         Command::Config(ConfigCmd::DataDir { path }) => config_data_dir(path),
         Command::Config(ConfigCmd::GatewayPort { port }) => config_gateway_port(port),
+        Command::Config(ConfigCmd::MaxContext { tokens }) => config_max_context(tokens),
         Command::Serve(args) => serve_model(&args),
         Command::Ps => ps(),
         Command::Stop => stop(),
@@ -458,6 +465,52 @@ fn config_gateway_port(port: Option<u16>) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn config_max_context(tokens: Option<u64>) -> anyhow::Result<()> {
+    let mut cfg = Config::load()?;
+
+    let Some(wanted) = tokens else {
+        println!("max context  {} tokens", cfg.max_context);
+        if let Ok(Some(instance)) = serve::running() {
+            println!(
+                "loaded with  {} tokens ({})",
+                instance.context, instance.model
+            );
+        }
+        return Ok(());
+    };
+
+    anyhow::ensure!(
+        wanted >= registry::MIN_USEFUL_CONTEXT,
+        "{wanted} tokens is below the {} a model needs to be worth loading",
+        registry::MIN_USEFUL_CONTEXT
+    );
+    cfg.max_context = wanted;
+    println!("wrote {}", cfg.save()?.display());
+
+    // The context is fixed when llama-server starts, so a resident model keeps the
+    // window it was launched with - and the catalogue would then advertise one number
+    // while the server serves another.
+    match serve::running()? {
+        Some(instance) if instance.context != wanted => {
+            let command = if service::is_active(service::MODEL_UNIT) {
+                // The foreground parent exits with its child and launchd/systemd
+                // restarts it from the new config. Starting a detached sibling would
+                // race the supervisor for the same port.
+                "ailocal stop".to_owned()
+            } else {
+                format!("ailocal serve {}", instance.model)
+            };
+            println!(
+                "\n{} is loaded with {} tokens. Reload it to pick this up:\n  {command}",
+                instance.model, instance.context
+            );
+        }
+        _ => println!("\nTakes effect the next time a model loads."),
+    }
+    println!("\nAfter it reloads, refresh Pi's cached window:\n  ailocal harness configure pi");
+    Ok(())
+}
+
 /// Rewrite the gateway unit for the current config and restart it.
 fn restart_gateway_service(cfg: &Config) -> anyhow::Result<()> {
     let exe = unit_binary()?;
@@ -482,6 +535,10 @@ fn budget() -> anyhow::Result<()> {
     println!("in use now       {in_use:>6} MiB");
     println!("compute buffers  {:>6} MiB", vram::COMPUTE_BUFFER_MIB);
     println!("available        {:>6} MiB", launch.available_mib());
+    // The memory figures alone cannot explain a context smaller than they allow.
+    if let Some(cap) = launch.context_cap {
+        println!("context cap      {cap:>6} tokens");
+    }
 
     // Reporting live usage alone reads as "almost nothing is free" whenever a model is
     // resident, which contradicts `model ls` saying that same model fits. The number
