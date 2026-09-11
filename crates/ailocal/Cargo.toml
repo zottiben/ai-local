@@ -1,6 +1,6 @@
 [package]
 name = "ailocal"
-version = "0.5.0"
+version = "0.6.0"
 description = "Manage local LLMs and expose them to coding harnesses"
 edition.workspace = true
 rust-version.workspace = true
