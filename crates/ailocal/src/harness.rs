@@ -183,6 +183,26 @@ pub fn preferred<'a>(
 /// four distinct, and is a ceiling rather than a demand.
 const MAX_OUTPUT_TOKENS: u64 = 32768;
 
+/// What to advertise as the largest completion for a given window.
+///
+/// `maxTokens` is not free, because a harness spends the context window *less* this
+/// cap on input. A flat number is therefore a different thing on every window: 32768
+/// is an eighth of 262144 and half of 65536.
+///
+/// Measured on 2026-09-14, which is why this is a function rather than a constant.
+/// With the window at 65536 and this flat at 32768, pi had 32768 tokens of input; an
+/// 18,634-token system prompt left roughly 14k for the actual task, and "Context size
+/// has been exceeded" arrived on the first real turn - client-side, before any request
+/// reached llama-server.
+///
+/// A quarter of the window keeps input the overwhelming majority of it. The ladder
+/// still differs everywhere it matters: at 65536 the levels are 1024 / 2048 / 8192 /
+/// 15360. Only a window under ~37k clamps `medium` and `high` together, and a window
+/// that small has worse problems.
+fn max_output_tokens(context_window: u64) -> u64 {
+    (context_window / 4).min(MAX_OUTPUT_TOKENS)
+}
+
 /// The catalogue entry Pi caches for a local model.
 ///
 /// `api` must be `openai-completions` and `provider` must be the llama.cpp id, or Pi
@@ -204,7 +224,7 @@ pub fn pi_model_entry(model: &PiModel, base_url: &str) -> serde_json::Value {
         // Local inference is free, and Pi renders these figures directly.
         "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
         "contextWindow": model.context_window,
-        "maxTokens": model.context_window.min(MAX_OUTPUT_TOKENS),
+        "maxTokens": max_output_tokens(model.context_window),
     })
 }
 
@@ -236,7 +256,7 @@ pub fn pi_model_override(model: &PiModel) -> serde_json::Value {
     let mut entry = serde_json::json!({
         "reasoning": model.thinking.is_available(),
         "contextWindow": model.context_window,
-        "maxTokens": model.context_window.min(MAX_OUTPUT_TOKENS),
+        "maxTokens": max_output_tokens(model.context_window),
     });
 
     let levels = match model.thinking {
@@ -792,7 +812,9 @@ mod tests {
         assert_eq!(entry["provider"], PI_PROVIDER_ID);
         assert_eq!(entry["baseUrl"], "http://h:1/v1");
         assert_eq!(entry["contextWindow"], 1024);
-        assert_eq!(entry["maxTokens"], 1024);
+        // Never the whole window: pi spends the window less this on input, so a cap
+        // equal to it would leave nothing to send.
+        assert_eq!(entry["maxTokens"], 256);
     }
 
     /// The bug the override exists to fix: a model that can think was advertised as
@@ -877,6 +899,34 @@ mod tests {
             clamped, distinct,
             "two thinking levels clamp to one budget: {clamped:?}"
         );
+    }
+
+    /// The output cap is a share of the window, because a harness spends the window
+    /// less that cap on input. A flat 32768 against a 65536 window left pi ~14k to work
+    /// in after its own system prompt, and it refused the first real turn.
+    #[test]
+    fn the_output_cap_leaves_the_window_mostly_for_input() {
+        for window in [65_536_u64, 131_072, 262_144] {
+            let out = max_output_tokens(window);
+            let input = window - out;
+            assert!(
+                input >= window * 3 / 4,
+                "window {window} leaves only {input} for input"
+            );
+        }
+
+        // Still a ceiling, so a huge window does not advertise a huge completion.
+        assert_eq!(max_output_tokens(1 << 20), MAX_OUTPUT_TOKENS);
+
+        // And the ladder still differs on the window this actually runs at.
+        let room = max_output_tokens(65_536).saturating_sub(1024);
+        let clamped: Vec<u64> = [1024_u64, 2048, 8192, 16384]
+            .iter()
+            .map(|b| (*b).min(room))
+            .collect();
+        let mut distinct = clamped.clone();
+        distinct.dedup();
+        assert_eq!(clamped, distinct, "levels collapsed: {clamped:?}");
     }
 
     #[test]

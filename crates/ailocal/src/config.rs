@@ -329,19 +329,25 @@ fn default_reasoning_budget() -> i64 {
 /// prompt of 57k tokens taking 588 s to process. Halving the window halves the cache
 /// and roughly halves the bandwidth every generated token costs.
 ///
-/// 128k was the first attempt at this and it was still too generous. Left there, real
-/// sessions reached 96k and 105k tokens, where this machine prefills at 52-60 tok/s
-/// against the 518 tok/s it manages at 18k - and one 105k prefill wedged behind the
-/// resulting paging for 66 hours before the client gave up. A window is only worth
-/// advertising if a cold turn inside it returns.
+/// This has now been wrong in both directions, so the reasoning matters more than the
+/// number.
 ///
-/// 64k keeps roughly 47k of working room above the ~18k opening prompt a coding
-/// harness sends here, halves both the live cache and every prompt-cache entry made
-/// from it, and stays in the part of the curve where prefill is still hundreds of
-/// tokens a second. Drop it to 32768 for a machine that should feel instant, and
-/// raise it only after measuring that a cold turn at the new size still comes back.
+/// Too large and a harness falls into the window rather than using it: left at 128k,
+/// real sessions reached 96k and 105k tokens, where this machine prefills at 52-60
+/// tok/s against the ~500 it manages at 18k, and one 105k prefill wedged for 66 hours.
+/// But those sessions only ballooned because the harness was opening them with 77k of
+/// MCP tool schemas. Fix the prompt and the window stops being the thing that fills.
+///
+/// Too small and there is nowhere to work. At 64k, with the output cap taking its
+/// share, a harness had ~14k left after an 18.6k system prompt and refused the first
+/// real turn outright - a browser-testing task never reached the model at all.
+///
+/// 128k against an ~18k opening prompt leaves roughly 80k of working room, which is
+/// what a coding session actually needs. The number to re-examine is not this one on
+/// its own: it is this one *against the opening prompt a harness sends*, which
+/// `scripts/bench/responsiveness.sh` and the `prompt eval time` lines both report.
 fn default_max_context() -> u64 {
-    65_536
+    131_072
 }
 
 fn default_gateway_host() -> String {
