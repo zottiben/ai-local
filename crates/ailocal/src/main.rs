@@ -2233,6 +2233,11 @@ fn ps() -> anyhow::Result<()> {
             println!("{:<12} {}", "url", i.base_url());
             println!("{:<12} {}", "context", format_count(i.context));
             println!("{:<12} {}", "kv cache", i.cache_type);
+            // The one allocation that grows after the launch, so it is worth seeing
+            // next to the context that sizes it.
+            if let Some(mib) = i.cache_ram_mib {
+                println!("{:<12} {mib} MiB", "prompt cache");
+            }
             println!("{:<12} {}", "reasoning", i.reasoning);
             println!("{:<12} {}", "pid", i.pid);
             println!("{:<12} {} MiB", "vram", ailocal::vram_used_mib()?);

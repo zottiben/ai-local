@@ -155,9 +155,16 @@ memory, and processing the harness prompt. All three are avoidable or reducible.
   the first request. On unified-memory Macs ailocal also locks the weights in memory;
   otherwise macOS may compress an idle model and the next prompt has to fault it all
   back. Measured on an M4 Max/64 GB: 13.4 tok/s after idle versus 97.3 tok/s once warm.
-- **Do not allocate context you will not use.** `max_context` defaults to 128k. Lower it
-  with `ailocal config max-context 65536` when a shorter session is worth faster turns;
-  a smaller KV cache also leaves the operating system enough memory not to swap.
+- **Do not advertise a window a cold turn cannot return from.** `max_context` defaults
+  to 64k, and `ailocal config max-context 32768` is the setting for a machine that
+  should feel instant. This is the one that bites hardest: a harness fills whatever
+  window it is told about, and at 96k this hardware prefills at 52 tok/s against the
+  518 tok/s it manages at 18k. A smaller window also shrinks every prompt-cache entry
+  made from it.
+- **The prompt cache is sized, not inherited.** llama.cpp would keep up to 8 GB of
+  evicted session caches in ordinary memory, which grows on its own and is the first
+  thing to page once the weights are locked. `ailocal ps` reports what the running
+  server was actually allowed.
 - **Keep MCP servers proxy-only.** A real fresh Pi request in this repo was 31,064 input
   tokens with 56 direct MCP tools and took 91.6s. The same request through the MCP
   adapter's `mcp`/`mcpScript` proxy was 17,834 tokens and took 40.0s. The tools remain

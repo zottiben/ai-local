@@ -329,12 +329,19 @@ fn default_reasoning_budget() -> i64 {
 /// prompt of 57k tokens taking 588 s to process. Halving the window halves the cache
 /// and roughly halves the bandwidth every generated token costs.
 ///
-/// 128k rather than something smaller because it is still a long window - the point
-/// is to stop promising one this hardware cannot serve at speed, not to make the
-/// model forget. Sessions that stay under 32k are far quicker again, and that is a
-/// job for the harness's own prompt: lower this to match once it is trimmed.
+/// 128k was the first attempt at this and it was still too generous. Left there, real
+/// sessions reached 96k and 105k tokens, where this machine prefills at 52-60 tok/s
+/// against the 518 tok/s it manages at 18k - and one 105k prefill wedged behind the
+/// resulting paging for 66 hours before the client gave up. A window is only worth
+/// advertising if a cold turn inside it returns.
+///
+/// 64k keeps roughly 47k of working room above the ~18k opening prompt a coding
+/// harness sends here, halves both the live cache and every prompt-cache entry made
+/// from it, and stays in the part of the curve where prefill is still hundreds of
+/// tokens a second. Drop it to 32768 for a machine that should feel instant, and
+/// raise it only after measuring that a cold turn at the new size still comes back.
 fn default_max_context() -> u64 {
-    131_072
+    65_536
 }
 
 fn default_gateway_host() -> String {

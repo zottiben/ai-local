@@ -26,6 +26,9 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(300);
 /// How often to sample VRAM while the model loads.
 const WATCHDOG_INTERVAL: Duration = Duration::from_millis(200);
 
+/// How long to let a just-evicted server release its port before giving up on it.
+const PORT_RELEASE_TIMEOUT: Duration = Duration::from_secs(15);
+
 pub const DEFAULT_PORT: u16 = 8080;
 pub const DEFAULT_HOST: &str = "127.0.0.1";
 
@@ -53,6 +56,15 @@ pub struct Instance {
     /// model as a permanent cost and concluding it no longer fits.
     #[serde(default)]
     pub desktop_mib: Option<u64>,
+    /// Host memory llama.cpp may hold prompt caches in, in MiB.
+    ///
+    /// Recorded because it is the one allocation that grows after the launch, so
+    /// "what is this server allowed to hold" is otherwise unanswerable from the
+    /// outside. `None` for a state file written before it was sized, which is not the
+    /// same as a server told to hold nothing.
+    #[serde(default)]
+    pub cache_ram_mib: Option<u64>,
+
     /// `--reasoning` this server was launched with.
     ///
     /// A launch-time flag with no per-request equivalent, so the only way to know
@@ -385,6 +397,15 @@ fn spawn(
         wait_for_vram_release(old.desktop_mib.unwrap_or(budget.desktop_mib));
     }
 
+    // A port someone else holds makes this spawn doomed *and* silently wrong.
+    // llama-server fails to bind and exits, but the health poll below then answers
+    // from whoever does own the port, so a dead child gets recorded as the running
+    // instance - and `ps`, `status` and the catalogue a harness reads all describe a
+    // server that does not exist. Seen for real on 2026-09-14: the model service was
+    // 19s into restarting when the gateway took a request, and pi was left compacting
+    // against a 128k window on a server serving 65536.
+    wait_for_free_port(&opts.host, opts.port, PORT_RELEASE_TIMEOUT)?;
+
     let log = state_path()?.with_file_name("server.log");
     if let Some(dir) = log.parent() {
         std::fs::create_dir_all(dir)?;
@@ -412,6 +433,10 @@ fn spawn(
     if should_lock_weights() {
         cmd.args(["--load-mode", "mlock"]);
     }
+    let cache_ram_mib = prompt_cache_mib(model, budget, opts.cache, context);
+    if let Some(mib) = cache_ram_mib {
+        cmd.args(["--cache-ram", &mib.to_string()]);
+    }
     if stdio == Stdio::LogFile {
         cmd.stdout(out.try_clone()?).stderr(out);
     }
@@ -436,6 +461,7 @@ fn spawn(
         context,
         cache_type: opts.cache.as_llama_arg().to_owned(),
         desktop_mib,
+        cache_ram_mib,
         reasoning: opts.reasoning.clone(),
     };
 
@@ -452,6 +478,40 @@ fn spawn(
             Err(e.context(format!("llama-server did not come up:\n{tail}")))
         }
     }
+}
+
+/// How much host memory llama.cpp may hold prompt caches in.
+///
+/// Not a default worth inheriting. llama.cpp keeps up to 8192 MiB of evicted slot
+/// caches in ordinary memory, which no budget here modelled, and it fills as sessions
+/// accumulate: a server that started at 19 GB was measured at 26 GB after a dozen of
+/// them. That is the one allocation that grows on its own.
+///
+/// It matters most exactly where the weights are locked resident, because then this
+/// cache and the live KV are the only things left that can be paged, so all of the
+/// pressure lands on them. Measured on the M4 Max: a single request that hit this
+/// cache decompressed 1513 MB to do it.
+///
+/// One conversation's worth by our own KV estimate, clamped to what is left after the
+/// weights and the live cache. That estimate carries a safety factor and runs about
+/// twice what llama.cpp actually stores - a 128k entry it reported as 4362 MiB prices
+/// here at roughly double - so one estimated conversation buys about two real ones,
+/// which is enough for a single user to return to recent work cheaply.
+///
+/// Deliberately not more. A prompt cache that pushes the machine into swap costs more
+/// than the prefill it saves, and doubling this produced 8160 MiB - within a rounding
+/// error of the 8192 default this exists to replace.
+///
+/// `None` when the model's geometry is unknown, which is the only case where llama.cpp
+/// choosing for itself beats a number we would have to invent.
+fn prompt_cache_mib(model: &Model, budget: &Budget, cache: CacheType, context: u64) -> Option<u64> {
+    let kv = model.kv?;
+    let live = kv.cache_mib(cache, context);
+    let spare = budget
+        .available_mib()
+        .saturating_sub(model.size_mib)
+        .saturating_sub(live);
+    Some(live.min(spare))
 }
 
 /// Whether to ask the OS to keep the weights resident.
@@ -471,6 +531,31 @@ fn spawn(
 /// worse.
 fn should_lock_weights() -> bool {
     crate::primary_device().is_ok_and(|d| d.backend.is_unified_memory())
+}
+
+/// Wait for `host:port` to be bindable, failing rather than starting a doomed child.
+///
+/// Binding is the honest test - it is the same syscall llama-server is about to make,
+/// so it cannot disagree with what happens a moment later. A short wait rather than an
+/// immediate answer because the instance just evicted may still be releasing the port.
+///
+/// # Errors
+/// If something else is still holding the port when the wait runs out.
+fn wait_for_free_port(host: &str, port: u16, wait: Duration) -> anyhow::Result<()> {
+    let deadline = Instant::now() + wait;
+    loop {
+        if std::net::TcpListener::bind((host, port)).is_ok() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "{host}:{port} is already in use, so llama-server could not bind it. \
+                 A model service that is still starting owns it for a few seconds - \
+                 `ailocal ps` and `ailocal service status` say which."
+            );
+        }
+        std::thread::sleep(WATCHDOG_INTERVAL);
+    }
 }
 
 /// Give the driver a moment to hand back the evicted model's VRAM.
@@ -622,8 +707,75 @@ mod tests {
             context: 4096,
             cache_type: "q8_0".into(),
             desktop_mib: Some(desktop_mib),
+            cache_ram_mib: Some(512),
             reasoning: "auto".into(),
         }
+    }
+
+    /// Sized from the model, and well under the 8192 MiB default it replaces.
+    #[test]
+    fn the_prompt_cache_is_sized_from_the_context_it_serves() {
+        let m = model("qwen3-14b", 8836, Some(qwen3_14b()), Some(40_960));
+        let budget = Budget {
+            ceiling_mib: 40_000,
+            desktop_mib: 0,
+            context_cap: None,
+        };
+        let live = m.kv.unwrap().cache_mib(CacheType::Q8_0, 32_768);
+        let sized = prompt_cache_mib(&m, &budget, CacheType::Q8_0, 32_768).unwrap();
+        assert_eq!(sized, live);
+
+        // The whole point of sizing it: a smaller window must buy a smaller cache,
+        // rather than every model inheriting the same 8 GB.
+        let half = prompt_cache_mib(&m, &budget, CacheType::Q8_0, 16_384).unwrap();
+        assert!(half < sized, "{half} should be under {sized}");
+    }
+
+    /// The clamp is the point: inheriting 8 GB of prompt cache is what put a machine
+    /// with its weights locked resident into swap, and a cache that pages costs more
+    /// than the prefill it was meant to save.
+    #[test]
+    fn the_prompt_cache_never_spends_memory_the_budget_does_not_have() {
+        let m = model("qwen3-14b", 8836, Some(qwen3_14b()), Some(40_960));
+        let live = m.kv.unwrap().cache_mib(CacheType::Q8_0, 32_768);
+
+        // A ceiling with almost nothing left once the weights and live cache are in.
+        let tight = Budget {
+            ceiling_mib: 8836 + live + vram::COMPUTE_BUFFER_MIB + 100,
+            desktop_mib: 0,
+            context_cap: None,
+        };
+        let sized = prompt_cache_mib(&m, &tight, CacheType::Q8_0, 32_768).unwrap();
+        assert_eq!(sized, 100, "should take only what is spare, got {sized}");
+        assert!(sized < live);
+    }
+
+    /// The guard that stops a doomed spawn being recorded as a healthy one.
+    ///
+    /// Without it llama-server fails to bind, exits, and the health poll answers from
+    /// whoever owns the port - so the state file, `ps` and the harness catalogue all
+    /// describe a server that is not there.
+    #[test]
+    fn a_port_someone_else_holds_is_refused_rather_than_spawned_onto() {
+        let held = std::net::TcpListener::bind((DEFAULT_HOST, 0)).unwrap();
+        let port = held.local_addr().unwrap().port();
+
+        let err = wait_for_free_port(DEFAULT_HOST, port, Duration::from_millis(300)).unwrap_err();
+        assert!(err.to_string().contains("already in use"), "{err}");
+
+        // And once it is released, the same call succeeds.
+        drop(held);
+        assert!(wait_for_free_port(DEFAULT_HOST, port, Duration::from_millis(300)).is_ok());
+    }
+
+    /// A model we cannot measure gets no number invented for it.
+    #[test]
+    fn an_unmeasurable_model_leaves_the_prompt_cache_to_llama_cpp() {
+        let m = model("mystery", 4000, None, None);
+        assert_eq!(
+            prompt_cache_mib(&m, &Budget::new(900), CacheType::Q8_0, 4096),
+            None
+        );
     }
 
     /// State files written by an older build have no `reasoning` field, and must still
