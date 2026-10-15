@@ -228,14 +228,12 @@ pub fn pi_model_entry(model: &PiModel, base_url: &str) -> serde_json::Value {
     })
 }
 
-/// The per-request field llama.cpp actually reads to cap thinking.
+/// The budget spelling Pi accepts in its closed compatibility schema.
 ///
-/// Measured, because the obvious name is wrong: `thinking_budget_tokens` is accepted
-/// and silently ignored on `/v1/chat/completions` (it is only the internal name the
-/// `/v1/messages` converter uses), while `reasoning_budget_tokens` type-checks as a
-/// number and demonstrably shortens the thinking - 554 characters of
-/// `reasoning_content` unbudgeted against 88 at a budget of 24.
-const THINKING_BUDGET_FIELD: &str = "reasoning_budget_tokens";
+/// llama.cpp's chat endpoint reads `reasoning_budget_tokens` instead; the gateway
+/// translates this field. Writing the upstream spelling here makes Pi reject the
+/// entire models.json, including unrelated providers.
+const THINKING_BUDGET_FIELD: &str = "thinking_budget_tokens";
 
 /// What Pi should believe about this model, in the file a refresh cannot touch.
 ///
@@ -870,16 +868,17 @@ mod tests {
         assert!(entry.get("compat").is_none());
     }
 
-    /// The budget field is the only thing that makes one level differ from another, and
-    /// the plausible spelling is the wrong one - `thinking_budget_tokens` is accepted
-    /// and ignored by llama-server.
+    /// Pi validates this against a closed enum, not an arbitrary upstream field name.
+    /// The gateway translates the accepted spelling before forwarding to llama.cpp.
     #[test]
-    fn the_budget_field_is_the_one_llama_cpp_reads() {
-        let entry = pi_model_override(&model("m", Thinking::Toggle));
-        assert_eq!(
-            entry["compat"]["thinkingTokenBudgetField"],
-            "reasoning_budget_tokens"
-        );
+    fn the_budget_field_is_accepted_by_pi() {
+        for thinking in [Thinking::Toggle, Thinking::Effort] {
+            let entry = pi_model_override(&model("m", thinking));
+            assert_eq!(
+                entry["compat"]["thinkingTokenBudgetField"],
+                "thinking_budget_tokens"
+            );
+        }
     }
 
     /// Cap the output too low and pi clamps `medium` and `high` to the same budget,

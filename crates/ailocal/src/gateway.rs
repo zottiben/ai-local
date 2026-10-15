@@ -577,6 +577,15 @@ fn anthropic_event_stream(
 /// the level and the budget contradicted each other. Only the two spellings that
 /// actually mean nothing turn thinking off.
 fn apply_thinking_request(body: &mut serde_json::Value) {
+    // Pi's schema only accepts this spelling, but llama.cpp's chat endpoint reads
+    // `reasoning_budget_tokens`. Translate independently of the thinking switch,
+    // preserving a caller's explicit native budget (including zero).
+    if let Some(object) = body.as_object_mut()
+        && let Some(budget) = object.remove("thinking_budget_tokens")
+    {
+        object.entry("reasoning_budget_tokens").or_insert(budget);
+    }
+
     // Anthropic: {"thinking": {"type": "enabled"}}. OpenAI: reasoning_effort.
     let wanted = match (&body["thinking"]["type"], &body["reasoning_effort"]) {
         (serde_json::Value::String(t), _) => Some(t == "enabled"),
@@ -760,6 +769,51 @@ mod tests {
         }));
         apply_thinking_request(&mut body);
         assert_eq!(body["reasoning_budget_tokens"], 2048);
+    }
+
+    #[test]
+    fn pi_budget_reaches_llama_cpp_even_without_an_effort() {
+        for budget in [0, 1024, 2048, 8192, 16384] {
+            let mut body = chat(serde_json::json!({"thinking_budget_tokens": budget}));
+            apply_thinking_request(&mut body);
+            assert_eq!(body["reasoning_budget_tokens"], budget);
+            assert!(body.get("thinking_budget_tokens").is_none());
+            assert!(body.get("chat_template_kwargs").is_none());
+        }
+    }
+
+    #[test]
+    fn pi_budget_translation_preserves_explicit_llama_cpp_settings() {
+        let mut body = chat(serde_json::json!({
+            "thinking_budget_tokens": 2048,
+            "reasoning_budget_tokens": 0,
+            "reasoning_effort": "high",
+            "chat_template_kwargs": {"enable_thinking": false},
+        }));
+        apply_thinking_request(&mut body);
+        assert_eq!(body["reasoning_budget_tokens"], 0);
+        assert!(body.get("thinking_budget_tokens").is_none());
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+    }
+
+    #[test]
+    fn generated_pi_budget_field_is_translated_before_forwarding() {
+        for thinking in [crate::gguf::Thinking::Toggle, crate::gguf::Thinking::Effort] {
+            let entry = crate::harness::pi_model_override(&crate::harness::PiModel {
+                id: "m".into(),
+                context_window: 131072,
+                thinking,
+            });
+            let field = entry["compat"]["thinkingTokenBudgetField"]
+                .as_str()
+                .unwrap();
+            let mut body = chat(serde_json::json!({"reasoning_effort": "low"}));
+            body[field] = serde_json::json!(2048);
+            apply_thinking_request(&mut body);
+            assert_eq!(body["reasoning_budget_tokens"], 2048);
+            assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
+            assert!(body.get("thinking_budget_tokens").is_none());
+        }
     }
 
     #[test]

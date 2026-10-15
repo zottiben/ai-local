@@ -177,9 +177,15 @@ two fields, both measured:
   `/v1/chat/completions`. Measured on gemma4-12b: no budget 554 characters of
   `reasoning_content`, budget 24 gives 88.
 
+Pi 1.2 validates `thinkingTokenBudgetField` against a closed enum that excludes
+`reasoning_budget_tokens`. Advertise `thinking_budget_tokens` to Pi and translate it
+in the gateway to `reasoning_budget_tokens`; otherwise Pi rejects the entire shared
+`models.json`. An explicit native budget wins, including zero. Keep this translation
+independent of effort/template overrides, and preserve native-budget clients.
+
 `reasoning_effort` is accepted and ignored unless the template reads it, so the gateway
 translates it (and Anthropic's `thinking` block) into `enable_thinking` and passes the
-budget through untouched. That is what makes a level ladder mean something rather than
+native budget through untouched. That is what makes a level ladder mean something rather than
 being five spellings of "on": Pi pairs each level with a budget of 1024 / 2048 / 8192 /
 16384, clamped to `maxTokens` less 1024 kept back for the answer - so cap the advertised
 output below 17408 and `medium` and `high` collapse into one thing on the wire.
