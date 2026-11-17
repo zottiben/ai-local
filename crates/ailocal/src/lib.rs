@@ -23,6 +23,7 @@ pub mod source;
 pub mod status;
 pub mod update;
 pub mod vram;
+mod wire;
 
 /// Free space on the filesystem holding `path`, in MiB.
 ///

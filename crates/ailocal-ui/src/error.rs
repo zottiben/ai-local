@@ -12,6 +12,13 @@ use axum::response::{IntoResponse, Response};
 pub enum Error {
     /// No token, or the wrong one.
     Unauthorized,
+    /// The request itself is wrong: a reference that does not parse, a log offset
+    /// that is not a number.
+    BadRequest(String),
+    /// No such job.
+    NotFound(String),
+    /// Not now: an install is already running, or the job has already finished.
+    Busy(String),
     Internal(anyhow::Error),
 }
 
@@ -29,6 +36,9 @@ impl IntoResponse for Error {
                 "unauthorized",
                 "missing or wrong token - open the link `ailocal ui` printed".to_owned(),
             ),
+            Self::BadRequest(message) => (StatusCode::BAD_REQUEST, "bad_request", message),
+            Self::NotFound(message) => (StatusCode::NOT_FOUND, "not_found", message),
+            Self::Busy(message) => (StatusCode::CONFLICT, "busy", message),
             Self::Internal(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal",

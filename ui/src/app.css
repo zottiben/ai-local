@@ -71,6 +71,11 @@ h3 {
   color: var(--muted);
   font-weight: 600;
 }
+/* A heading that opens a panel sits tight against its edge; one that divides a panel
+   needs air above it. */
+* + h3 {
+  margin-top: 1rem;
+}
 
 p {
   margin: 0 0 0.5rem;
@@ -390,4 +395,228 @@ abbr {
 }
 .pad {
   padding: 0.5rem 0;
+}
+
+/* --- buttons --- */
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: inherit;
+  padding: 0.3rem 0.7rem;
+}
+button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+  font-weight: 550;
+}
+button.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 85%, var(--ink));
+}
+button.primary.danger {
+  background: var(--bad);
+  border-color: var(--bad);
+}
+button.primary.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--bad) 85%, var(--ink));
+}
+button.ghost {
+  border-color: transparent;
+  color: var(--muted);
+}
+button.small {
+  padding: 0.1rem 0.5rem;
+  font-size: 0.78rem;
+}
+
+/* --- jobs --- */
+
+.jobs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.job {
+  padding: 0.6rem 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+.job:first-child {
+  padding-top: 0;
+}
+.job:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.job p {
+  margin: 0.25rem 0 0;
+}
+.job-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+.job-buttons {
+  margin-left: auto;
+  display: flex;
+  gap: 0.4rem;
+}
+.bad-job .reference {
+  color: var(--bad);
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.45rem;
+}
+.bar progress {
+  flex: 1;
+  height: 0.4rem;
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 10%, transparent);
+}
+/* An unknown total has no percentage to draw, so hand it back to the platform, which
+   is the only thing that animates a bar going nowhere. */
+.bar progress:indeterminate {
+  appearance: auto;
+  height: auto;
+}
+.bar progress::-webkit-progress-bar {
+  background: color-mix(in srgb, var(--ink) 10%, transparent);
+  border-radius: 999px;
+}
+.bar progress::-webkit-progress-value {
+  background: var(--accent);
+  border-radius: 999px;
+}
+.bar progress::-moz-progress-bar {
+  background: var(--accent);
+  border-radius: 999px;
+}
+.bar-count {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* --- adding and managing models --- */
+
+.install-form {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+.install-form input {
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  flex: 1;
+  min-width: 16rem;
+  padding: 0.3rem 0.6rem;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: inherit;
+}
+.install-form input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+.row-actions {
+  text-align: right;
+}
+.row-actions button + button {
+  margin-left: 0.35rem;
+}
+
+.log {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  max-height: 18rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--muted);
+}
+.log:focus-visible {
+  outline: 2px solid var(--accent);
+}
+
+/* --- dialog --- */
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 40%);
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  z-index: 10;
+}
+.dialog {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 1rem 1.25rem 1.25rem;
+  width: min(34rem, 100%);
+  max-height: 80vh;
+  /* A column with one scrolling child, so a long list of consequences never pushes the
+     button that confirms them out of reach. */
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.dialog header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+  flex-shrink: 0;
+}
+.dialog header h2 {
+  margin: 0;
+}
+.dialog-body {
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+}
+.dialog footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.actions {
+  margin: 0 0 0.75rem;
+  padding-left: 1.1rem;
+}
+.actions li {
+  padding: 0.15rem 0;
 }

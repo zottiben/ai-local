@@ -258,7 +258,7 @@ impl NextStep {
                 "Next: the gateway service is installed but not answering.\n\
                  \x20     ailocal gateway check      says what is wrong\n\
                  \x20     {}",
-                service::log_hint()
+                service::log_hint(service::GATEWAY)
             ),
             Self::ConfigureHarness => {
                 "Next: ailocal harness configure pi   (or claude-code)".to_owned()

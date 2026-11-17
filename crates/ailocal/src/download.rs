@@ -21,7 +21,8 @@ use crate::source::Artifact;
 const CHUNK: usize = 1 << 20;
 
 /// Outcome of a fetch, so the caller can tell work from a no-op.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Fetched {
     /// The file was already present and verified.
     AlreadyPresent,
@@ -106,7 +107,31 @@ pub trait Progress {
     /// The body has been read. Verifying the digest follows, and on a 20 GB file that
     /// is several seconds of reading it back.
     fn finish(&mut self);
+
+    /// Whether to stop. Asked before every read, so a cancel lands within one chunk,
+    /// and what is already on disk stays as the `.part` the next fetch resumes from.
+    /// A terminal never asks - Ctrl-C is how it stops - so the answer defaults to no.
+    fn cancelled(&self) -> bool {
+        false
+    }
 }
+
+/// A fetch its [`Progress`] stopped. The `.part` is kept, so this is a pause rather
+/// than a loss: fetching the same artifact again resumes from `written`.
+#[derive(Debug)]
+pub struct Cancelled {
+    /// Bytes of the file on disk when it stopped, counting any resumed from.
+    pub written: u64,
+    pub total: Option<u64>,
+}
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "stopped at {} bytes", self.written)
+    }
+}
+
+impl std::error::Error for Cancelled {}
 
 /// The terminal's progress bar, drawn on stderr and hidden when that is not a terminal.
 #[derive(Default)]
@@ -215,6 +240,9 @@ pub fn fetch(
     let mut written = start;
     let mut buf = vec![0u8; CHUNK];
     loop {
+        if progress.cancelled() {
+            return Err(Cancelled { written, total }.into());
+        }
         let n = resp.read(&mut buf).context("reading response body")?;
         if n == 0 {
             break;
@@ -439,6 +467,7 @@ mod tests {
         begun: Option<(Option<u64>, u64)>,
         last: u64,
         finished: bool,
+        cancel: bool,
     }
 
     impl Progress for Recorded {
@@ -451,6 +480,38 @@ mod tests {
         fn finish(&mut self) {
             self.finished = true;
         }
+        fn cancelled(&self) -> bool {
+            self.cancel
+        }
+    }
+
+    /// A cancel stops before the next read and keeps what is on disk. Cancelled with
+    /// "he" of "hello" already in the `.part`, it stops at 2 of 5 with the `.part`
+    /// still holding "he" and nothing moved into place - the state the resume test
+    /// above starts from.
+    #[test]
+    fn a_cancelled_fetch_keeps_the_part_to_resume_from() {
+        let (mut artifact, server) = server(vec![Reply::Respond(
+            "HTTP/1.1 206 Partial Content\r\nContent-Length: 3\r\nConnection: close\r\n\r\nllo",
+        )]);
+        artifact.size = Some(5);
+        let dir = std::env::temp_dir().join(format!("ailocal-cancel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("x.gguf.part"), b"he").unwrap();
+
+        let mut seen = Recorded {
+            cancel: true,
+            ..Recorded::default()
+        };
+        let err = fetch(&Client::new(), &artifact, &dir, &mut seen).unwrap_err();
+        server.join().unwrap();
+
+        let cancelled = err.downcast_ref::<Cancelled>().expect("a Cancelled error");
+        assert_eq!((cancelled.written, cancelled.total), (2, Some(5)));
+        assert!(!seen.finished);
+        assert_eq!(std::fs::read(dir.join("x.gguf.part")).unwrap(), b"he");
+        assert!(!dir.join("x.gguf").exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A window draws its bar from these calls, so they report what is on disk rather

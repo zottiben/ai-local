@@ -3,7 +3,8 @@
 //! Nothing about the machine is kept here (D4): every read goes to the config, the
 //! models directory, the server record and the service manager when it is asked. The
 //! one thing held is the measured catalogue, which describes the registry rather than
-//! the machine and costs ten seconds of network to ask again.
+//! the machine and costs ten seconds of network to ask again. The other is the jobs
+//! this process is running, which exist nowhere else.
 
 use std::sync::Arc;
 
@@ -13,12 +14,14 @@ use ailocal::vram::{Budget, CacheType};
 use tokio::sync::{Mutex, broadcast};
 
 use crate::error::{Result, blocking};
+use crate::jobs::Jobs;
 
 #[derive(Clone)]
 pub struct AppState {
     token: Arc<str>,
     changes: broadcast::Sender<u64>,
     catalogue: Arc<Mutex<Option<Measured>>>,
+    jobs: Jobs,
 }
 
 impl AppState {
@@ -31,6 +34,7 @@ impl AppState {
             token: token.into(),
             changes,
             catalogue: Arc::new(Mutex::new(None)),
+            jobs: Jobs::new(),
         }
     }
 
@@ -47,6 +51,11 @@ impl AppState {
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<u64> {
         self.changes.subscribe()
+    }
+
+    #[must_use]
+    pub fn jobs(&self) -> &Jobs {
+        &self.jobs
     }
 
     /// The catalogue resolved and measured against `budget`.

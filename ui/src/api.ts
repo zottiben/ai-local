@@ -5,7 +5,19 @@
 // puts a live credential into the history, into any screenshot, and into every Referer
 // header the page sends.
 
-import type { Config, Installed, Instance, Meta, Offer, Overview } from "./types";
+import type {
+  Config,
+  DefaultChange,
+  Installed,
+  Instance,
+  LogView,
+  Memory,
+  Meta,
+  Offer,
+  Overview,
+  Removal,
+  Removed,
+} from "./types";
 
 const TOKEN_KEY = "ailocal.token";
 
@@ -38,17 +50,32 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string): Promise<T> {
-  const response = await fetch(`/api${path}`, { headers: { "x-ailocal-token": token } });
+async function request<T>(path: string, method = "GET", body?: unknown): Promise<T> {
+  const response = await fetch(`/api${path}`, {
+    method,
+    headers: {
+      "x-ailocal-token": token,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
   if (!response.ok) {
     // A body that is not JSON means something upstream of the handler broke. Say that
     // rather than throwing a parse error over the top of it.
-    const body = await response.json().catch(() => ({
+    const failure = await response.json().catch(() => ({
       error: `${response.status} ${response.statusText}`,
     }));
-    throw new ApiError(response.status, body);
+    throw new ApiError(response.status, failure);
   }
+  // 204 for the routes that only act. Reading a body that is not there would throw
+  // over the top of a request that succeeded.
+  if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
+}
+
+/** A job has started. Its progress arrives on the event stream, not here. */
+interface Started {
+  id: number;
 }
 
 export const api = {
@@ -58,4 +85,18 @@ export const api = {
   catalogue: () => request<Offer>("/catalogue"),
   config: () => request<Config>("/config"),
   loaded: () => request<Instance | null>("/loaded"),
+  memory: () => request<Memory | null>("/loaded/memory"),
+  /** From `from`, or the log's last window when it is not given. */
+  log: (from?: number) =>
+    request<LogView>(`/loaded/log${from === undefined ? "" : `?from=${from}`}`),
+  removal: (name: string) => request<Removal>(`/models/${encodeURIComponent(name)}/removal`),
+
+  install: (reference: string, force = false) =>
+    request<Started>("/install", "POST", { reference, force }),
+  serve: (name: string) => request<Started>("/serve", "POST", { name }),
+  cancel: (id: number) => request<void>(`/jobs/${id}/cancel`, "POST"),
+  dismiss: (id: number) => request<void>(`/jobs/${id}`, "DELETE"),
+  remove: (name: string) => request<Removed>(`/models/${encodeURIComponent(name)}`, "DELETE"),
+  setDefault: (name: string) => request<DefaultChange>("/default", "PUT", { name }),
+  stop: () => request<Instance | null>("/stop", "POST"),
 };

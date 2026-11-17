@@ -110,6 +110,49 @@ pub fn is_build_dir(exe: &Path) -> bool {
     parents.any(|p| p.file_name().is_some_and(|n| n == "target"))
 }
 
+/// The `ailocal` a service should run.
+///
+/// `beside` is the one the caller expects: itself, for the command line, and the
+/// `ailocal` next to it for an extra. A unit that ran the console's own binary would
+/// start a web server where the gateway belongs. A build directory is never the
+/// answer, because `cargo clean` would break the service, so an installed `ailocal` on
+/// `PATH` stands in for one.
+///
+/// # Errors
+/// If `beside` is missing or in a build directory and no installed `ailocal` is on
+/// `PATH`.
+pub fn unit_binary(beside: &Path) -> anyhow::Result<PathBuf> {
+    choose_unit_binary(beside, || {
+        which("ailocal").and_then(|p| p.canonicalize().ok())
+    })
+}
+
+fn choose_unit_binary(
+    beside: &Path,
+    installed: impl FnOnce() -> Option<PathBuf>,
+) -> anyhow::Result<PathBuf> {
+    if beside.is_file() && !is_build_dir(beside) {
+        return Ok(beside.to_owned());
+    }
+    if let Some(path) = installed().filter(|p| !is_build_dir(p)) {
+        return Ok(path);
+    }
+    if is_build_dir(beside) {
+        anyhow::bail!(
+            "running from {} - a service must not point into a build directory, \
+             because `cargo clean` would break it.\n\
+             Install it first, e.g. `install -Dm755 {} ~/.local/bin/ailocal`, then \
+             re-run this from there.",
+            beside.display(),
+            beside.display()
+        )
+    }
+    anyhow::bail!(
+        "there is no ailocal at {} or on PATH for a service to run",
+        beside.display()
+    )
+}
+
 /// Find `program` on `PATH`.
 #[must_use]
 pub fn which(program: &str) -> Option<PathBuf> {
@@ -123,6 +166,32 @@ pub fn which(program: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The CLI's own binary when it is installed; the installed one when it runs from
+    /// a build directory; an error, not a unit pointing into `target`, when there is
+    /// no installed one.
+    #[test]
+    fn a_unit_never_points_into_a_build_directory() {
+        let root = std::env::temp_dir().join(format!("ailocal-unit-{}", std::process::id()));
+        let installed = root.join("bin/ailocal");
+        let built = root.join("src/target/debug/ailocal");
+        for file in [&installed, &built] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"").unwrap();
+        }
+
+        assert_eq!(choose_unit_binary(&installed, || None).unwrap(), installed);
+        assert_eq!(
+            choose_unit_binary(&built, || Some(installed.clone())).unwrap(),
+            installed
+        );
+        let err = choose_unit_binary(&built, || Some(built.clone())).unwrap_err();
+        assert!(err.to_string().contains("cargo clean"), "{err}");
+        let err = choose_unit_binary(&root.join("bin/missing"), || None).unwrap_err();
+        assert!(err.to_string().contains("no ailocal"), "{err}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn recognises_cargo_build_directories() {

@@ -18,7 +18,7 @@ export function App() {
 
 function Console() {
   const view = useView();
-  const { generation, connection } = useLive();
+  const { generation, connection, jobs } = useLive();
   const meta = useResource(() => api.meta(), []);
 
   if (meta.error instanceof ApiError && meta.error.status === 401) {
@@ -64,7 +64,7 @@ function Console() {
         ) : !meta.data ? (
           <p className="muted pad">Connecting…</p>
         ) : view === "models" ? (
-          <Models generation={generation} />
+          <Models generation={generation} jobs={jobs} />
         ) : (
           <Overview generation={generation} meta={meta.data} />
         )}

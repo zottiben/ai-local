@@ -12,8 +12,10 @@ mod assets;
 mod auth;
 mod error;
 mod events;
+mod jobs;
 mod read;
 mod state;
+mod write;
 
 use std::net::{Ipv4Addr, SocketAddr};
 
@@ -53,9 +55,13 @@ impl Server {
         let token = auth::mint()?;
         let state = AppState::new(&token);
 
-        let api = read::routes().merge(events::routes()).route_layer(
-            axum::middleware::from_fn_with_state(state.clone(), auth::require_token),
-        );
+        let api = read::routes()
+            .merge(write::routes())
+            .merge(events::routes())
+            .route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                auth::require_token,
+            ));
         events::watch(state.clone());
 
         let router = Router::new()
