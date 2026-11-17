@@ -71,22 +71,30 @@ pub fn load_or_create() -> anyhow::Result<String> {
 
 /// Generate a key from the kernel CSPRNG.
 ///
-/// `/dev/urandom` rather than a crate: it is the right source on this platform and
-/// avoids a dependency for thirty-two bytes.
-///
 /// # Errors
 /// If `/dev/urandom` cannot be read.
 pub fn generate() -> anyhow::Result<String> {
+    Ok(format!("{PREFIX}{}", random_hex(KEY_BYTES)?))
+}
+
+/// `bytes` bytes from the kernel CSPRNG, as lowercase hex.
+///
+/// `/dev/urandom` rather than a crate: it is the right source on this platform and
+/// avoids a dependency for a few dozen bytes. The gateway key and the console's
+/// per-run token both come from here.
+///
+/// # Errors
+/// If `/dev/urandom` cannot be read.
+pub fn random_hex(bytes: usize) -> anyhow::Result<String> {
     use std::io::Read as _;
 
-    let mut buf = [0u8; KEY_BYTES];
+    let mut buf = vec![0u8; bytes];
     std::fs::File::open("/dev/urandom")
         .context("opening /dev/urandom")?
         .read_exact(&mut buf)
         .context("reading /dev/urandom")?;
 
-    let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
-    Ok(format!("{PREFIX}{hex}"))
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Compare a presented credential against the expected one in constant time.

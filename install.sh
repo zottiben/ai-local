@@ -50,7 +50,7 @@ newer_than() {
 
 # Extras this script knows how to install. An unknown name is rejected up front rather
 # than turning into a confusing 404 halfway through.
-KNOWN_EXTRAS="eval"
+KNOWN_EXTRAS="eval ui"
 
 CHECK_ONLY=0
 FORCE=0

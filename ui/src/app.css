@@ -1,0 +1,393 @@
+/* The palette is ai-toolbox's, so the tools on this machine look like one family (D7).
+   Deliberately quiet: this is a tool for reading state, and a page that shouts about
+   every missing piece is a page you stop reading. */
+
+:root {
+  color-scheme: light dark;
+
+  --bg: #fbfbfa;
+  --panel: #ffffff;
+  --line: #e6e4e0;
+  --ink: #1c1b19;
+  --muted: #6f6b66;
+  --accent: #2f6f4f;
+  --ok: #2f6f4f;
+  --warn: #8a6100;
+  --bad: #a03028;
+  --radius: 10px;
+  --shadow: 0 1px 2px rgb(0 0 0 / 5%), 0 6px 18px rgb(0 0 0 / 4%);
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16161a;
+    --panel: #1d1e23;
+    --line: #2e3036;
+    --ink: #e9e8e6;
+    --muted: #9b968f;
+    --accent: #7fc9a2;
+    --ok: #7fc9a2;
+    --warn: #e0b055;
+    --bad: #e88b80;
+    --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 6px 18px rgb(0 0 0 / 22%);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.55 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 0.92em;
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+}
+
+h1 {
+  font-size: 1.25rem;
+  margin: 0 0 0.5rem;
+}
+h2 {
+  font-size: 0.95rem;
+  margin: 0;
+  letter-spacing: 0.01em;
+}
+h3 {
+  font-size: 0.8rem;
+  margin: 0 0 0.35rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+p {
+  margin: 0 0 0.5rem;
+}
+p:last-child {
+  margin-bottom: 0;
+}
+
+/* --- frame --- */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0 1.5rem;
+  height: 3.25rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+.brand-name {
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  align-self: stretch;
+}
+.tab {
+  display: flex;
+  align-items: center;
+  padding: 0 0.75rem;
+  color: var(--muted);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.tab:hover {
+  color: var(--ink);
+}
+.tab.on {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+  font-weight: 550;
+}
+
+.connection {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.connection .dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: currentColor;
+}
+.connection.live {
+  color: var(--ok);
+}
+.connection.reconnecting {
+  color: var(--warn);
+}
+
+.content {
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  max-width: 62rem;
+  margin: 0 auto;
+}
+
+.fatal {
+  max-width: 34rem;
+  margin: 4rem auto;
+  padding: 1rem;
+}
+
+/* --- panels --- */
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem 1.15rem;
+  box-shadow: var(--shadow);
+}
+.panel.highlight {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+.panel.highlight h2 {
+  font-size: 1.05rem;
+  margin-bottom: 0.25rem;
+}
+.panel.ready h2 {
+  color: var(--ok);
+  margin-bottom: 0.25rem;
+}
+.panel-title {
+  margin-bottom: 0.75rem;
+}
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.commands {
+  list-style: none;
+  margin: 0.5rem 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.commands code {
+  display: inline-block;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.88rem;
+}
+
+/* --- status, as `ailocal status` prints it --- */
+
+.status-row {
+  display: grid;
+  grid-template-columns: 4.5rem 9.5rem 1fr;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+.status-row:last-child {
+  border-bottom: 0;
+}
+.status-label {
+  font-weight: 550;
+}
+.status-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mark {
+  font-size: 0.72rem;
+  text-align: center;
+  min-width: 3.75rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  text-transform: lowercase;
+  justify-self: start;
+}
+.mark.ok {
+  color: var(--ok);
+}
+.mark.miss {
+  color: var(--warn);
+}
+.mark.none {
+  color: var(--muted);
+  border-color: transparent;
+}
+
+/* --- settings --- */
+
+.settings {
+  display: grid;
+  grid-template-columns: 9.5rem 1fr;
+  gap: 0.45rem 0.75rem;
+  margin: 0;
+}
+.settings dt {
+  color: var(--muted);
+}
+.settings dd {
+  margin: 0;
+  min-width: 0;
+}
+.settings .prompt {
+  white-space: pre-wrap;
+}
+
+/* --- models --- */
+
+.table-wrap {
+  overflow-x: auto;
+}
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.table th {
+  text-align: left;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  padding: 0 0.75rem 0.45rem;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.table td {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+  white-space: nowrap;
+}
+.table tr:last-child td {
+  border-bottom: 0;
+}
+.table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.table th:first-child,
+.table td:first-child {
+  padding-left: 0;
+}
+.table th:last-child,
+.table td:last-child {
+  padding-right: 0;
+}
+.model-name {
+  font-weight: 550;
+  margin-right: 0.5rem;
+}
+.table .badge + .badge {
+  margin-left: 0.3rem;
+}
+.footnote {
+  margin-top: 0.75rem;
+}
+abbr {
+  text-decoration: none;
+}
+
+.catalogue {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.catalogue li {
+  padding: 0.65rem 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+.catalogue li:first-child {
+  padding-top: 0;
+}
+.catalogue li:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.catalogue li.unfit {
+  opacity: 0.6;
+}
+.catalogue p {
+  margin: 0.2rem 0 0;
+}
+.catalogue-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+.reference {
+  font-weight: 600;
+  background: transparent;
+  padding: 0;
+}
+.catalogue-head .badge {
+  margin-left: auto;
+}
+
+/* --- badges and tones --- */
+
+.badge {
+  font-size: 0.72rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+  text-transform: lowercase;
+}
+.badge.accent {
+  color: var(--accent);
+}
+.ok {
+  color: var(--ok);
+}
+.warn {
+  color: var(--warn);
+}
+.bad {
+  color: var(--bad);
+}
+.muted {
+  color: var(--muted);
+}
+
+.small {
+  font-size: 0.8rem;
+}
+.pad {
+  padding: 0.5rem 0;
+}

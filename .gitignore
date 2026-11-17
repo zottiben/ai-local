@@ -25,3 +25,7 @@ secrets.toml
 # Benchmark and eval output
 /bench/results/
 /eval/results/
+
+# The console's packages. ui/dist is committed: the bundle is compiled into
+# ailocal-ui, so building it needs a Rust toolchain and nothing else.
+/ui/node_modules/

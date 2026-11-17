@@ -65,7 +65,7 @@ fn pi_file(name: &str) -> anyhow::Result<PathBuf> {
 }
 
 /// A model to advertise to Pi.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PiModel {
     pub id: String,
     pub context_window: u64,

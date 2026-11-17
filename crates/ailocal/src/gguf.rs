@@ -515,7 +515,8 @@ const TEMPLATE_SEARCH_BYTES: usize = 64 << 20;
 /// told which of the three it is: reporting a dial on a model that has only a switch
 /// offers controls that provably do nothing, and reporting nothing on a model that can
 /// think leaves the harness offering `off` as the only choice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Thinking {
     /// No thinking mode at all. qwen3-coder-30b is one of these.
     None,

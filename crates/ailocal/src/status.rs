@@ -10,7 +10,7 @@ use crate::registry::{self, Fit};
 use crate::{auth, gateway, gguf, harness, serve, service, vram};
 
 /// Everything `status` reports, gathered in one pass.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct Overview {
     /// Installed models that can run here, alphabetically.
     pub models: Vec<harness::PiModel>,
@@ -21,6 +21,7 @@ pub struct Overview {
     pub gateway_url: String,
     pub gateway: Gateway,
     /// What the gateway offers a harness, asked only while it answers.
+    #[serde(serialize_with = "advertised_as_json")]
     pub advertised: Option<anyhow::Result<Vec<String>>>,
     /// The gateway service, then the model service.
     pub services: Vec<(&'static str, Service)>,
@@ -30,7 +31,8 @@ pub struct Overview {
 }
 
 /// Whether the gateway port is doing its job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Gateway {
     Answering,
     /// Something that is not our gateway holds the port.
@@ -39,7 +41,8 @@ pub enum Gateway {
 }
 
 /// What the service manager says about one of our services.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Service {
     Running,
     InstalledNotRunning,
@@ -54,30 +57,9 @@ pub enum Service {
 pub fn overview(cfg: &Config) -> Overview {
     let models = runnable_models(cfg).unwrap_or_default();
     let loaded = serve::running().ok().flatten();
-
-    let gateway = if gateway::answers_as_gateway(&cfg.gateway_host, cfg.gateway_port) {
-        Gateway::Answering
-    } else {
-        match gateway::port_status(&cfg.gateway_host, cfg.gateway_port) {
-            gateway::PortStatus::Taken => Gateway::PortTaken,
-            _ => Gateway::NotAnswering,
-        }
-    };
+    let gateway = gateway_state(cfg);
     let advertised = (gateway == Gateway::Answering).then(|| advertised_models(cfg));
-
-    let services: Vec<_> = service::service_names()
-        .into_iter()
-        .map(|name| {
-            let state = if service::is_active(name) {
-                Service::Running
-            } else if service::is_enabled(name) {
-                Service::InstalledNotRunning
-            } else {
-                Service::NotInstalled
-            };
-            (name, state)
-        })
-        .collect();
+    let services = service_states();
     let harnesses = harness::configured();
 
     let next = NextStep::from_state(
@@ -103,6 +85,57 @@ pub fn overview(cfg: &Config) -> Overview {
         services,
         harnesses,
         next,
+    }
+}
+
+/// Whether the configured gateway port answers as our gateway.
+#[must_use]
+pub fn gateway_state(cfg: &Config) -> Gateway {
+    if gateway::answers_as_gateway(&cfg.gateway_host, cfg.gateway_port) {
+        return Gateway::Answering;
+    }
+    match gateway::port_status(&cfg.gateway_host, cfg.gateway_port) {
+        gateway::PortStatus::Taken => Gateway::PortTaken,
+        _ => Gateway::NotAnswering,
+    }
+}
+
+/// The gateway service, then the model service, with what the service manager says
+/// about each.
+#[must_use]
+pub fn service_states() -> Vec<(&'static str, Service)> {
+    service::service_names()
+        .into_iter()
+        .map(|name| {
+            let state = if service::is_active(name) {
+                Service::Running
+            } else if service::is_enabled(name) {
+                Service::InstalledNotRunning
+            } else {
+                Service::NotInstalled
+            };
+            (name, state)
+        })
+        .collect()
+}
+
+/// `null` when the gateway was not asked, `{"models": [...]}` when it answered, and
+/// `{"error": "..."}` with the whole chain of causes when it did not.
+fn advertised_as_json<S: serde::Serializer>(
+    advertised: &Option<anyhow::Result<Vec<String>>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "snake_case")]
+    enum Answer<'a> {
+        Models(&'a [String]),
+        Error(String),
+    }
+
+    match advertised {
+        None => serializer.serialize_none(),
+        Some(Ok(models)) => serializer.serialize_some(&Answer::Models(models)),
+        Some(Err(e)) => serializer.serialize_some(&Answer::Error(format!("{e:#}"))),
     }
 }
 
@@ -173,7 +206,8 @@ pub fn advertised_models(cfg: &Config) -> anyhow::Result<Vec<String>> {
 /// which skipped the gateway entirely - so following the tool's own advice produced a
 /// configured harness talking to nothing, and the first sign of trouble was Pi
 /// answering a prompt with "Connection error".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NextStep {
     InstallModel,
     /// Nothing is serving, and no service exists to do it.
@@ -308,6 +342,45 @@ mod tests {
         assert!(missing.contains("service install"), "got: {missing}");
         assert!(!broken.contains("service install"), "got: {broken}");
         assert!(broken.contains("gateway check"), "got: {broken}");
+    }
+
+    /// The window switches on these strings, so they are the contract. The error keeps
+    /// its causes, because "error sending request" alone does not say which port.
+    #[test]
+    fn the_overview_serialises_to_the_names_the_window_reads() {
+        let overview = Overview {
+            models: vec![harness::PiModel {
+                id: "gemma4-12b".to_owned(),
+                context_window: 131_072,
+                thinking: gguf::Thinking::Toggle,
+            }],
+            default_model: Some("gemma4-12b".to_owned()),
+            loaded: None,
+            gateway_url: "http://127.0.0.1:8081".to_owned(),
+            gateway: Gateway::PortTaken,
+            advertised: Some(Err(anyhow::anyhow!("connection refused")
+                .context("asking http://127.0.0.1:8081/v1/models"))),
+            services: vec![(service::GATEWAY, Service::InstalledNotRunning)],
+            harnesses: vec!["pi"],
+            next: NextStep::FixGateway,
+        };
+
+        let json = serde_json::to_value(&overview).unwrap();
+        assert_eq!(json["gateway"], "port_taken");
+        assert_eq!(json["next"], "fix_gateway");
+        assert_eq!(json["services"][0][1], "installed_not_running");
+        assert_eq!(json["models"][0]["thinking"], "toggle");
+        assert_eq!(json["models"][0]["context_window"], 131_072);
+        assert_eq!(
+            json["advertised"]["error"],
+            "asking http://127.0.0.1:8081/v1/models: connection refused"
+        );
+
+        let unasked = Overview {
+            advertised: None,
+            ..overview
+        };
+        assert!(serde_json::to_value(&unasked).unwrap()["advertised"].is_null());
     }
 
     #[test]

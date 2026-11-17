@@ -107,6 +107,7 @@ desktop session dies.
 | `ailocal update` | install the latest release in place |
 | `ailocal extras list` / `install <name>` | optional companions, see below |
 | `ailocal eval run` | score a model on a coding suite (needs the `eval` extra) |
+| `ailocal ui` | a console for all of the above, in the browser (needs the `ui` extra) |
 
 ## Choosing a model
 
@@ -422,6 +423,24 @@ truncated code that will not compile.
 
 That is one model on single-turn tasks, so re-measure rather than assume. It is one
 command, and `--reasoning-budget` makes the middle setting measurable too.
+
+### `ui` - the same answers, in a window
+
+```
+ailocal extras install ui
+ailocal ui              # prints a link and opens it
+ailocal ui --no-open    # just the link, for a browser elsewhere on this machine
+```
+
+What `status`, `model ls` and `model pick` report, read from the machine on every
+request and refreshed as it changes - a model installed from a terminal appears in an
+open window without a reload. Every answer is the CLI's own: the console calls the
+same library functions the commands do, so the two cannot disagree.
+
+It listens on 127.0.0.1 only, and every request needs the token in the link it prints.
+The token is new each run and never written down, so a tab from an earlier run is
+turned away rather than left talking to whatever now holds the port. There is no flag
+to listen anywhere else.
 
 `EMPTY` and `CUT` are there because reasoning models fail in a way a score alone hides:
 chain-of-thought goes to `reasoning_content` and `content` stays empty until it is done,

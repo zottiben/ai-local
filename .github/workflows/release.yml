@@ -31,7 +31,7 @@ jobs:
       - name: Check version
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          for crate in ailocal ailocal-eval; do
+          for crate in ailocal ailocal-eval ailocal-ui; do
             CARGO_VERSION="$(grep '^version' "crates/${crate}/Cargo.toml" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
             echo "tag=$VERSION ${crate}=$CARGO_VERSION"
             if [ "$VERSION" != "$CARGO_VERSION" ]; then
@@ -65,7 +65,7 @@ jobs:
           mkdir -p stage
           # One archive per binary, each holding just that binary, so install.sh can
           # fetch an extra without pulling the core down again.
-          for binary in ailocal ailocal-eval; do
+          for binary in ailocal ailocal-eval ailocal-ui; do
             cp "target/${{ matrix.target }}/release/${binary}" "stage/${binary}"
             tar czf "${binary}-v${VERSION}-linux-${{ matrix.arch }}.tar.gz" -C stage "${binary}"
           done
@@ -94,7 +94,7 @@ jobs:
           cargo build --release --workspace --target aarch64-apple-darwin
           cargo build --release --workspace --target x86_64-apple-darwin
           mkdir -p stage
-          for binary in ailocal ailocal-eval; do
+          for binary in ailocal ailocal-eval ailocal-ui; do
             lipo -create -output "stage/${binary}" \
               "target/aarch64-apple-darwin/release/${binary}" \
               "target/x86_64-apple-darwin/release/${binary}"
