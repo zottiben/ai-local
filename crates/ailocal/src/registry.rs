@@ -278,7 +278,10 @@ mod tests {
     }
 
     fn qwen36_27b() -> KvLayout {
-        KvLayout::dense(65, 4, 256, 256)
+        KvLayout {
+            recurrent_state: 48 * 3_268_608,
+            ..KvLayout::dense(16, 4, 256, 256)
+        }
     }
 
     /// The regression: qwen3.6:27b at Q4_K_M is 16057 MiB against ~13000 MiB available.
@@ -308,7 +311,7 @@ mod tests {
         );
     }
 
-    /// A 27B at IQ3_XXS loads and holds ~16k, which is worth downloading.
+    /// A 27B at IQ3_XXS loads and holds ~44k, which is worth downloading.
     #[test]
     fn a_model_that_loads_with_usable_context_fits() {
         match assess(
@@ -318,7 +321,7 @@ mod tests {
             CacheType::Q8_0,
             10_428,
         ) {
-            Fit::Fits(ctx) => assert!((14_000..18_000).contains(&ctx), "got {ctx}"),
+            Fit::Fits(ctx) => assert!((40_000..48_000).contains(&ctx), "got {ctx}"),
             other => panic!("expected Fits, got {other:?}"),
         }
     }

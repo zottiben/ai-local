@@ -6,8 +6,13 @@
 //! models are superseded - it is a starting point, not an authority, and
 //! `ailocal model search` exists for everything not on it.
 //!
-//! Every entry was verified to resolve against the Ollama registry. Sizes are fetched
-//! live rather than hardcoded, so a re-tagged model cannot silently misreport its fit.
+//! Every entry was verified to resolve against the Ollama registry, and to be a text-only
+//! GGUF. Ollama ships some multimodal models with the vision tower inside the weights -
+//! `devstral-small-2:24b` carries 222 `v.*`/`mm.*` tensors in its one blob - and
+//! llama.cpp refuses a file holding tensors its text model does not create. A `-coding`
+//! tag is not a different model either: it shares the base tag's blob and changes only
+//! Ollama's own parameters, which llama-server never reads. Sizes are fetched live
+//! rather than hardcoded, so a re-tagged model cannot silently misreport its fit.
 
 use reqwest::blocking::Client;
 
@@ -39,28 +44,40 @@ pub struct Entry {
 /// from here. `ailocal model files` on a Hugging Face repo is the way to do that.
 pub const ENTRIES: &[Entry] = &[
     Entry {
-        reference: "gemma4:12b",
-        summary: "general + coding, very long context",
-        note: "sliding-window attention, so its KV cache stays small - reaches 256k",
-        tier: 4,
+        reference: "qwen3.6:35b-a3b",
+        summary: "agentic coding, mixture-of-experts",
+        note: "hybrid attention - one block in four keeps a KV cache, so context is cheap",
+        tier: 5,
     },
     Entry {
-        reference: "qwen3:14b",
-        summary: "general + coding, holds up well under long prompts",
-        note: "full attention, so context costs ~85 KiB/token",
+        reference: "qwen3.8:27b",
+        summary: "latest Qwen, coding and long agentic tasks",
+        note: "dense, so slower per token than the 35B mixture-of-experts",
+        tier: 5,
+    },
+    Entry {
+        reference: "gemma4:31b",
+        summary: "largest Gemma, general + coding",
+        note: "sliding-window attention, so its KV cache stays small",
+        tier: 5,
+    },
+    Entry {
+        reference: "gemma4:26b-a4b",
+        summary: "mixture-of-experts Gemma, fast for its size",
+        note: "sliding-window attention, so its KV cache stays small",
         tier: 4,
     },
     Entry {
         reference: "qwen3-coder:30b",
         summary: "code specialist, mixture-of-experts",
-        note: "needs a large card at this quant",
-        tier: 5,
+        note: "no thinking mode - its template has no switch to turn one on",
+        tier: 4,
     },
     Entry {
-        reference: "devstral:24b",
-        summary: "agentic coding specialist",
-        note: "weights alone are ~13.4 GiB, leaving little for context",
-        tier: 5,
+        reference: "gemma4:12b",
+        summary: "general + coding, very long context",
+        note: "sliding-window attention, so its KV cache stays small - reaches 256k",
+        tier: 4,
     },
     Entry {
         reference: "gpt-oss:20b",
@@ -69,28 +86,22 @@ pub const ENTRIES: &[Entry] = &[
         tier: 4,
     },
     Entry {
-        reference: "phi4:14b",
-        summary: "compact general model, strong at reasoning",
-        note: "",
-        tier: 3,
-    },
-    Entry {
-        reference: "mistral-nemo:12b",
-        summary: "general purpose, modest footprint",
-        note: "",
-        tier: 3,
-    },
-    Entry {
-        reference: "qwen3:8b",
+        reference: "qwen3.5:9b",
         summary: "small and fast, for weaker cards",
+        note: "",
+        tier: 3,
+    },
+    Entry {
+        reference: "gemma4:e4b",
+        summary: "small Gemma, long context on little memory",
         note: "",
         tier: 2,
     },
     Entry {
-        reference: "qwen3:4b",
+        reference: "qwen3.5:4b",
         summary: "very small, runs almost anywhere",
         note: "",
-        tier: 1,
+        tier: 2,
     },
 ];
 

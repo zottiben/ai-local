@@ -18,6 +18,17 @@ pub const CEILING_MIB: u64 = 14_400;
 /// Slack for llama.cpp's compute buffers, which scale with batch rather than context.
 pub const COMPUTE_BUFFER_MIB: u64 = 500;
 
+/// Sequences llama-server keeps recurrent state for when `-np` is left unset.
+///
+/// Measured on llama.cpp 1.0 (b12359): it picks 4 slots over one unified KV cache, so
+/// a single conversation still gets the whole context. Pinning `-np 4` is a different
+/// launch - it turns the unified cache off and splits the context four ways, 8192
+/// tokens a slot at `-c 32768` - so `serve` leaves the choice to llama-server and the
+/// estimate assumes what it picks.
+///
+/// Only recurrent state is held per slot. The KV cache is shared between them.
+pub const SLOTS: u64 = 4;
+
 /// Multiplier applied to computed cache size.
 ///
 /// The arithmetic below accounts for the KV tensors themselves. Measured allocation
@@ -94,8 +105,7 @@ impl LayerGroup {
 
 /// How a model's KV cache grows with context.
 ///
-/// Splitting global from sliding layers is not a detail - it is the difference between
-/// a 12B holding 256k tokens and a 27B holding 19k. Treating every layer as global
+/// Splitting global from sliding layers is not a detail. Treating every layer as global
 /// over-estimates gemma4 by 40x and would wrongly report it unable to run long context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KvLayout {
@@ -103,6 +113,13 @@ pub struct KvLayout {
     pub global: LayerGroup,
     /// Layers capped at a fixed window, paired with that window size.
     pub sliding: Option<(LayerGroup, u32)>,
+    /// Bytes of recurrent state one slot holds, however long its context.
+    ///
+    /// Hybrid models such as qwen3.5 run most blocks as linear attention, which keeps
+    /// a constant-size state in place of a cache. It does not grow with context, but
+    /// it is allocated for every slot - ~600 MiB on qwen3.6-27b, too much to leave to
+    /// the compute-buffer slack on a 16 GB card.
+    pub recurrent_state: u64,
 }
 
 impl KvLayout {
@@ -117,6 +134,7 @@ impl KvLayout {
                 value_length,
             },
             sliding: None,
+            recurrent_state: 0,
         }
     }
 
@@ -137,7 +155,13 @@ impl KvLayout {
             let held = context.min(u64::from(window));
             bytes += group.bytes_per_token(cache) * held as f64;
         }
-        bytes * SAFETY_FACTOR
+        (bytes + self.fixed_bytes()) * SAFETY_FACTOR
+    }
+
+    /// What the context holds before it holds a single token.
+    #[must_use]
+    pub fn fixed_bytes(&self) -> f64 {
+        (self.recurrent_state * SLOTS) as f64
     }
 
     /// Total cache for `context` tokens, in MiB, rounded up.
@@ -262,7 +286,10 @@ impl Budget {
     /// Largest context the memory alone allows, before any cap on it.
     fn context_that_fits(&self, kv: &KvLayout, cache: CacheType, weights_mib: u64) -> Option<u64> {
         let for_cache = self.available_mib().checked_sub(weights_mib)?;
-        let budget_bytes = for_cache as f64 * 1024.0 * 1024.0 / SAFETY_FACTOR;
+        let budget_bytes = for_cache as f64 * 1024.0 * 1024.0 / SAFETY_FACTOR - kv.fixed_bytes();
+        if budget_bytes <= 0.0 {
+            return Some(0);
+        }
 
         let global = kv.global.bytes_per_token(cache);
         let (sliding, window) = kv.sliding.map_or((0.0, 0u64), |(g, w)| {
@@ -300,10 +327,13 @@ mod tests {
         KvLayout::dense(40, 8, 128, 128)
     }
 
-    /// qwen3.6-27b (arch `qwen35`): 65 layers, 4 KV heads, 256/256, global attention on
-    /// every layer. Read from the first 8 MiB of the blob.
+    /// qwen3.6-27b (arch `qwen35`): a hybrid whose 64 trunk blocks attend one in four,
+    /// with 4 KV heads at 256/256. The other 48 keep 3 MiB of recurrent state a slot.
     fn qwen36_27b() -> KvLayout {
-        KvLayout::dense(65, 4, 256, 256)
+        KvLayout {
+            recurrent_state: 48 * 3_268_608,
+            ..KvLayout::dense(16, 4, 256, 256)
+        }
     }
 
     /// gemma4-12b: 48 blocks in a repeating pattern of 5 sliding then 1 global. The
@@ -326,6 +356,7 @@ mod tests {
                 },
                 1024,
             )),
+            recurrent_state: 0,
         }
     }
 
@@ -357,15 +388,15 @@ mod tests {
         assert!(budget.fits(&qwen3_14b(), CacheType::Q8_0, 8836, 32768));
     }
 
-    /// A 27B cannot hold a long context here at any quant, because quantising weights
-    /// does not shrink the cache.
+    /// A 27B holds a working context here at IQ3_XXS but not a long one: quantising
+    /// the weights does not shrink the cache, and the recurrent state is paid first.
     #[test]
-    fn dense_27b_cannot_reach_long_context() {
+    fn a_27b_holds_a_working_context_but_not_a_long_one() {
         let budget = Budget::new(900);
         let ctx = budget
             .max_context(&qwen36_27b(), CacheType::Q8_0, 10428)
             .expect("IQ3_XXS weights fit");
-        assert!((14_000..18_000).contains(&ctx), "expected ~16k, got {ctx}");
+        assert!((40_000..48_000).contains(&ctx), "expected ~44k, got {ctx}");
         assert!(!budget.fits(&qwen36_27b(), CacheType::Q8_0, 10428, 200_000));
     }
 

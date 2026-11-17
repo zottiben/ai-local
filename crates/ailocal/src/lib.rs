@@ -77,6 +77,64 @@ pub fn vram_used_mib() -> anyhow::Result<u64> {
     Ok(device.total_mib.saturating_sub(device.free_mib))
 }
 
+/// Whether the model shares memory with the rest of the machine rather than a card.
+///
+/// A probe that fails answers no, which keeps every caller on the discrete-card path
+/// it had before unified memory was considered.
+#[must_use]
+pub fn is_unified_memory() -> bool {
+    primary_device().is_ok_and(|d| d.backend.is_unified_memory())
+}
+
+/// What a running server holds, in MiB, with the word for it on this machine.
+///
+/// On a discrete card that is the card's VRAM in use, desktop included. Unified memory
+/// has no device-wide counter to read: Metal reports each process's own allocations,
+/// so the `--list-devices` probe [`vram_used_mib`] falls back to answers for itself -
+/// 1 MiB, measured with a 7 GB model loaded beside it. There the figure is the
+/// server's own footprint instead.
+///
+/// # Errors
+/// If the reading for this kind of device cannot be taken.
+pub fn server_memory_mib(pid: u32) -> anyhow::Result<(&'static str, u64)> {
+    if is_unified_memory() {
+        Ok(("memory", footprint_mib(pid)?))
+    } else {
+        Ok(("vram", vram_used_mib()?))
+    }
+}
+
+/// A process's physical footprint on macOS, in MiB.
+///
+/// The figure Activity Monitor shows and memory pressure is computed from, so it counts
+/// the server's Metal buffers and anything compressed. RSS read 8% under it on
+/// gemma4-12b at 128k: 9846 MiB against 10696.
+///
+/// # Errors
+/// If `footprint` cannot be run or does not report the figure.
+pub fn footprint_mib(pid: u32) -> anyhow::Result<u64> {
+    use anyhow::Context as _;
+
+    let out = std::process::Command::new("/usr/bin/footprint")
+        .args(["--noCategories", "-f", "bytes", "-p", &pid.to_string()])
+        .output()
+        .context("running /usr/bin/footprint")?;
+    parse_footprint(&String::from_utf8_lossy(&out.stdout))
+        .ok_or_else(|| anyhow::anyhow!("footprint reported no phys_footprint for pid {pid}"))
+}
+
+fn parse_footprint(report: &str) -> Option<u64> {
+    let bytes: u64 = report
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("phys_footprint:"))?
+        .trim()
+        .strip_suffix('B')?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(bytes / (1024 * 1024))
+}
+
 /// Whether VRAM usage can be sampled cheaply enough to poll while a model loads.
 ///
 /// The load watchdog exists because over-committing a discrete GPU takes the
@@ -181,6 +239,30 @@ pub fn primary_device() -> anyhow::Result<device::Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `footprint -p <pid> --noCategories -f bytes`, as macOS 27 prints it for a
+    /// llama-server holding gemma4-12b. The peak line must not be read as the current one.
+    #[test]
+    fn reads_the_current_footprint_not_the_peak() {
+        let report = "\
+======================================================================
+llama-server [84077]: 64-bit    Footprint: 11216560936 B (16384 bytes per page)
+======================================================================
+
+Auxiliary data:
+    phys_footprint: 11216560936 B
+    phys_footprint_peak: 11391083304 B
+";
+        assert_eq!(parse_footprint(report), Some(10_696));
+    }
+
+    #[test]
+    fn a_report_without_the_figure_is_none() {
+        assert_eq!(
+            parse_footprint("footprint: no process with pid 1 found"),
+            None
+        );
+    }
 
     /// The bug this exists to fix: launchd hands a job
     /// `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, so looking only there found no

@@ -116,9 +116,11 @@ ranked by what this machine can actually run:
 
 ```
  1) gemma4-12b-Q4_K_M   6 GiB   256k context   on disk - general + coding, very long context
- 2) qwen3-14b           8 GiB    38k context   on disk - holds up well under long prompts
- 3) mistral-nemo:12b    6 GiB    58k context   general purpose, modest footprint
- 4) qwen3-coder:30b    17 GiB    will not fit  code specialist, mixture-of-experts
+ 2) qwen3-14b           8 GiB    38k context   on disk
+ 3) qwen3.5:9b          5 GiB   256k context   small and fast, for weaker cards
+ 4) qwen3.5:4b          2 GiB   256k context   very small, runs almost anywhere
+ ...
+10) qwen3-coder:30b    17 GiB    will not fit  code specialist, mixture-of-experts
 ```
 
 Picking one makes it the default: the config is updated and, if a model service is
@@ -288,10 +290,10 @@ Checking what fits in 12887 MiB ...
 Measuring usable context ...
 Models for this machine (12887 MiB available)
   1) gemma4:12b          6 GiB   256k context   general + coding, very long context
-  2) qwen3:14b           8 GiB    38k context   general + coding, holds up under long prompts
-  3) mistral-nemo:12b    6 GiB    57k context   general purpose, modest footprint
+  2) qwen3.5:9b          5 GiB   256k context   small and fast, for weaker cards
+  3) qwen3.5:4b          2 GiB   256k context   very small, runs almost anywhere
   ...
-  7) qwen3-coder:30b    17 GiB   will not fit   code specialist, mixture-of-experts
+ 10) gpt-oss:20b        12 GiB   will not fit   mixture-of-experts, strong general model
 ```
 
 Pick one and it downloads, verifies and registers it. `ailocal setup` runs this for you
@@ -299,8 +301,8 @@ when nothing is installed yet.
 
 The context figures are measured, not guessed: it reads each model's attention geometry
 from the first few MiB of the real file. Ordering is capability first among models that
-can hold a *usable* context - a 4B leaves room for 109k tokens, which does not make it
-the better choice. Models that cannot fit stay on the list so the omission explains
+can hold a *usable* context - on a 16 GB card a 4B holds as much as a 12B, which does
+not make it the better choice. Models that cannot fit stay on the list so the omission explains
 itself.
 
 The shortlist is curated and will date. `ailocal model search` is the way to anything
@@ -352,7 +354,7 @@ as shown there:
 
 ```
 ailocal model install ollama:gemma4:12b
-ailocal model install ollama:qwen3:14b
+ailocal model install ollama:qwen3.5:9b
 ```
 
 Its catch is quant coverage - mostly just the default `Q4_K_M` per size. When you need a
