@@ -299,8 +299,7 @@ async fn list_models(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde
             format!("reading model directory: {e}"),
         )
     })?;
-    let budget = serve::budget_for_next_launch()
-        .unwrap_or_else(|_| vram::Budget::new(crate::vram_used_mib().unwrap_or(900)));
+    let budget = serve::budget_or_estimate();
 
     let data: Vec<serde_json::Value> = models
         .iter()
@@ -348,8 +347,7 @@ async fn router_list(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde
         )
     })?;
     let running = serve::running().ok().flatten();
-    let budget = serve::budget_for_next_launch()
-        .unwrap_or_else(|_| vram::Budget::new(crate::vram_used_mib().unwrap_or(900)));
+    let budget = serve::budget_or_estimate();
 
     let data: Vec<serde_json::Value> = models
         .iter()

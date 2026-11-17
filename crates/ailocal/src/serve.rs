@@ -118,6 +118,18 @@ pub fn budget_for_next_launch() -> anyhow::Result<Budget> {
     Ok(budget)
 }
 
+/// [`budget_for_next_launch`], or an estimate when the device cannot be probed.
+///
+/// For the commands that only *describe* what fits - the model list, the picker, the
+/// gateway's catalogue. Refusing to list anything because the device probe failed would
+/// be worse than an estimate, so they fall back to the live VRAM reading against the
+/// discrete-card budget, and to 900 MiB of desktop when even that is unreadable. A
+/// launch never uses this: it calls [`budget_for_next_launch`] and fails instead.
+#[must_use]
+pub fn budget_or_estimate() -> Budget {
+    budget_for_next_launch().unwrap_or_else(|_| Budget::new(crate::vram_used_mib().unwrap_or(900)))
+}
+
 /// Where the running-instance record lives.
 ///
 /// `XDG_RUNTIME_DIR` when available, since the state is meaningless across a reboot and
@@ -358,6 +370,86 @@ pub fn plan_context(model: &Model, budget: &Budget, opts: &Options) -> anyhow::R
              {} MiB ceiling; over-committing GPU memory can take down the desktop",
             budget.ceiling_mib
         ),
+    }
+}
+
+/// What was asked for when serving a model by name.
+#[derive(Debug, Clone)]
+pub struct Launch {
+    /// Model name as the registry lists it.
+    pub name: String,
+    /// Context to launch with; `None` takes the largest that fits.
+    pub context: Option<u64>,
+    pub host: String,
+    pub port: u16,
+    /// `auto`, `on` or `off`; `None` takes the configured value.
+    pub reasoning: Option<String>,
+}
+
+/// A launch with every decision made and nothing yet spawned.
+///
+/// Split from the spawn so a refusal - the model is not installed, or the context asked
+/// for does not fit - reaches the user before anything claims to be starting, and so
+/// the context and the eviction can be shown first.
+#[derive(Debug, Clone)]
+pub struct Prepared {
+    pub model: Model,
+    pub budget: Budget,
+    pub opts: Options,
+    /// The context it will launch with.
+    pub context: u64,
+    /// The model that starting this one will stop, if one is loaded.
+    pub evicting: Option<String>,
+}
+
+/// Decide everything about serving a model by name, without starting it.
+///
+/// # Errors
+/// If no such model is installed, the budget cannot be measured, or the model cannot
+/// hold the context asked for.
+pub fn prepare(config: &crate::config::Config, launch: &Launch) -> anyhow::Result<Prepared> {
+    let models = crate::registry::scan(&config.models_dir)?;
+    let model = models
+        .into_iter()
+        .find(|m| m.name == launch.name)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no model named {:?}; `ailocal model ls` shows what is installed",
+                launch.name
+            )
+        })?;
+
+    // Against what will be free after any eviction, not against current usage.
+    let budget = budget_for_next_launch()?;
+    let opts = Options {
+        context: launch.context,
+        host: launch.host.clone(),
+        port: launch.port,
+        reasoning: launch
+            .reasoning
+            .clone()
+            .unwrap_or_else(|| config.reasoning.clone()),
+        ..Options::from_config(config)?
+    };
+    let context = plan_context(&model, &budget, &opts)?;
+    let evicting = running()?.map(|i| i.model);
+
+    Ok(Prepared {
+        model,
+        budget,
+        opts,
+        context,
+        evicting,
+    })
+}
+
+impl Prepared {
+    /// Launch it in the background. See [`start`].
+    ///
+    /// # Errors
+    /// As [`start`].
+    pub fn start(&self) -> anyhow::Result<Instance> {
+        start(&self.model, &self.budget, &self.opts)
     }
 }
 

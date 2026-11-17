@@ -2,11 +2,9 @@
 
 use std::sync::Arc;
 
-use anyhow::Context as _;
-
 use ailocal::{
-    auth, config::Config, download, extras, gateway, gguf, harness, registry, registry::Fit, serve,
-    service, source::Source, vram,
+    auth, config::Config, download, extras, gateway, harness, install, registry, registry::Fit,
+    serve, service, source::Source, vram,
 };
 use clap::{Args, Parser, Subcommand};
 
@@ -639,15 +637,7 @@ fn config_data_dir(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
 
 fn model_ls() -> anyhow::Result<()> {
     let cfg = Config::load()?;
-    let cache: vram::CacheType = cfg.cache_type.parse()?;
-
-    // Budget against what would be free after evicting whatever is loaded. Using live
-    // VRAM instead reports the running model as unable to fit, which is absurd on its
-    // face and was exactly what this printed before.
-    let budget = serve::budget_for_next_launch()
-        .unwrap_or_else(|_| vram::Budget::new(ailocal::vram_used_mib().unwrap_or(900)));
-
-    let models = registry::scan(&cfg.models_dir)?;
+    let models = ailocal::models::inventory(&cfg)?;
     if models.is_empty() {
         println!("no models in {}", cfg.models_dir.display());
         return Ok(());
@@ -658,17 +648,15 @@ fn model_ls() -> anyhow::Result<()> {
         "NAME", "SIZE", "ARCH", "KV/TOK", "TRAINED", "MAX CTX"
     );
     for m in &models {
-        let kv_per_token = m.kv.map_or_else(
-            || "-".to_owned(),
-            |kv| format!("{:.0} KiB", kv.bytes_per_token(cache) / 1024.0),
-        );
+        let kv_per_token = m
+            .kv_bytes_per_token
+            .map_or_else(|| "-".to_owned(), |b| format!("{:.0} KiB", b / 1024.0));
         let trained = m
             .trained_context
             .map_or_else(|| "-".to_owned(), format_count);
-        let max_ctx = match m.max_context(&budget, cache) {
-            Some(c) if c > 0 => format_count(c),
-            _ => "WILL NOT FIT".to_owned(),
-        };
+        let max_ctx = m
+            .max_context
+            .map_or_else(|| "WILL NOT FIT".to_owned(), format_count);
 
         // The marker rides on ARCH rather than trailing the row: sliding-window
         // attention is a property of the architecture, and left at the end it read as
@@ -683,7 +671,7 @@ fn model_ls() -> anyhow::Result<()> {
             "{:<28} {:>5} G  {arch:<17} {kv_per_token:>9} {trained:>10} {max_ctx:>11}  {}",
             truncate(&m.name, 28),
             m.size_mib / 1024,
-            gguf::thinking_support(&m.path).label(),
+            m.thinking.label(),
         );
     }
 
@@ -715,13 +703,7 @@ fn http_client() -> anyhow::Result<reqwest::blocking::Client> {
 /// Something the picker can offer.
 enum Pickable {
     /// Already on disk. Choosing it costs nothing but a config write.
-    Installed {
-        name: String,
-        size_mib: u64,
-        context: u64,
-        /// The catalogue's description, when this is a model the catalogue knows.
-        summary: Option<&'static str>,
-    },
+    Installed(ailocal::models::Downloaded),
     /// In the catalogue and not yet downloaded.
     Remote(Box<ailocal::catalogue::Candidate>),
 }
@@ -731,17 +713,12 @@ impl Pickable {
         match self {
             // Deliberately the same shape as Candidate::label, so the two halves of
             // the list read as one list.
-            Self::Installed {
-                name,
-                size_mib,
-                context,
-                summary,
-            } => format!(
+            Self::Installed(m) => format!(
                 "{:<18} {:>5} GiB  {:>4}k context   on disk{}",
-                name,
-                size_mib / 1024,
-                context / 1024,
-                summary.map_or_else(String::new, |s| format!(" - {s}"))
+                m.name,
+                m.size_mib / 1024,
+                m.context / 1024,
+                m.summary.map_or_else(String::new, |s| format!(" - {s}"))
             ),
             Self::Remote(c) => c.label(),
         }
@@ -759,70 +736,29 @@ impl Pickable {
 /// Returns the chosen model's name.
 fn model_pick() -> anyhow::Result<Option<String>> {
     let cfg = Config::load()?;
-    let cache: vram::CacheType = cfg.cache_type.parse()?;
-    let budget = serve::budget_for_next_launch()
-        .unwrap_or_else(|_| vram::Budget::new(ailocal::vram_used_mib().unwrap_or(900)));
+    let budget = serve::budget_or_estimate();
     let available = budget.available_mib();
-
-    let on_disk = registry::scan(&cfg.models_dir)?;
 
     let client = http_client()?;
     println!("Checking what fits in {available} MiB ...");
-    let mut candidates = ailocal::catalogue::resolve(&client, available);
-
-    // Anything already downloaded is offered below as itself, so drop it from the
-    // download list rather than invite someone to fetch gigabytes they already have.
-    // Keep what the catalogue called it, to describe it in the list.
-    let mut described: Vec<(String, &'static str)> = Vec::new();
-    candidates.retain(|c| {
-        let Some(stem) = catalogue_stem(c) else {
-            return true;
-        };
-        match registry::already_have(&on_disk, &stem, c.size_mib) {
-            Some(have) => {
-                described.push((have.name.clone(), c.entry.summary));
-                false
-            }
-            None => true,
-        }
-    });
-
-    let mut options: Vec<Pickable> = Vec::new();
-    let mut unusable = 0;
-    for m in &on_disk {
-        match registry::assess(m.kv, m.trained_context, &budget, cache, m.size_mib) {
-            Fit::Fits(context) => options.push(Pickable::Installed {
-                name: m.name.clone(),
-                size_mib: m.size_mib,
-                context,
-                summary: described
-                    .iter()
-                    .find(|(name, _)| *name == m.name)
-                    .map(|(_, summary)| *summary),
-            }),
-            _ => unusable += 1,
-        }
-    }
-
-    // The registry being unreachable is only fatal with nothing installed - otherwise
-    // there is still a perfectly good choice to make offline.
-    anyhow::ensure!(
-        !candidates.is_empty() || !options.is_empty(),
-        "could not reach the model registry, and nothing is installed yet"
-    );
-
-    if !candidates.is_empty() {
-        // Reads a few MiB of each fitting model for its real attention geometry,
-        // because weight size does not predict usable context: a 12B with
-        // sliding-window attention holds six times what a 14B with full attention does.
+    let mut offer = ailocal::models::Offer::gather(&cfg, &client, budget)?;
+    if !offer.remote.is_empty() {
         println!("Measuring usable context ...");
-        ailocal::catalogue::measure(&client, &mut candidates, &budget, cache);
+        offer.measure(&client);
     }
-    options.extend(
-        candidates
-            .into_iter()
-            .map(|c| Pickable::Remote(Box::new(c))),
-    );
+
+    let unusable = offer.unusable;
+    let options: Vec<Pickable> = offer
+        .downloaded
+        .into_iter()
+        .map(Pickable::Installed)
+        .chain(
+            offer
+                .remote
+                .into_iter()
+                .map(|c| Pickable::Remote(Box::new(c))),
+        )
+        .collect();
 
     let labels: Vec<String> = options.iter().map(Pickable::label).collect();
     let header = format!(
@@ -839,9 +775,9 @@ fn model_pick() -> anyhow::Result<Option<String>> {
     };
 
     let name = match &options[index] {
-        Pickable::Installed { name, .. } => {
-            println!("\n{name} is already downloaded.");
-            name.clone()
+        Pickable::Installed(m) => {
+            println!("\n{} is already downloaded.", m.name);
+            m.name.clone()
         }
         Pickable::Remote(chosen) => {
             if !chosen.fits() {
@@ -867,73 +803,32 @@ fn model_pick() -> anyhow::Result<Option<String>> {
     Ok(Some(name))
 }
 
-/// The filename stem a catalogue entry would be stored under, for spotting one that is
-/// already downloaded.
-fn catalogue_stem(candidate: &ailocal::catalogue::Candidate) -> Option<String> {
-    format!("ollama:{}", candidate.entry.reference)
-        .parse::<Source>()
-        .ok()
-        .map(|s| s.file_name().trim_end_matches(".gguf").to_owned())
-}
-
 /// Record `name` as the model this machine serves, and make that true.
 fn set_default_model(name: &str) -> anyhow::Result<()> {
-    let mut cfg = Config::load()?;
-    if cfg.default_model.as_deref() == Some(name) {
-        println!("{name} is already the default model.");
-        return Ok(());
+    match ailocal::models::set_default(name, &unit_binary)? {
+        ailocal::models::DefaultChange::Unchanged => {
+            println!("{name} is already the default model.");
+        }
+        ailocal::models::DefaultChange::Changed(repoint) => {
+            println!("default model is now {name}");
+            print_repoint(&repoint);
+        }
     }
-
-    cfg.default_model = Some(name.to_owned());
-    cfg.save()?;
-    println!("default model is now {name}");
-    repoint_model_service(&cfg);
     Ok(())
 }
 
-/// Point an installed model service at the configured default.
-///
-/// The unit embeds the model name in its `ExecStart`, so changing `default_model` in
-/// the config does nothing on its own - the service would keep serving the old model
-/// and would load it again at the next boot. Best-effort: a service that cannot be
-/// updated must not turn a successful download into a failed command.
-fn repoint_model_service(cfg: &Config) {
-    let installed = service::is_enabled(service::MODEL) || service::is_active(service::MODEL);
-    if !installed {
-        return;
-    }
-
-    let outcome = (|| -> anyhow::Result<bool> {
-        let exe = unit_binary()?;
-        service::install(
-            &exe,
-            &cfg.gateway_host,
-            cfg.gateway_port,
-            cfg.default_model.as_deref(),
-        )?;
-        service::reload()?;
-        let running = service::is_active(service::MODEL);
-        let wanted = cfg.default_model.is_some();
-        if running {
-            service::stop(service::MODEL)?;
-            // Only start it again if there is something to serve. With no default
-            // model `install` deletes the definition, so starting would ask the
-            // service manager for a unit that no longer exists.
-            if wanted {
-                service::start(service::MODEL)?;
-            }
-        }
-        Ok(running && wanted)
-    })();
-
-    match outcome {
-        Ok(true) => println!("  restarted {} on it", service::MODEL),
-        Ok(false) if cfg.default_model.is_none() => println!(
+/// Say what became of the model service after the default changed.
+fn print_repoint(repoint: &ailocal::models::Repoint) {
+    use ailocal::models::Repoint;
+    match repoint {
+        Repoint::NoService => {}
+        Repoint::Restarted => println!("  restarted {} on it", service::MODEL),
+        Repoint::Cleared => println!(
             "  stopped {} - no default model left to preload",
             service::MODEL
         ),
-        Ok(false) => println!("  updated {}", service::MODEL),
-        Err(e) => println!(
+        Repoint::Updated => println!("  updated {}", service::MODEL),
+        Repoint::Failed(e) => println!(
             "  note: {} still points at the old model ({e:#})\n\
              \x20       run `ailocal service install` to update it",
             service::MODEL
@@ -941,11 +836,6 @@ fn repoint_model_service(cfg: &Config) {
     }
 }
 
-/// The line that carries someone from "a model is on disk" to "my harness uses it".
-///
-/// Every other step of this flow ends by naming the next one - `model search` points at
-/// `model files`, which points at `model install` - and this is where that chain used
-/// to stop.
 /// The whole picture in one command.
 ///
 /// The pieces were all inspectable already - `ps`, `service status`, `gateway check`,
@@ -953,47 +843,44 @@ fn repoint_model_service(cfg: &Config) {
 /// Someone whose harness will not answer needs one command that says which link is
 /// broken.
 fn status() -> anyhow::Result<()> {
+    use ailocal::status::{Gateway, Service};
+
     let cfg = Config::load()?;
+    let o = ailocal::status::overview(&cfg);
     let mark = |ok: bool| if ok { "ok  " } else { "MISS" };
 
-    let models = runnable_models(&cfg).unwrap_or_default();
     println!(
         "{}  models      {}",
-        mark(!models.is_empty()),
-        if models.is_empty() {
+        mark(!o.models.is_empty()),
+        if o.models.is_empty() {
             "none installed that can run here".to_owned()
         } else {
             format!(
                 "{} runnable, default {}",
-                models.len(),
-                cfg.default_model.as_deref().unwrap_or("not set")
+                o.models.len(),
+                o.default_model.as_deref().unwrap_or("not set")
             )
         }
     );
 
-    match serve::running() {
-        Ok(Some(i)) => println!(
+    match &o.loaded {
+        Some(i) => println!(
             "ok    loaded      {} at {} context, reasoning {}",
             i.model,
             format_count(i.context),
             i.reasoning
         ),
-        _ => println!("-     loaded      nothing resident (the gateway loads on demand)"),
+        None => println!("-     loaded      nothing resident (the gateway loads on demand)"),
     }
 
-    let answering = gateway::answers_as_gateway(&cfg.gateway_host, cfg.gateway_port);
     println!(
-        "{}  gateway     http://{}:{} - {}",
-        mark(answering),
-        gateway::loopback_for(&cfg.gateway_host),
-        cfg.gateway_port,
-        if answering {
-            "answering".to_owned()
-        } else {
-            match gateway::port_status(&cfg.gateway_host, cfg.gateway_port) {
-                gateway::PortStatus::Taken => "port held by something else".to_owned(),
-                _ => "not answering".to_owned(),
-            }
+        "{}  gateway     {} - {}",
+        mark(o.gateway == Gateway::Answering),
+        o.gateway_url,
+        match o.gateway {
+            Gateway::Answering => "answering",
+            Gateway::PortTaken => "port held by something else",
+            Gateway::NotAnswering => "not answering",
         }
     );
 
@@ -1001,156 +888,49 @@ fn status() -> anyhow::Result<()> {
     // actually sees, and the two can disagree - a model that is installed but judged
     // not to fit is filtered out here, which looks from inside Pi like the model
     // simply vanishing from its picker.
-    if answering {
-        match advertised_models(&cfg) {
-            Ok(names) if names.is_empty() => println!(
-                "MISS  advertised   none - the gateway is serving but offers no model\n\
-                 \x20                  `ailocal model ls` shows what it rejected and why"
-            ),
-            Ok(names) => println!("ok    advertised  {}", names.join(", ")),
-            Err(e) => println!("MISS  advertised  could not ask the gateway: {e}"),
-        }
+    match &o.advertised {
+        None => {}
+        Some(Ok(names)) if names.is_empty() => println!(
+            "MISS  advertised   none - the gateway is serving but offers no model\n\
+             \x20                  `ailocal model ls` shows what it rejected and why"
+        ),
+        Some(Ok(names)) => println!("ok    advertised  {}", names.join(", ")),
+        Some(Err(e)) => println!("MISS  advertised  could not ask the gateway: {e}"),
     }
 
-    for unit in service::service_names() {
-        let active = service::is_active(unit);
+    for (unit, state) in &o.services {
         println!(
             "{}  service     {unit} - {}",
-            mark(active),
-            if active {
-                "running"
-            } else if service::is_enabled(unit) {
-                "installed but not running"
-            } else {
-                "not installed"
+            mark(*state == Service::Running),
+            match state {
+                Service::Running => "running",
+                Service::InstalledNotRunning => "installed but not running",
+                Service::NotInstalled => "not installed",
             }
         );
     }
 
-    let configured = harness::configured();
     println!(
         "{}  harnesses   {}",
-        mark(!configured.is_empty()),
-        if configured.is_empty() {
+        mark(!o.harnesses.is_empty()),
+        if o.harnesses.is_empty() {
             "none configured".to_owned()
         } else {
-            configured.join(", ")
+            o.harnesses.join(", ")
         }
     );
 
-    match next_step(&cfg).describe() {
+    match o.next.describe() {
         Some(line) => println!("\n{line}"),
         None => println!("\nEverything is in place."),
     }
     Ok(())
 }
 
-/// The model names the gateway is offering right now.
-///
-/// Asked over HTTP rather than computed locally, because a harness gets this list from
-/// the gateway and the point is to see what it sees.
-fn advertised_models(cfg: &Config) -> anyhow::Result<Vec<String>> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()?;
-    let body: serde_json::Value = client
-        .get(format!(
-            "http://{}:{}/v1/models",
-            gateway::loopback_for(&cfg.gateway_host),
-            cfg.gateway_port
-        ))
-        .bearer_auth(auth::load_or_create()?)
-        .send()?
-        .error_for_status()?
-        .json()?;
-
-    Ok(body["data"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|m| m["id"].as_str().map(str::to_owned))
-        .collect())
-}
-
-/// What still has to happen before a harness can answer a prompt.
-///
-/// Worked out from the machine's actual state rather than assumed. The hardcoded
-/// version of this pointed from "a model is installed" straight at `harness configure`,
-/// which skipped the gateway entirely - so following the tool's own advice produced a
-/// configured harness talking to nothing, and the first sign of trouble was Pi
-/// answering a prompt with "Connection error".
-#[derive(Debug, PartialEq, Eq)]
-enum NextStep {
-    InstallModel,
-    /// Nothing is serving, and no service exists to do it.
-    StartGateway,
-    /// A service exists but is not answering.
-    FixGateway,
-    ConfigureHarness,
-    /// Everything is in place.
-    Ready,
-}
-
-impl NextStep {
-    /// Decide from the parts rather than by probing, so this is testable.
-    const fn from_state(
-        has_model: bool,
-        gateway_answering: bool,
-        service_installed: bool,
-        harness_configured: bool,
-    ) -> Self {
-        if !has_model {
-            return Self::InstallModel;
-        }
-        if !gateway_answering {
-            return if service_installed {
-                Self::FixGateway
-            } else {
-                Self::StartGateway
-            };
-        }
-        if !harness_configured {
-            return Self::ConfigureHarness;
-        }
-        Self::Ready
-    }
-
-    fn describe(&self) -> Option<String> {
-        Some(match self {
-            Self::InstallModel => {
-                "Next: ailocal model pick   (choose a model for this machine)".to_owned()
-            }
-            Self::StartGateway => "Next: ailocal service install   (nothing is serving yet - \
-                 this starts the gateway and keeps it running)"
-                .to_owned(),
-            Self::FixGateway => format!(
-                "Next: the gateway service is installed but not answering.\n\
-                 \x20     ailocal gateway check      says what is wrong\n\
-                 \x20     {}",
-                service::log_hint()
-            ),
-            Self::ConfigureHarness => {
-                "Next: ailocal harness configure pi   (or claude-code)".to_owned()
-            }
-            Self::Ready => return None,
-        })
-    }
-}
-
-/// Inspect this machine and work out what is still missing.
-fn next_step(cfg: &Config) -> NextStep {
-    NextStep::from_state(
-        runnable_models(cfg).is_ok_and(|m| !m.is_empty()),
-        gateway::answers_as_gateway(&cfg.gateway_host, cfg.gateway_port),
-        service::is_enabled(service::GATEWAY) || service::is_active(service::GATEWAY),
-        !harness::configured().is_empty(),
-    )
-}
-
 /// Print the next step, if there is one.
 fn print_next_step() {
     let Ok(cfg) = Config::load() else { return };
-    if let Some(line) = next_step(&cfg).describe() {
+    if let Some(line) = ailocal::status::next_step(&cfg).describe() {
         println!("\n{line}");
     }
 }
@@ -1174,8 +954,7 @@ fn model_search(query: &str, limit: usize) -> anyhow::Result<()> {
 
 fn model_files(repo: &str) -> anyhow::Result<()> {
     let cfg = Config::load()?;
-    let budget = serve::budget_for_next_launch()
-        .unwrap_or_else(|_| vram::Budget::new(ailocal::vram_used_mib().unwrap_or(900)));
+    let budget = serve::budget_or_estimate();
 
     let client = http_client()?;
     let token = ailocal::source::hf_token(&cfg.hf_home);
@@ -1207,82 +986,6 @@ fn model_files(repo: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// How much of a remote GGUF to read before deciding whether to download it.
-const PREFLIGHT_BYTES: u64 = 8 << 20;
-
-/// The most the preflight reads looking for the tensor index.
-///
-/// The index follows the tokeniser and chat template, so where it ends depends on the
-/// vocabulary: 6.3 MiB into `qwen3-vl:2b`, 11.4 into `qwen3.6:35b-a3b`, 15.1 into
-/// `gemma4:31b`. The read doubles from [`PREFLIGHT_BYTES`] until it gets there.
-const PREFLIGHT_MAX_BYTES: u64 = 64 << 20;
-
-/// Read a model's metadata from the network and judge whether it can run here.
-///
-/// Bytes that are not a GGUF this parser understands answer [`Fit::Unknown`], as they
-/// always have. A header that could not be *fetched* is a different case: the model
-/// may be one llama.cpp refuses, and nothing has looked.
-///
-/// # Errors
-/// If the header cannot be fetched, or the file holds tensors llama.cpp will not load,
-/// unless `force` is set.
-fn preflight(
-    client: &reqwest::blocking::Client,
-    artifact: &ailocal::source::Artifact,
-    budget: &vram::Budget,
-    cache: vram::CacheType,
-    weights_mib: u64,
-    force: bool,
-) -> anyhow::Result<Fit> {
-    let mut limit = PREFLIGHT_BYTES;
-    let md = loop {
-        let head = match download::head_bytes(client, artifact, limit) {
-            Ok(head) => head,
-            Err(e) if force => {
-                println!("  could not read its header ({e:#}); downloading unchecked");
-                return Ok(Fit::Unknown);
-            }
-            Err(e) => {
-                return Err(e.context(
-                    "could not read the model's header to check that it loads here; \
-                     try again, or pass --force to download it unchecked",
-                ));
-            }
-        };
-        let Ok(md) = gguf::parse_head(&head) else {
-            return Ok(Fit::Unknown);
-        };
-        if md.encoder_tensors.is_some() || limit >= PREFLIGHT_MAX_BYTES {
-            break md;
-        }
-        limit *= 2;
-    };
-
-    println!(
-        "  arch {}, trained to {}",
-        md.architecture().unwrap_or("?"),
-        md.context_length().map_or_else(|| "?".into(), format_count)
-    );
-
-    if let Some(encoder) = md.encoder_tensors.filter(|&n| n > 0) {
-        println!(
-            "  will not load: {encoder} of its {} tensors are a vision or audio encoder\n  \
-             packed into the weights, and llama.cpp only loads one from a separate\n  \
-             mmproj file - as GGUFs converted by llama.cpp itself ship them",
-            md.tensor_count
-        );
-        anyhow::ensure!(force, "refusing to download; pass --force to override");
-    }
-
-    Ok(registry::assess(
-        md.kv_layout(),
-        md.context_length(),
-        budget,
-        cache,
-        weights_mib,
-    ))
-}
-
 /// Download a model, returning the name the registry will know it by.
 ///
 /// The name is what every later step needs - `serve`, `default_model`, a harness
@@ -1292,19 +995,14 @@ fn model_install(args: &InstallArgs) -> anyhow::Result<String> {
     let cfg = Config::load()?;
     let cache: vram::CacheType = cfg.cache_type.parse()?;
     let source: Source = args.reference.parse()?;
-
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(concat!("ailocal/", env!("CARGO_PKG_VERSION")))
-        .build()?;
-    let token = ailocal::source::hf_token(&cfg.hf_home);
+    let client = install::client()?;
 
     println!("resolving {source}");
-    let artifact = source.resolve(&client, token.as_deref())?;
-    let weights_mib = artifact.size.map_or(0, |b| b / (1024 * 1024));
+    let resolved = install::resolve(&cfg, &client, source)?;
     println!(
         "  {} MiB{}",
-        weights_mib,
-        if artifact.sha256.is_some() {
+        resolved.weights_mib(),
+        if resolved.has_digest() {
             ", digest published"
         } else {
             ", no digest (length-checked only)"
@@ -1313,35 +1011,17 @@ fn model_install(args: &InstallArgs) -> anyhow::Result<String> {
 
     // Read just the head to learn the architecture. A model that cannot hold a usable
     // context here should cost seconds to reject, not an hour of downloading.
-    //
-    // Budgeted against what a launch would get, not against live VRAM: with a model
-    // already resident, live usage counts weights that serving this one would evict.
-    // `model pick` sizes its list the same way, so using live usage here made the two
-    // disagree - the picker offered a model as fitting and the installer then refused
-    // to download it.
-    let budget = serve::budget_for_next_launch()
-        .unwrap_or_else(|_| vram::Budget::new(ailocal::vram_used_mib().unwrap_or(900)));
-    let fit = preflight(&client, &artifact, &budget, cache, weights_mib, args.force)?;
+    let budget = serve::budget_or_estimate();
+    refuse_unless_forced(
+        install::check(&client, &resolved, &budget, cache),
+        args.force,
+    )?;
 
-    match fit {
-        Fit::Unknown => println!("  could not read metadata; skipping the fit check"),
-        Fit::Fits(ctx) => println!("  fits here: up to {} context", format_count(ctx)),
-        Fit::ContextTooSmall(ctx) => {
-            println!("  will not fit: only {ctx} tokens of context on this machine");
-            anyhow::ensure!(args.force, "refusing to download; pass --force to override");
+    let landed = install::fetch(&cfg, &client, &resolved, &mut download::Bar::default())?;
+    match landed.outcome {
+        download::Fetched::AlreadyPresent => {
+            println!("already present: {}", landed.path.display());
         }
-        Fit::WeightsTooLarge => {
-            println!(
-                "  will not fit: {weights_mib} MiB of weights against {} MiB available",
-                budget.available_mib()
-            );
-            anyhow::ensure!(args.force, "refusing to download; pass --force to override");
-        }
-    }
-
-    let (path, outcome) = download::fetch(&client, &artifact, &cfg.models_dir)?;
-    match outcome {
-        download::Fetched::AlreadyPresent => println!("already present: {}", path.display()),
         download::Fetched::Downloaded {
             bytes,
             resumed_from,
@@ -1351,43 +1031,82 @@ fn model_install(args: &InstallArgs) -> anyhow::Result<String> {
             }
             println!(
                 "installed {} ({} MiB)",
-                path.display(),
+                landed.path.display(),
                 bytes / (1024 * 1024)
             );
         }
     }
+    Ok(landed.name)
+}
 
-    Ok(path.file_stem().map_or_else(
-        || artifact.file_name.clone(),
-        |s| s.to_string_lossy().into_owned(),
-    ))
+/// Report what the head of the file said, and stop unless it may be downloaded.
+///
+/// # Errors
+/// If the check blocked the download and `force` is not set.
+fn refuse_unless_forced(check: install::Check, force: bool) -> anyhow::Result<()> {
+    let encoder = check.encoder();
+    match check.header {
+        install::Header::Unreadable(e) if !force => {
+            return Err(e.context(
+                "could not read the model's header to check that it loads here; \
+                 try again, or pass --force to download it unchecked",
+            ));
+        }
+        install::Header::Unreadable(e) => {
+            println!("  could not read its header ({e:#}); downloading unchecked");
+        }
+        install::Header::NotGguf => {}
+        install::Header::Read {
+            arch,
+            trained_context,
+            tensor_count,
+            ..
+        } => {
+            println!(
+                "  arch {}, trained to {}",
+                arch.as_deref().unwrap_or("?"),
+                trained_context.map_or_else(|| "?".into(), format_count)
+            );
+            if let Some((encoder, _)) = encoder {
+                println!(
+                    "  will not load: {encoder} of its {tensor_count} tensors are a vision or audio \
+                     encoder\n  packed into the weights, and llama.cpp only loads one from a \
+                     separate\n  mmproj file - as GGUFs converted by llama.cpp itself ship them"
+                );
+                anyhow::ensure!(force, "refusing to download; pass --force to override");
+            }
+        }
+    }
+
+    match check.fit {
+        Fit::Unknown => println!("  could not read metadata; skipping the fit check"),
+        Fit::Fits(ctx) => println!("  fits here: up to {} context", format_count(ctx)),
+        Fit::ContextTooSmall(ctx) => {
+            println!("  will not fit: only {ctx} tokens of context on this machine");
+            anyhow::ensure!(force, "refusing to download; pass --force to override");
+        }
+        Fit::WeightsTooLarge => {
+            println!(
+                "  will not fit: {} MiB of weights against {} MiB available",
+                check.weights_mib, check.available_mib
+            );
+            anyhow::ensure!(force, "refusing to download; pass --force to override");
+        }
+    }
+    Ok(())
 }
 
 /// Delete a model's weights, and everything that pointed at them.
-///
-/// Deleting the file is the easy half. The rest of the machine goes on believing the
-/// model is there: `default_model` still names it, so the model service loads it at the
-/// next boot; Pi still has a capability entry for it, so it stays in `/model` and fails
-/// on selection; llama-server may have it open right now. Each of those is a confusing
-/// failure minutes or a reboot away from the delete that caused it, so they are settled
-/// here.
 fn model_rm(args: &RemoveArgs) -> anyhow::Result<()> {
     let name = args.name.as_str();
     let cfg = Config::load()?;
-    let models = registry::scan(&cfg.models_dir)?;
-    let model = models.iter().find(|m| m.name == name).ok_or_else(|| {
-        anyhow::anyhow!(
-            "no model named {name:?} in {}; `ailocal model ls` shows what is installed",
-            cfg.models_dir.display()
-        )
-    })?;
+    let plan = ailocal::models::plan_removal(&cfg, name)?;
 
-    let loaded = serve::running()?.filter(|i| i.model == name);
-    println!("{} ({})", model.path.display(), format_size(model.size_mib));
-    if loaded.is_some() {
+    println!("{} ({})", plan.path.display(), format_size(plan.size_mib));
+    if plan.loaded {
         println!("  it is loaded right now, and will be stopped first");
     }
-    if cfg.default_model.as_deref() == Some(name) {
+    if plan.is_default {
         println!("  it is the default model, which will be cleared");
     }
 
@@ -1405,142 +1124,81 @@ fn model_rm(args: &RemoveArgs) -> anyhow::Result<()> {
         }
     }
 
-    // Stop before unlinking. llama-server holds the file open and keeps serving from a
-    // deleted inode, so the model appears to work until something restarts it.
-    if loaded.is_some() {
-        serve::stop()?;
+    let removed = plan.remove(&cfg, &unit_binary)?;
+    if removed.stopped {
         println!("stopped {name}");
     }
-
-    std::fs::remove_file(&model.path)
-        .with_context(|| format!("deleting {}", model.path.display()))?;
     println!(
         "removed {}, freeing {}",
-        model.path.display(),
-        format_size(model.size_mib)
+        plan.path.display(),
+        format_size(plan.size_mib)
     );
 
-    forget_removed_model(&cfg, name);
-    Ok(())
-}
-
-/// Unpick the references to a model that has just been deleted.
-///
-/// Best-effort and reported, never fatal: the weights are already gone, so failing the
-/// command here would leave the user with no way to finish what it started.
-fn forget_removed_model(cfg: &Config, name: &str) {
-    if cfg.default_model.as_deref() == Some(name) {
-        let mut cfg = cfg.clone();
-        cfg.default_model = None;
-        match cfg.save() {
-            Ok(_) => {
-                println!("cleared default_model");
-                repoint_model_service(&cfg);
-            }
-            Err(e) => eprintln!("warning: could not clear default_model: {e:#}"),
+    match &removed.default {
+        None => {}
+        Some(Ok(repoint)) => {
+            println!("cleared default_model");
+            print_repoint(repoint);
         }
+        Some(Err(e)) => eprintln!("warning: could not clear default_model: {e:#}"),
     }
-
-    match harness::forget_pi_model(name) {
+    match &removed.pi {
         Ok(true) => println!("removed pi's entry for it"),
         Ok(false) => {}
         Err(e) => eprintln!("warning: could not update pi's models.json: {e:#}"),
     }
-
     // Claude Code's env file pins exactly one model, and it is sourced by hand rather
     // than read through us, so it cannot be quietly repointed - say what to run.
-    let names_it = harness::claude_code_env_path()
-        .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .is_some_and(|env| env.contains(&format!("ANTHROPIC_MODEL={name}\n")));
-    if names_it {
+    if removed.claude_code_pinned {
         println!(
             "claude-code is still pointed at {name} - rerun\n\
              \x20 `ailocal harness configure claude-code` to move it"
         );
     }
+    Ok(())
 }
 
 fn serve_model(args: &ServeArgs) -> anyhow::Result<()> {
     let cfg = Config::load()?;
-    let models = registry::scan(&cfg.models_dir)?;
-    let model = models.iter().find(|m| m.name == args.name).ok_or_else(|| {
-        anyhow::anyhow!(
-            "no model named {:?}; `ailocal model ls` shows what is installed",
-            args.name
-        )
-    })?;
-
-    // Budget against what will be free after any eviction, not against current usage.
-    let budget = serve::budget_for_next_launch()?;
-    let opts = serve::Options {
-        context: args.ctx,
-        host: args.host.clone(),
-        port: args.port,
-        reasoning: args
-            .reasoning
-            .clone()
-            .unwrap_or_else(|| cfg.reasoning.clone()),
-        ..serve::Options::from_config(&cfg)?
-    };
 
     // Resolve the context before announcing anything, so a refusal is not preceded by
     // a line claiming we started.
-    let context = serve::plan_context(model, &budget, &opts)?;
+    let prepared = serve::prepare(
+        &cfg,
+        &serve::Launch {
+            name: args.name.clone(),
+            context: args.ctx,
+            host: args.host.clone(),
+            port: args.port,
+            reasoning: args.reasoning.clone(),
+        },
+    )?;
 
-    if let Some(old) = serve::running()? {
-        println!("evicting {} (only one model fits at a time)", old.model);
+    if let Some(old) = &prepared.evicting {
+        println!("evicting {old} (only one model fits at a time)");
     }
     println!(
         "starting {} with {} context ...",
-        model.name,
-        format_count(context)
+        prepared.model.name,
+        format_count(prepared.context)
     );
 
     if args.foreground {
-        return serve::run_foreground(model, &budget, &opts);
+        return serve::run_foreground(&prepared.model, &prepared.budget, &prepared.opts);
     }
 
-    let instance = serve::start(model, &budget, &opts)?;
+    let instance = prepared.start()?;
     println!(
         "{} up at {} with {} context, {} KV, reasoning {}",
         instance.model,
         instance.base_url(),
         format_count(instance.context),
         instance.cache_type,
-        opts.reasoning
+        prepared.opts.reasoning
     );
     let (label, mib) = ailocal::server_memory_mib(instance.pid)?;
     println!("{label} now {mib} MiB");
     Ok(())
-}
-
-/// Every installed model that could actually run here, alphabetically.
-///
-/// Offering a model a harness cannot load only moves the failure later, so anything
-/// that does not fit is left out.
-fn runnable_models(cfg: &Config) -> anyhow::Result<Vec<harness::PiModel>> {
-    let cache: vram::CacheType = cfg.cache_type.parse()?;
-    let budget = serve::budget_for_next_launch()
-        .unwrap_or_else(|_| vram::Budget::new(ailocal::vram_used_mib().unwrap_or(900)));
-
-    Ok(registry::scan(&cfg.models_dir)?
-        .iter()
-        .filter_map(|m| {
-            match registry::assess(m.kv, m.trained_context, &budget, cache, m.size_mib) {
-                Fit::Fits(ctx) => Some(harness::PiModel {
-                    id: m.name.clone(),
-                    context_window: ctx,
-                    // What the model can do, not how the server happens to be launched
-                    // right now. Reporting the launch flag here is what left Pi
-                    // offering `off` as the only choice: `reasoning = "off"` in the
-                    // config became "this model cannot think" in the catalogue.
-                    thinking: gguf::thinking_support(&m.path),
-                }),
-                _ => None,
-            }
-        })
-        .collect())
 }
 
 fn harness_configure(name: &str, url: &str, wanted: Option<&str>) -> anyhow::Result<()> {
@@ -1550,7 +1208,7 @@ fn harness_configure(name: &str, url: &str, wanted: Option<&str>) -> anyhow::Res
     );
 
     let cfg = Config::load()?;
-    let mut models = runnable_models(&cfg)?;
+    let mut models = ailocal::status::runnable_models(&cfg)?;
     anyhow::ensure!(
         !models.is_empty(),
         "no installed model can run here; `ailocal model ls` shows why"
@@ -2103,7 +1761,7 @@ fn service_install(no_start: bool) -> anyhow::Result<()> {
     // difference between a few seconds and a few minutes, and it used to happen in
     // silence.
     if cfg.default_model.is_none() {
-        match runnable_models(&cfg)?.first() {
+        match ailocal::status::runnable_models(&cfg)?.first() {
             Some(first) => {
                 cfg.default_model = Some(first.id.clone());
                 cfg.save()?;
@@ -2366,41 +2024,44 @@ fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    /// The header is where an unloadable model is caught. Answering "unknown" when it
-    /// could not be read let the installer go on to download 1801 MiB of qwen3-vl:2b,
-    /// which llama.cpp refuses, after a single failed registry read.
+    /// What the command says when the registry cannot be read. A failed read once let
+    /// the installer download 1801 MiB of qwen3-vl:2b, which llama.cpp refuses, so it
+    /// stops and names the override; with `--force` it goes on.
     #[test]
     fn a_header_that_cannot_be_read_stops_the_install() {
-        let port = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.local_addr().unwrap().port()
-        };
-        let artifact = ailocal::source::Artifact {
-            url: format!("http://127.0.0.1:{port}/x.gguf"),
-            size: Some(1801 << 20),
-            sha256: None,
-            file_name: "x.gguf".into(),
-            auth: None,
-        };
-        let client = reqwest::blocking::Client::new();
-        let budget = vram::Budget::new(1013);
-        let check = |force| {
-            preflight(
-                &client,
-                &artifact,
-                &budget,
-                vram::CacheType::Q8_0,
-                1801,
-                force,
-            )
+        let unreadable = || install::Check {
+            header: install::Header::Unreadable(anyhow::anyhow!("connection refused")),
+            fit: Fit::Unknown,
+            weights_mib: 1801,
+            available_mib: 1013,
         };
 
-        let err = check(false).unwrap_err();
+        let err = refuse_unless_forced(unreadable(), false).unwrap_err();
         assert!(
             format!("{err:#}").contains("--force"),
             "unexpected: {err:#}"
         );
-        assert_eq!(check(true).unwrap(), Fit::Unknown);
+        refuse_unless_forced(unreadable(), true).unwrap();
+    }
+
+    /// devstral-small-2:24b packs 222 encoder tensors among its 585; it is refused
+    /// even though its weights fit, and `--force` overrides that like any other refusal.
+    #[test]
+    fn a_packed_encoder_is_refused_unless_forced() {
+        let packed = || install::Check {
+            header: install::Header::Read {
+                arch: Some("mistral3".into()),
+                trained_context: Some(131_072),
+                encoder_tensors: Some(222),
+                tensor_count: 585,
+            },
+            fit: Fit::Fits(131_072),
+            weights_mib: 14_336,
+            available_mib: 39_312,
+        };
+        let err = refuse_unless_forced(packed(), false).unwrap_err();
+        assert!(err.to_string().contains("--force"), "unexpected: {err}");
+        refuse_unless_forced(packed(), true).unwrap();
     }
 
     /// A 400 MiB file must not read as `0 GiB` at a prompt asking to delete it.
@@ -2410,76 +2071,6 @@ mod tests {
         assert_eq!(format_size(0), "0 MiB");
         assert_eq!(format_size(1024), "1.0 GiB");
         assert_eq!(format_size(17_699), "17.3 GiB");
-    }
-
-    /// The exact sequence a fresh machine walks, in order.
-    #[test]
-    fn the_next_step_follows_the_setup_sequence() {
-        assert_eq!(
-            NextStep::from_state(false, false, false, false),
-            NextStep::InstallModel
-        );
-        assert_eq!(
-            NextStep::from_state(true, false, false, false),
-            NextStep::StartGateway
-        );
-        assert_eq!(
-            NextStep::from_state(true, true, true, false),
-            NextStep::ConfigureHarness
-        );
-        assert_eq!(
-            NextStep::from_state(true, true, true, true),
-            NextStep::Ready
-        );
-    }
-
-    /// The bug this replaced: with a model installed and no gateway, the advice was
-    /// "configure a harness", which produced a harness pointed at nothing and a
-    /// "Connection error" at the first prompt.
-    #[test]
-    fn a_model_without_a_gateway_does_not_send_you_to_the_harness() {
-        let step = NextStep::from_state(true, false, false, false);
-        assert_ne!(step, NextStep::ConfigureHarness);
-        let advice = step.describe().unwrap();
-        assert!(advice.contains("service install"), "got: {advice}");
-    }
-
-    /// A harness configured against a dead gateway is still broken, so the gateway
-    /// outranks it however far along the rest is.
-    #[test]
-    fn a_dead_gateway_outranks_an_already_configured_harness() {
-        assert_eq!(
-            NextStep::from_state(true, false, true, true),
-            NextStep::FixGateway
-        );
-        assert_eq!(
-            NextStep::from_state(true, false, false, true),
-            NextStep::StartGateway
-        );
-    }
-
-    /// "Not installed" and "installed but broken" need opposite advice - one is a
-    /// command to run, the other is a log to read.
-    #[test]
-    fn a_missing_service_and_a_broken_one_are_told_apart() {
-        let missing = NextStep::from_state(true, false, false, false)
-            .describe()
-            .unwrap();
-        let broken = NextStep::from_state(true, false, true, false)
-            .describe()
-            .unwrap();
-        assert!(missing.contains("service install"), "got: {missing}");
-        assert!(!broken.contains("service install"), "got: {broken}");
-        assert!(broken.contains("gateway check"), "got: {broken}");
-    }
-
-    #[test]
-    fn a_ready_machine_is_told_nothing() {
-        assert!(
-            NextStep::from_state(true, true, true, true)
-                .describe()
-                .is_none()
-        );
     }
 
     /// clap's own consistency check, so a duplicated flag fails the build rather than

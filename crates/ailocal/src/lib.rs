@@ -13,11 +13,14 @@ pub mod extras;
 pub mod gateway;
 pub mod gguf;
 pub mod harness;
+pub mod install;
+pub mod models;
 pub mod prompt;
 pub mod registry;
 pub mod serve;
 pub mod service;
 pub mod source;
+pub mod status;
 pub mod update;
 pub mod vram;
 
