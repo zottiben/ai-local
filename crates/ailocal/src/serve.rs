@@ -211,6 +211,34 @@ fn terminate(pid: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// [`terminate`] for a process we spawned and still hold.
+///
+/// A child we have not waited on stays a zombie after it exits, and `kill(pid, 0)`
+/// answers for a zombie - so `terminate` would sit out its whole grace period on a
+/// server that was already gone. Reaping through the handle also means the pid is
+/// never signalled after it has been released for reuse.
+fn terminate_child(child: &mut std::process::Child) -> anyhow::Result<()> {
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    if let Some(target) = i32::try_from(child.id())
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    {
+        rustix::process::kill_process(target, rustix::process::Signal::TERM).ok();
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    child.kill().ok();
+    child.wait()?;
+    Ok(())
+}
+
 /// Stop the running instance, returning what was stopped.
 ///
 /// # Errors
@@ -447,7 +475,7 @@ fn spawn(
         cmd.args(["--api-key", key]);
     }
 
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .with_context(|| format!("starting {}", exe.display()))?;
     let pid = child.id();
@@ -465,15 +493,18 @@ fn spawn(
         reasoning: opts.reasoning.clone(),
     };
 
-    match await_healthy(&instance) {
+    match await_healthy(&mut child, &instance) {
         Ok(()) => {
             record(&instance)?;
             Ok((instance, child))
         }
         Err(e) => {
-            terminate(pid).ok();
+            terminate_child(&mut child).ok();
             let tail = std::fs::read_to_string(&log)
-                .map(|s| s.lines().rev().take(8).collect::<Vec<_>>().join("\n"))
+                .map(|s| {
+                    let lines: Vec<&str> = s.lines().collect();
+                    lines[lines.len().saturating_sub(8)..].join("\n")
+                })
                 .unwrap_or_default();
             Err(e.context(format!("llama-server did not come up:\n{tail}")))
         }
@@ -577,7 +608,7 @@ fn wait_for_vram_release(baseline_mib: u64) {
 ///
 /// The watchdog is the reason this is not just a health poll. Estimating capacity
 /// wrongly must cost a failed start, never the graphical session.
-fn await_healthy(instance: &Instance) -> anyhow::Result<()> {
+fn await_healthy(child: &mut std::process::Child, instance: &Instance) -> anyhow::Result<()> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()?;
@@ -591,15 +622,15 @@ fn await_healthy(instance: &Instance) -> anyhow::Result<()> {
         .unwrap_or(vram::CEILING_MIB);
 
     while Instant::now() < deadline {
-        if !is_alive(instance.pid) {
-            anyhow::bail!("llama-server exited during startup");
+        if let Some(status) = child.try_wait()? {
+            anyhow::bail!("llama-server exited during startup ({status})");
         }
 
         if watchdog
             && let Ok(used) = crate::vram_used_mib()
             && used >= ceiling
         {
-            terminate(instance.pid).ok();
+            terminate_child(child).ok();
             anyhow::bail!(
                 "aborted at {used} MiB of VRAM, over the {ceiling} MiB ceiling - \
                  killed it rather than let it starve the compositor"
@@ -844,5 +875,44 @@ mod tests {
             plan_context(&m, &budget, &Options::default()).is_ok(),
             "a model that is already serving must still be judged to fit"
         );
+    }
+
+    /// The bug: llama-server refused qwen3-vl-2b and exited 0.16 s in, but a child
+    /// nobody has waited on stays a zombie, and `kill(pid, 0)` answers for a zombie.
+    /// `serve` sat out the whole 300 s startup timeout before showing an error that
+    /// had been in the log since the first second.
+    #[test]
+    fn a_server_that_dies_at_startup_is_reported_at_once() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 3"])
+            .spawn()
+            .unwrap();
+        let instance = Instance {
+            pid: child.id(),
+            model: "m".into(),
+            path: PathBuf::from("/tmp/m.gguf"),
+            host: "127.0.0.1".into(),
+            port,
+            context: 4096,
+            cache_type: "q8_0".into(),
+            desktop_mib: None,
+            cache_ram_mib: None,
+            reasoning: "off".into(),
+        };
+
+        let started = Instant::now();
+        let err = await_healthy(&mut child, &instance).unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "took {:?} to notice",
+            started.elapsed()
+        );
+        assert!(err.to_string().contains("exited"), "{err}");
+        child.wait().ok();
     }
 }
