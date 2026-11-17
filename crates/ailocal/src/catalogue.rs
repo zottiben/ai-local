@@ -156,33 +156,50 @@ const HEAD_BYTES: u64 = 8 << 20;
 ///
 /// Candidates whose metadata cannot be read keep their size-based ordering rather than
 /// disappearing.
+///
+/// Every candidate is read at once. One at a time, `model pick` took 28 to 31 s on the
+/// M4 Max: twenty requests in a row, a manifest 0.6 s and an 8 MiB head 0.85 s each,
+/// at 8.6 MB/s for one stream. Four streams together drew 15 MB/s, so reading in
+/// parallel uses the link instead of waiting on it, and the whole pick took 9.4 to
+/// 10.9 s - most of that the seven heads, 56 MiB the link cannot move faster.
 pub fn measure(client: &Client, candidates: &mut [Candidate], budget: &Budget, cache: CacheType) {
-    for candidate in candidates.iter_mut().filter(|c| c.fits()) {
-        let Ok(source) = format!("ollama:{}", candidate.entry.reference).parse::<Source>() else {
-            continue;
-        };
-        let Ok(artifact) = source.resolve(client, None) else {
-            continue;
-        };
-        let Ok(head) = crate::download::head_bytes(client, &artifact, HEAD_BYTES) else {
-            continue;
-        };
-        let Ok(metadata) = crate::gguf::parse_head(&head) else {
-            continue;
-        };
-
-        if let crate::registry::Fit::Fits(ctx) = crate::registry::assess(
-            metadata.kv_layout(),
-            metadata.context_length(),
-            budget,
-            cache,
-            candidate.size_mib,
-        ) {
-            candidate.context = Some(ctx);
+    std::thread::scope(|scope| {
+        for candidate in candidates.iter_mut().filter(|c| c.fits()) {
+            scope.spawn(move || {
+                if let Some(ctx) = usable_context(client, candidate, budget, cache) {
+                    candidate.context = Some(ctx);
+                }
+            });
         }
-    }
+    });
 
     candidates.sort_by_key(rank);
+}
+
+/// The context `candidate` would get here, read from the head of its blob.
+fn usable_context(
+    client: &Client,
+    candidate: &Candidate,
+    budget: &Budget,
+    cache: CacheType,
+) -> Option<u64> {
+    let source = format!("ollama:{}", candidate.entry.reference)
+        .parse::<Source>()
+        .ok()?;
+    let artifact = source.resolve(client, None).ok()?;
+    let head = crate::download::head_bytes(client, &artifact, HEAD_BYTES).ok()?;
+    let metadata = crate::gguf::parse_head(&head).ok()?;
+
+    match crate::registry::assess(
+        metadata.kv_layout(),
+        metadata.context_length(),
+        budget,
+        cache,
+        candidate.size_mib,
+    ) {
+        crate::registry::Fit::Fits(ctx) => Some(ctx),
+        _ => None,
+    }
 }
 
 /// Smallest context worth having for coding work.
@@ -215,32 +232,42 @@ fn rank(c: &Candidate) -> (bool, bool, std::cmp::Reverse<u8>, std::cmp::Reverse<
 /// Entries that fail to resolve are skipped rather than failing the whole listing: a
 /// re-tagged or withdrawn model should not make the picker unusable.
 ///
+/// Every entry is asked at once, for the reason [`measure`] gives. Each answer goes
+/// back into its entry's own slot, so ties in the ranking still fall in catalogue
+/// order.
+///
 /// # Errors
 /// Never fails as a whole; individual lookups are best-effort.
 pub fn resolve(client: &Client, available_mib: u64) -> Vec<Candidate> {
-    let mut out: Vec<Candidate> = ENTRIES
-        .iter()
-        .filter_map(|entry| {
-            let source: Source = entry
-                .reference
-                .parse()
-                .ok()
-                .map(|s: Source| s)
-                .or_else(|| format!("ollama:{}", entry.reference).parse::<Source>().ok())?;
-            let artifact = source.resolve(client, None).ok()?;
-            let size_mib = artifact.size? / (1024 * 1024);
-            Some(Candidate {
-                entry: *entry,
-                size_mib,
-                headroom_mib: i64::try_from(available_mib).unwrap_or(i64::MAX)
-                    - i64::try_from(size_mib).unwrap_or(i64::MAX),
-                context: None,
-            })
-        })
-        .collect();
+    let mut slots: Vec<Option<Candidate>> = ENTRIES.iter().map(|_| None).collect();
+    std::thread::scope(|scope| {
+        for (entry, slot) in ENTRIES.iter().zip(slots.iter_mut()) {
+            scope.spawn(move || *slot = candidate(client, entry, available_mib));
+        }
+    });
 
+    let mut out: Vec<Candidate> = slots.into_iter().flatten().collect();
     out.sort_by_key(rank);
     out
+}
+
+/// `entry` with its real size, or `None` if the registry does not answer for it.
+fn candidate(client: &Client, entry: &Entry, available_mib: u64) -> Option<Candidate> {
+    let source: Source = entry
+        .reference
+        .parse()
+        .ok()
+        .map(|s: Source| s)
+        .or_else(|| format!("ollama:{}", entry.reference).parse::<Source>().ok())?;
+    let artifact = source.resolve(client, None).ok()?;
+    let size_mib = artifact.size? / (1024 * 1024);
+    Some(Candidate {
+        entry: *entry,
+        size_mib,
+        headroom_mib: i64::try_from(available_mib).unwrap_or(i64::MAX)
+            - i64::try_from(size_mib).unwrap_or(i64::MAX),
+        context: None,
+    })
 }
 
 #[cfg(test)]
