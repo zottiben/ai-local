@@ -31,14 +31,48 @@ pub enum Fetched {
     },
 }
 
+/// How many times to try a head read before reporting it failed.
+///
+/// The read is what stops an unloadable or oversized model before it is downloaded, so
+/// one failure must not be the last word. On 2026-11-17 a single failed read from the
+/// Ollama registry was followed by three that worked and twenty curl range requests
+/// that all returned 206 in about a second.
+const HEAD_ATTEMPTS: u64 = 3;
+
 /// Fetch the first `limit` bytes of an artifact.
 ///
 /// Used to read GGUF metadata before committing to a multi-gigabyte transfer, so a
 /// model that could never fit in VRAM is rejected in seconds rather than after an hour.
+/// A dropped connection or a server error is retried; a client error is not, because
+/// it will be the same error the next time.
 ///
 /// # Errors
-/// If the request fails or the server rejects the range.
+/// If every attempt fails, or the server rejects the request outright.
 pub fn head_bytes(client: &Client, artifact: &Artifact, limit: u64) -> anyhow::Result<Vec<u8>> {
+    let mut attempt = 1;
+    loop {
+        match head_once(client, artifact, limit) {
+            Err(e) if attempt < HEAD_ATTEMPTS && is_transient(&e) => {
+                std::thread::sleep(std::time::Duration::from_secs(attempt));
+                attempt += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
+/// Whether asking again could get a different answer.
+///
+/// Anything without a status is the connection or the body failing part way, which is
+/// exactly what a retry is for.
+fn is_transient(err: &anyhow::Error) -> bool {
+    err.chain()
+        .find_map(|e| e.downcast_ref::<reqwest::Error>())
+        .and_then(reqwest::Error::status)
+        .is_none_or(|s| s.is_server_error() || s == reqwest::StatusCode::TOO_MANY_REQUESTS)
+}
+
+fn head_once(client: &Client, artifact: &Artifact, limit: u64) -> anyhow::Result<Vec<u8>> {
     let mut req = client
         .get(&artifact.url)
         .header(RANGE, format!("bytes=0-{}", limit.saturating_sub(1)));
@@ -276,5 +310,68 @@ mod tests {
         assert!(verify(&path, &artifact(None, Some(5))).is_ok());
         assert!(verify(&path, &artifact(None, Some(6))).is_err());
         std::fs::remove_file(&path).ok();
+    }
+
+    /// What the test server does with each connection, in the order they arrive.
+    enum Reply {
+        /// Read the request and close without a word, as a registry hiccup does.
+        Drop,
+        Respond(&'static str),
+    }
+
+    /// Serve one canned reply per connection on a free loopback port.
+    fn server(replies: Vec<Reply>) -> (Artifact, std::thread::JoinHandle<()>) {
+        use std::io::BufRead as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            for reply in replies {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = std::io::BufReader::new(&stream);
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+                    line.clear();
+                }
+                if let Reply::Respond(response) = reply {
+                    (&stream).write_all(response.as_bytes()).unwrap();
+                }
+            }
+        });
+        let mut artifact = artifact(None, None);
+        artifact.url = format!("http://127.0.0.1:{port}/x.gguf");
+        (artifact, handle)
+    }
+
+    /// One registry read in this session failed and was never seen again in three
+    /// reruns or twenty range requests. A failure that rare is a reason to ask again,
+    /// not to give up on the check it was feeding.
+    #[test]
+    fn a_dropped_connection_is_read_on_the_retry() {
+        let (artifact, server) = server(vec![
+            Reply::Drop,
+            Reply::Respond(
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nConnection: close\r\n\r\nGGUF",
+            ),
+        ]);
+        let head = head_bytes(&Client::new(), &artifact, 4).unwrap();
+        assert_eq!(head, b"GGUF");
+        server.join().unwrap();
+    }
+
+    /// A 404 will be a 404 the second time too. Asking again would only delay the
+    /// error, so the second reply here, which would succeed, must never be read.
+    #[test]
+    fn a_client_error_is_not_retried() {
+        let (artifact, _server) = server(vec![
+            Reply::Respond(
+                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            ),
+            Reply::Respond(
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nConnection: close\r\n\r\nGGUF",
+            ),
+        ]);
+        let err = head_bytes(&Client::new(), &artifact, 4).unwrap_err();
+        assert!(format!("{err:#}").contains("404"), "unexpected: {err:#}");
     }
 }

@@ -1220,8 +1220,13 @@ const PREFLIGHT_MAX_BYTES: u64 = 64 << 20;
 
 /// Read a model's metadata from the network and judge whether it can run here.
 ///
+/// Bytes that are not a GGUF this parser understands answer [`Fit::Unknown`], as they
+/// always have. A header that could not be *fetched* is a different case: the model
+/// may be one llama.cpp refuses, and nothing has looked.
+///
 /// # Errors
-/// If the file holds tensors llama.cpp will not load, unless `force` is set.
+/// If the header cannot be fetched, or the file holds tensors llama.cpp will not load,
+/// unless `force` is set.
 fn preflight(
     client: &reqwest::blocking::Client,
     artifact: &ailocal::source::Artifact,
@@ -1232,10 +1237,20 @@ fn preflight(
 ) -> anyhow::Result<Fit> {
     let mut limit = PREFLIGHT_BYTES;
     let md = loop {
-        let Some(md) = download::head_bytes(client, artifact, limit)
-            .ok()
-            .and_then(|head| gguf::parse_head(&head).ok())
-        else {
+        let head = match download::head_bytes(client, artifact, limit) {
+            Ok(head) => head,
+            Err(e) if force => {
+                println!("  could not read its header ({e:#}); downloading unchecked");
+                return Ok(Fit::Unknown);
+            }
+            Err(e) => {
+                return Err(e.context(
+                    "could not read the model's header to check that it loads here; \
+                     try again, or pass --force to download it unchecked",
+                ));
+            }
+        };
+        let Ok(md) = gguf::parse_head(&head) else {
             return Ok(Fit::Unknown);
         };
         if md.encoder_tensors.is_some() || limit >= PREFLIGHT_MAX_BYTES {
@@ -2352,6 +2367,43 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The header is where an unloadable model is caught. Answering "unknown" when it
+    /// could not be read let the installer go on to download 1801 MiB of qwen3-vl:2b,
+    /// which llama.cpp refuses, after a single failed registry read.
+    #[test]
+    fn a_header_that_cannot_be_read_stops_the_install() {
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let artifact = ailocal::source::Artifact {
+            url: format!("http://127.0.0.1:{port}/x.gguf"),
+            size: Some(1801 << 20),
+            sha256: None,
+            file_name: "x.gguf".into(),
+            auth: None,
+        };
+        let client = reqwest::blocking::Client::new();
+        let budget = vram::Budget::new(1013);
+        let check = |force| {
+            preflight(
+                &client,
+                &artifact,
+                &budget,
+                vram::CacheType::Q8_0,
+                1801,
+                force,
+            )
+        };
+
+        let err = check(false).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("--force"),
+            "unexpected: {err:#}"
+        );
+        assert_eq!(check(true).unwrap(), Fit::Unknown);
+    }
 
     /// A 400 MiB file must not read as `0 GiB` at a prompt asking to delete it.
     #[test]
