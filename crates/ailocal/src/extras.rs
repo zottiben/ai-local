@@ -32,11 +32,18 @@ pub struct Extra {
 }
 
 /// Every extra this release knows about.
-pub const EXTRAS: &[Extra] = &[Extra {
-    name: "eval",
-    binary: "ailocal-eval",
-    summary: "score models on a coding task set, and compare two side by side",
-}];
+pub const EXTRAS: &[Extra] = &[
+    Extra {
+        name: "eval",
+        binary: "ailocal-eval",
+        summary: "score models on a coding task set, and compare two side by side",
+    },
+    Extra {
+        name: "ui",
+        binary: "ailocal-ui",
+        summary: "a console for models, gateway and services, in the browser",
+    },
+];
 
 /// Look up an extra by the subcommand name.
 #[must_use]

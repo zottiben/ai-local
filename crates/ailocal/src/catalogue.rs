@@ -20,7 +20,7 @@ use crate::source::Source;
 use crate::vram::{Budget, CacheType};
 
 /// A curated starting point.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct Entry {
     /// Ollama reference, `<name>:<tag>`.
     pub reference: &'static str,
@@ -140,6 +140,25 @@ impl Candidate {
             self.size_mib / 1024,
             self.entry.summary
         )
+    }
+}
+
+/// The fields, and whether it fits.
+///
+/// Written out by hand for that last one: [`Candidate::fits`] is where the line is
+/// drawn, and a window that worked it out again from `headroom_mib` could draw it
+/// somewhere else.
+impl serde::Serialize for Candidate {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct as _;
+
+        let mut out = serializer.serialize_struct("Candidate", 5)?;
+        out.serialize_field("entry", &self.entry)?;
+        out.serialize_field("size_mib", &self.size_mib)?;
+        out.serialize_field("headroom_mib", &self.headroom_mib)?;
+        out.serialize_field("context", &self.context)?;
+        out.serialize_field("fits", &self.fits())?;
+        out.end()
     }
 }
 
@@ -363,5 +382,19 @@ mod tests {
         let mut c = candidate("gemma4:12b", 7039, 12_900);
         c.context = Some(262_144);
         assert!(c.label().contains("256k context"), "{}", c.label());
+    }
+
+    /// The window reads `fits` rather than comparing `headroom_mib` itself, so the JSON
+    /// has to put the line at the same 1024 MiB the picker does.
+    #[test]
+    fn the_wire_says_whether_it_fits_at_the_pickers_line() {
+        let json =
+            |available| serde_json::to_value(candidate("gemma4:12b", 7039, available)).unwrap();
+
+        let just = json(7039 + 1024);
+        assert_eq!(just["headroom_mib"], 1024);
+        assert_eq!(just["fits"], true);
+        assert_eq!(just["entry"]["reference"], "gemma4:12b");
+        assert_eq!(json(7039 + 1023)["fits"], false);
     }
 }

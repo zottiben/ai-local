@@ -18,7 +18,7 @@ use crate::vram::{Budget, CacheType};
 use crate::{harness, serve, service};
 
 /// One installed model, as `model ls` lists it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Installed {
     pub name: String,
     pub path: PathBuf,
@@ -64,7 +64,7 @@ pub fn inventory(cfg: &Config) -> anyhow::Result<Vec<Installed>> {
 }
 
 /// An installed model the picker offers. Choosing it costs nothing but a config write.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Downloaded {
     pub name: String,
     pub size_mib: u64,
@@ -75,7 +75,7 @@ pub struct Downloaded {
 }
 
 /// What `model pick` offers: what is installed and runs here, then what could be.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct Offer {
     pub available_mib: u64,
     pub downloaded: Vec<Downloaded>,
@@ -83,7 +83,9 @@ pub struct Offer {
     pub remote: Vec<Candidate>,
     /// Installed models that cannot run here at all.
     pub unusable: usize,
+    #[serde(skip)]
     budget: Budget,
+    #[serde(skip)]
     cache: CacheType,
 }
 
@@ -99,10 +101,29 @@ impl Offer {
     /// nothing is installed. With a model installed there is still a perfectly good
     /// choice to make offline.
     pub fn gather(cfg: &Config, client: &Client, budget: Budget) -> anyhow::Result<Self> {
+        Self::from_candidates(
+            cfg,
+            budget,
+            catalogue::resolve(client, budget.available_mib()),
+        )
+    }
+
+    /// [`Offer::gather`], from a catalogue already resolved against `budget`.
+    ///
+    /// The window measures the catalogue once and keeps it, because the registry
+    /// takes ten seconds to ask and changes far less often than the models directory
+    /// does. What is on disk is still read here, every time.
+    ///
+    /// # Errors
+    /// As [`Offer::gather`].
+    pub fn from_candidates(
+        cfg: &Config,
+        budget: Budget,
+        mut remote: Vec<Candidate>,
+    ) -> anyhow::Result<Self> {
         let cache: CacheType = cfg.cache_type.parse()?;
         let available_mib = budget.available_mib();
         let on_disk = registry::scan(&cfg.models_dir)?;
-        let mut remote = catalogue::resolve(client, available_mib);
 
         // Keep what the catalogue called a model it found on disk, to describe it.
         let mut described: Vec<(String, &'static str)> = Vec::new();

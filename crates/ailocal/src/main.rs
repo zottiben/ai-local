@@ -56,6 +56,14 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Open a console for this machine in the browser. Needs the `ui` extra.
+    ///
+    /// Everything after `ui` goes to `ailocal-ui`, as with `eval`.
+    #[command(disable_help_flag = true)]
+    Ui {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Install the latest release in place.
     ///
     /// Arguments are forwarded to the install script, e.g. `ailocal update --check`.
@@ -323,6 +331,7 @@ fn main() -> anyhow::Result<()> {
         Command::Eval { args } => {
             std::process::exit(extras::dispatch(named_extra("eval")?, &args)?)
         }
+        Command::Ui { args } => std::process::exit(extras::dispatch(named_extra("ui")?, &args)?),
         Command::Update { args } => std::process::exit(ailocal::update::run(&args)?),
         Command::Gateway(GatewayCmd::Check { url }) => {
             let url = url.map_or_else(local_gateway_url, Ok)?;

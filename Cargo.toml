@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ailocal", "crates/ailocal-eval"]
+members = ["crates/ailocal", "crates/ailocal-eval", "crates/ailocal-ui"]
 
 [workspace.package]
 edition = "2024"

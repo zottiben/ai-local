@@ -27,6 +27,9 @@ Inference is llama.cpp's `llama-server`, Vulkan backend. Models are GGUF from Hu
 - Add a house rule to every harness: `system_prompt` in the config
 - Run it 24/7: `ailocal service install`, then `ailocal service status`
 - Score a model: `ailocal extras install eval`, then `ailocal eval run`
+- Open the console: `ailocal extras install ui`, then `ailocal ui`
+- After editing `ui/src`: `cd ui && npm ci && npm run build`. `ui/dist` is committed and
+  compiled into `ailocal-ui`; CI fails if it is not what the sources build
 - Check a model's real context limit: `scripts/bench/ctx_probe.sh <model.gguf> q8_0`
 
 The Rust workspace is established by PR0; until then the cargo commands have nothing to
