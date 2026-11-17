@@ -529,10 +529,23 @@ fn restart_gateway_service(cfg: &Config) -> anyhow::Result<()> {
 
 fn budget() -> anyhow::Result<()> {
     let launch = serve::budget_for_next_launch()?;
-    let in_use = ailocal::vram_used_mib()?;
+    let unified = ailocal::is_unified_memory();
 
     println!("ceiling          {:>6} MiB", launch.ceiling_mib);
-    println!("in use now       {in_use:>6} MiB");
+    // Unified memory has no machine-wide reading to show, only the probe's own ~1 MiB.
+    // What the rest of the machine gets there is the reserve, so that is the line.
+    let in_use = if unified {
+        let total = ailocal::primary_device()?.total_mib;
+        println!(
+            "reserved         {:>6} MiB  of {total} for everything but the model",
+            total.saturating_sub(launch.ceiling_mib)
+        );
+        None
+    } else {
+        let in_use = ailocal::vram_used_mib()?;
+        println!("in use now       {in_use:>6} MiB");
+        Some(in_use)
+    };
     println!("compute buffers  {:>6} MiB", vram::COMPUTE_BUFFER_MIB);
     println!("available        {:>6} MiB", launch.available_mib());
     // The memory figures alone cannot explain a context smaller than they allow.
@@ -545,11 +558,14 @@ fn budget() -> anyhow::Result<()> {
     // that decides what can be loaded is the one measured against the baseline from
     // before the current model loaded, since starting another evicts it.
     if let Ok(Some(instance)) = serve::running() {
+        let held = match in_use {
+            Some(in_use) => in_use.saturating_sub(launch.desktop_mib),
+            None => ailocal::footprint_mib(instance.pid)?,
+        };
         println!(
-            "\n{} holds {} MiB of that, and would be evicted by the next load - so\n\
+            "\n{} holds {held} MiB of that, and would be evicted by the next load - so\n\
              the figure above is what a launch actually gets, not what is idle now.",
             instance.model,
-            in_use.saturating_sub(launch.desktop_mib)
         );
     }
     Ok(())
@@ -675,7 +691,7 @@ fn model_ls() -> anyhow::Result<()> {
         println!(
             "\n(swa) sliding-window attention: most layers hold a fixed window rather than\n\
              growing with context, so KV/TOK is the marginal cost of the few global\n\
-             layers. This is why a 12B reaches 256k where a 27B stops near 16k."
+             layers. This is why a 12B reaches 256k on a 16 GB card."
         );
     }
 
@@ -1452,7 +1468,8 @@ fn serve_model(args: &ServeArgs) -> anyhow::Result<()> {
         instance.cache_type,
         opts.reasoning
     );
-    println!("vram now {} MiB", ailocal::vram_used_mib()?);
+    let (label, mib) = ailocal::server_memory_mib(instance.pid)?;
+    println!("{label} now {mib} MiB");
     Ok(())
 }
 
@@ -2240,7 +2257,8 @@ fn ps() -> anyhow::Result<()> {
             }
             println!("{:<12} {}", "reasoning", i.reasoning);
             println!("{:<12} {}", "pid", i.pid);
-            println!("{:<12} {} MiB", "vram", ailocal::vram_used_mib()?);
+            let (label, mib) = ailocal::server_memory_mib(i.pid)?;
+            println!("{label:<12} {mib} MiB");
         }
     }
     Ok(())

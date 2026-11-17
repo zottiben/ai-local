@@ -172,10 +172,19 @@ impl Metadata {
     /// global ones that grow with context and the windowed ones that do not. gemma4
     /// makes this worth the trouble: 40 of its 48 blocks are windowed, and its 8 global
     /// blocks carry a single KV head against the windowed layers' eight.
+    ///
+    /// A hybrid model's recurrent blocks hold no cache at all; see [`Self::hybrid`].
     #[must_use]
     pub fn kv_layout(&self) -> Option<KvLayout> {
-        let layers = u32::try_from(self.arch_key("block_count")?.max_u64()?).ok()?;
+        let blocks = u32::try_from(self.arch_key("block_count")?.max_u64()?).ok()?;
         let heads = self.arch_key("attention.head_count_kv")?;
+
+        let hybrid = self.hybrid(blocks);
+        let attends = |i: usize| hybrid.as_ref().is_none_or(|h| h.attends(i));
+        let recurrent_state = hybrid.as_ref().map_or(0, Hybrid::state_bytes);
+        let count = |keep: &dyn Fn(usize) -> bool| -> Option<u32> {
+            u32::try_from((0..blocks as usize).filter(|i| keep(*i)).count()).ok()
+        };
 
         let head_dim = || -> Option<u64> {
             let embd = self.arch_key("embedding_length")?.max_u64()?;
@@ -203,24 +212,26 @@ impl Metadata {
         // Without a per-layer pattern we cannot tell which layers are windowed, so
         // treat every layer as global. That over-estimates, which is the safe way to
         // be wrong.
+        let dense = || -> Option<KvLayout> {
+            let kv_heads = u32::try_from(heads.max_u64_where(attends)?).ok()?;
+            Some(KvLayout {
+                recurrent_state,
+                ..KvLayout::dense(count(&attends)?, kv_heads, key_length, value_length)
+            })
+        };
         let (Some(pattern), Some(window)) = (pattern, window) else {
-            let kv_heads = u32::try_from(heads.max_u64()?).ok()?;
-            return Some(KvLayout::dense(layers, kv_heads, key_length, value_length));
+            return dense();
         };
         if window == 0 || pattern.iter().all(|swa| !swa) {
-            let kv_heads = u32::try_from(heads.max_u64()?).ok()?;
-            return Some(KvLayout::dense(layers, kv_heads, key_length, value_length));
+            return dense();
         }
 
-        let n_sliding = u32::try_from(pattern.iter().filter(|swa| **swa).count()).ok()?;
-        let n_global = layers.saturating_sub(n_sliding);
+        let swa = |i: usize| pattern.get(i).copied().unwrap_or(false);
+        let n_sliding = count(&|i| attends(i) && swa(i))?;
+        let n_global = count(&|i| attends(i) && !swa(i))?;
 
-        let global_heads =
-            u32::try_from(heads.max_u64_where(|i| !pattern.get(i).copied().unwrap_or(false))?)
-                .ok()?;
-        let sliding_heads =
-            u32::try_from(heads.max_u64_where(|i| pattern.get(i).copied().unwrap_or(false))?)
-                .ok()?;
+        let global_heads = u32::try_from(heads.max_u64_where(|i| attends(i) && !swa(i))?).ok()?;
+        let sliding_heads = u32::try_from(heads.max_u64_where(|i| attends(i) && swa(i))?).ok()?;
 
         let swa_key = dim("attention.key_length_swa").unwrap_or(key_length);
         let swa_value = dim("attention.value_length_swa").unwrap_or(value_length);
@@ -241,6 +252,55 @@ impl Metadata {
                 },
                 window,
             )),
+            recurrent_state,
+        })
+    }
+
+    /// The split a hybrid model makes between attention and recurrent blocks.
+    ///
+    /// qwen3.5 and 3.6 run full attention on one block in four and a gated delta net on
+    /// the rest. A recurrent block keeps a fixed state rather than a cache that grows
+    /// with context, and the trailing multi-token-prediction blocks
+    /// (`nextn_predict_layers`) are left out of the main context altogether - both as
+    /// llama.cpp's own loader decides. Counting every block as attention priced
+    /// qwen3.6-27b's cache at 4x what llama-server allocates.
+    ///
+    /// `None` unless the state can be priced as well. Saying a block holds no cache is
+    /// only safe when what it holds instead is counted, so a hybrid model without the
+    /// `ssm.*` geometry stays on the over-estimating path that treats every block as
+    /// attention.
+    fn hybrid(&self, blocks: u32) -> Option<Hybrid> {
+        let nextn = self
+            .arch_key("nextn_predict_layers")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let trunk = usize::try_from(u64::from(blocks).checked_sub(nextn)?).ok()?;
+
+        // An explicit per-block list wins over the interval, as it does in llama.cpp.
+        let recurrent: Vec<bool> = match self
+            .arch_key("attention.recurrent_layers")
+            .and_then(Value::bool_vec)
+        {
+            Some(flags) => flags.into_iter().take(trunk).collect(),
+            None => {
+                let interval = self.arch_key("full_attention_interval")?.as_u64()?;
+                let interval = usize::try_from(interval).ok().filter(|n| *n > 0)?;
+                (0..trunk).map(|i| (i + 1) % interval != 0).collect()
+            }
+        };
+
+        let ssm = |key: &str| self.arch_key(&format!("ssm.{key}"))?.as_u64();
+        let conv = ssm("conv_kernel")?;
+        let inner = ssm("inner_size")?;
+        let state = ssm("state_size")?;
+        let groups = ssm("group_count")?;
+        // F32, as llama.cpp keeps it: the convolution window plus the delta-net state.
+        let floats = conv.saturating_sub(1) * (inner + 2 * groups * state) + state * inner;
+
+        Some(Hybrid {
+            trunk,
+            recurrent,
+            state_per_block: floats * 4,
         })
     }
 
@@ -251,6 +311,28 @@ impl Metadata {
         self.arch_key("attention.sliding_window")
             .and_then(Value::max_u64)
             .is_some_and(|w| w > 0)
+    }
+}
+
+/// Which blocks of a hybrid model attend, and what the others keep instead.
+struct Hybrid {
+    /// Blocks in the main model; any past this are multi-token-prediction heads.
+    trunk: usize,
+    /// Per trunk block, whether it is recurrent.
+    recurrent: Vec<bool>,
+    /// Bytes of state one recurrent block keeps for one sequence.
+    state_per_block: u64,
+}
+
+impl Hybrid {
+    /// Whether block `i` keeps a KV cache in the main context.
+    fn attends(&self, i: usize) -> bool {
+        i < self.trunk && !self.recurrent.get(i).copied().unwrap_or(false)
+    }
+
+    /// Recurrent state for one sequence across every recurrent block.
+    fn state_bytes(&self) -> u64 {
+        self.recurrent.iter().filter(|r| **r).count() as u64 * self.state_per_block
     }
 }
 
@@ -554,7 +636,8 @@ mod tests {
         }
     }
 
-    /// qwen3.6-27b as actually observed: architecture is `qwen35`, not `qwen3.6`.
+    /// qwen3.6-27b as actually observed: architecture is `qwen35`, not `qwen3.6`, and 64
+    /// trunk blocks plus one multi-token-prediction block.
     fn qwen36_27b() -> Vec<u8> {
         Builder::new()
             .string("general.architecture", "qwen35")
@@ -564,8 +647,37 @@ mod tests {
             .u32("qwen35.attention.head_count_kv", 4)
             .u32("qwen35.attention.key_length", 256)
             .u32("qwen35.attention.value_length", 256)
+            .u32("qwen35.full_attention_interval", 4)
+            .u32("qwen35.nextn_predict_layers", 1)
+            .u32("qwen35.ssm.conv_kernel", 4)
+            .u32("qwen35.ssm.group_count", 16)
+            .u32("qwen35.ssm.inner_size", 6144)
+            .u32("qwen35.ssm.state_size", 128)
             .build()
     }
+
+    /// qwen3.5-0.8b, the smallest of the hybrid family and so the one measured.
+    fn qwen35_0_8b() -> Builder {
+        Builder::new()
+            .string("general.architecture", "qwen35")
+            .u32("qwen35.block_count", 24)
+            .u32("qwen35.attention.head_count", 8)
+            .u32("qwen35.attention.head_count_kv", 2)
+            .u32("qwen35.attention.key_length", 256)
+            .u32("qwen35.attention.value_length", 256)
+            .u32("qwen35.full_attention_interval", 4)
+    }
+
+    fn with_ssm(builder: Builder) -> Vec<u8> {
+        builder
+            .u32("qwen35.ssm.conv_kernel", 4)
+            .u32("qwen35.ssm.group_count", 16)
+            .u32("qwen35.ssm.inner_size", 2048)
+            .u32("qwen35.ssm.state_size", 128)
+            .build()
+    }
+
+    const MIB: f64 = 1024.0 * 1024.0;
 
     #[test]
     fn reads_header_fields() {
@@ -577,22 +689,64 @@ mod tests {
         assert_eq!(md.context_length(), Some(262_144));
     }
 
+    /// The number this has to agree with is llama-server's own. Measured with llama.cpp
+    /// 1.0 (b12359) on qwen3.5-0.8b at `-c 8192 -ctk q8_0 -ctv q8_0`: "KV buffer size =
+    /// 51.00 MiB ... 6 layers" and "RS buffer size = 77.06 MiB" over its 4 slots.
+    /// Counting all 24 blocks priced that cache at 204 MiB.
     #[test]
-    fn derives_the_kv_layout_that_rules_out_a_27b() {
-        let md = parse_head(&qwen36_27b()).unwrap();
-        let kv = md.kv_layout().unwrap();
-        assert_eq!(kv.global.layers, 65);
+    fn a_hybrid_model_is_priced_as_llama_server_allocates_it() {
+        let kv = parse_head(&with_ssm(qwen35_0_8b()))
+            .unwrap()
+            .kv_layout()
+            .unwrap();
+        assert_eq!(kv.global.layers, 6, "one block in four attends");
+        assert!(kv.sliding.is_none());
+
+        let cache = kv.global.bytes_per_token(crate::vram::CacheType::Q8_0) * 8192.0 / MIB;
+        assert!((cache - 51.0).abs() < 0.01, "KV {cache:.2} MiB");
+
+        let state = kv.fixed_bytes() / MIB;
+        assert!((state - 77.06).abs() < 0.01, "RS {state:.2} MiB");
+    }
+
+    /// qwen3.6-27b leaves its MTP block out of the main context, as the loader does,
+    /// so its 64 trunk blocks hold 16 caches - not 65.
+    #[test]
+    fn a_27b_hybrid_caches_a_quarter_of_its_blocks() {
+        let kv = parse_head(&qwen36_27b()).unwrap().kv_layout().unwrap();
+        assert_eq!(kv.global.layers, 16);
         assert_eq!(kv.global.kv_heads, 4);
-        assert!(
-            kv.sliding.is_none(),
-            "qwen35 attends globally on every layer"
-        );
 
         let kib = kv.global.bytes_per_token(crate::vram::CacheType::Q8_0) / 1024.0;
         assert!(
-            (kib - 138.0).abs() < 1.0,
-            "expected ~138 KiB/token, got {kib:.1}"
+            (kib - 34.0).abs() < 0.1,
+            "expected 34 KiB/token, got {kib:.1}"
         );
+
+        // 48 recurrent blocks, each 3 MiB a slot - real memory the context costs.
+        let state = kv.fixed_bytes() / MIB;
+        assert!((state - 598.5).abs() < 1.0, "RS {state:.1} MiB");
+    }
+
+    /// A block may only be called cache-free when what it keeps instead is priced.
+    #[test]
+    fn a_hybrid_model_without_its_state_geometry_counts_every_block() {
+        let kv = parse_head(&qwen35_0_8b().build())
+            .unwrap()
+            .kv_layout()
+            .unwrap();
+        assert_eq!(kv.global.layers, 24);
+        assert_eq!(kv.recurrent_state, 0);
+    }
+
+    /// llama.cpp reads an explicit per-block list before it falls back to the interval.
+    #[test]
+    fn an_explicit_recurrent_list_wins_over_the_interval() {
+        let recurrent: Vec<bool> = (0..24).map(|i| i % 2 == 0).collect();
+        let head =
+            with_ssm(qwen35_0_8b().bool_array("qwen35.attention.recurrent_layers", &recurrent));
+        let kv = parse_head(&head).unwrap().kv_layout().unwrap();
+        assert_eq!(kv.global.layers, 12);
     }
 
     /// The real reason this parser exists: decide from a ranged request.

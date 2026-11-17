@@ -530,7 +530,7 @@ fn prompt_cache_mib(model: &Model, budget: &Budget, cache: CacheType, context: u
 /// A probe that fails answers no, because that is the choice that cannot make things
 /// worse.
 fn should_lock_weights() -> bool {
-    crate::primary_device().is_ok_and(|d| d.backend.is_unified_memory())
+    crate::is_unified_memory()
 }
 
 /// Wait for `host:port` to be bindable, failing rather than starting a doomed child.
