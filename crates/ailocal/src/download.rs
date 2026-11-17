@@ -94,6 +94,42 @@ fn head_once(client: &Client, artifact: &Artifact, limit: u64) -> anyhow::Result
     Ok(buf)
 }
 
+/// Where a download reports how far it has got.
+///
+/// A terminal draws a bar from these numbers; a window streams them to the page. The
+/// transfer itself does not care which, so it takes the trait rather than drawing.
+pub trait Progress {
+    /// The body is about to be read, with `start` bytes of `total` already on disk.
+    fn begin(&mut self, name: &str, total: Option<u64>, start: u64);
+    /// `written` bytes of the file are now on disk, counting any resumed from.
+    fn advance(&mut self, written: u64);
+    /// The body has been read. Verifying the digest follows, and on a 20 GB file that
+    /// is several seconds of reading it back.
+    fn finish(&mut self);
+}
+
+/// The terminal's progress bar, drawn on stderr and hidden when that is not a terminal.
+#[derive(Default)]
+pub struct Bar(Option<ProgressBar>);
+
+impl Progress for Bar {
+    fn begin(&mut self, name: &str, total: Option<u64>, start: u64) {
+        self.0 = Some(progress_bar(total, start, name));
+    }
+
+    fn advance(&mut self, written: u64) {
+        if let Some(bar) = &self.0 {
+            bar.set_position(written);
+        }
+    }
+
+    fn finish(&mut self) {
+        if let Some(bar) = self.0.take() {
+            bar.finish_and_clear();
+        }
+    }
+}
+
 /// Download `artifact` into `dir`, resuming and verifying.
 ///
 /// # Errors
@@ -103,6 +139,7 @@ pub fn fetch(
     client: &Client,
     artifact: &Artifact,
     dir: &Path,
+    progress: &mut dyn Progress,
 ) -> anyhow::Result<(PathBuf, Fetched)> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
 
@@ -156,7 +193,7 @@ pub fn fetch(
             .context("seeking to resume point")?;
     }
 
-    let bar = progress_bar(total, start, &artifact.file_name);
+    progress.begin(&artifact.file_name, total, start);
     let mut written = start;
     let mut buf = vec![0u8; CHUNK];
     loop {
@@ -166,11 +203,11 @@ pub fn fetch(
         }
         file.write_all(&buf[..n]).context("writing to disk")?;
         written += n as u64;
-        bar.set_position(written);
+        progress.advance(written);
     }
     file.flush().context("flushing")?;
     drop(file);
-    bar.finish_and_clear();
+    progress.finish();
 
     verify(&part, artifact)?;
     std::fs::rename(&part, &dest)
@@ -373,5 +410,57 @@ mod tests {
         ]);
         let err = head_bytes(&Client::new(), &artifact, 4).unwrap_err();
         assert!(format!("{err:#}").contains("404"), "unexpected: {err:#}");
+    }
+
+    /// What a [`Progress`] was told, in place of a bar.
+    #[derive(Default)]
+    struct Recorded {
+        begun: Option<(Option<u64>, u64)>,
+        last: u64,
+        finished: bool,
+    }
+
+    impl Progress for Recorded {
+        fn begin(&mut self, _name: &str, total: Option<u64>, start: u64) {
+            self.begun = Some((total, start));
+        }
+        fn advance(&mut self, written: u64) {
+            self.last = written;
+        }
+        fn finish(&mut self) {
+            self.finished = true;
+        }
+    }
+
+    /// A window draws its bar from these calls, so they report what is on disk rather
+    /// than what this transfer added: resuming "hello" from a two-byte `.part` begins
+    /// at 2 of 5 and ends at 5, and the result verifies against the published digest.
+    #[test]
+    fn progress_counts_the_bytes_on_disk_across_a_resume() {
+        let (mut artifact, server) = server(vec![Reply::Respond(
+            "HTTP/1.1 206 Partial Content\r\nContent-Length: 3\r\nConnection: close\r\n\r\nllo",
+        )]);
+        artifact.sha256 = Some(HELLO.to_owned());
+        artifact.size = Some(5);
+        let dir = std::env::temp_dir().join(format!("ailocal-resume-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("x.gguf.part"), b"he").unwrap();
+
+        let mut seen = Recorded::default();
+        let (path, outcome) = fetch(&Client::new(), &artifact, &dir, &mut seen).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(
+            outcome,
+            Fetched::Downloaded {
+                bytes: 5,
+                resumed_from: 2
+            }
+        );
+        assert_eq!(seen.begun, Some((Some(5), 2)));
+        assert_eq!(seen.last, 5);
+        assert!(seen.finished);
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
