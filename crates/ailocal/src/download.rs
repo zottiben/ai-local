@@ -165,10 +165,28 @@ pub fn fetch(
         req = req.header(RANGE, format!("bytes={resume_from}-"));
     }
 
-    let mut resp = req
+    let resp = req
         .send()
-        .with_context(|| format!("downloading {}", artifact.url))?
-        .error_for_status()?;
+        .with_context(|| format!("downloading {}", artifact.url))?;
+
+    // Nothing lies past the end of the `.part`: it is already whole, as one is when an
+    // install is stopped while its digest is checked. The registry says so with a 416
+    // rather than an empty 206, and failing on it failed every retry of that install
+    // for good. Checking what is on disk is the answer, and the digest has the last
+    // word - a `.part` longer than the file fails it just as a corrupt one does.
+    if resume_from > 0 && resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+        progress.begin(&artifact.file_name, artifact.size, resume_from);
+        progress.finish();
+        move_into_place(&part, &dest, artifact)?;
+        return Ok((
+            dest,
+            Fetched::Downloaded {
+                bytes: resume_from,
+                resumed_from: resume_from,
+            },
+        ));
+    }
+    let mut resp = resp.error_for_status()?;
 
     // A 200 in reply to a Range request means the server ignored it and is sending the
     // whole file, so anything already on disk has to be discarded.
@@ -209,10 +227,7 @@ pub fn fetch(
     drop(file);
     progress.finish();
 
-    verify(&part, artifact)?;
-    std::fs::rename(&part, &dest)
-        .with_context(|| format!("moving {} into place", part.display()))?;
-
+    move_into_place(&part, &dest, artifact)?;
     Ok((
         dest,
         Fetched::Downloaded {
@@ -220,6 +235,12 @@ pub fn fetch(
             resumed_from: start,
         },
     ))
+}
+
+/// Verify a finished `.part` and give it its real name, which is what makes it a model.
+fn move_into_place(part: &Path, dest: &Path, artifact: &Artifact) -> anyhow::Result<()> {
+    verify(part, artifact)?;
+    std::fs::rename(part, dest).with_context(|| format!("moving {} into place", part.display()))
 }
 
 /// Check a finished file against the artifact's expected size and digest.
@@ -461,6 +482,40 @@ mod tests {
         assert_eq!(seen.last, 5);
         assert!(seen.finished);
         assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An install stopped while the digest was being checked leaves a `.part` that is
+    /// already whole. Asked for the bytes after its end, the Ollama registry answers
+    /// 416 Range Not Satisfiable - measured on qwen3:0.6b's 522640096-byte blob - and
+    /// every later install of that model failed on it until the file was deleted by
+    /// hand. What is on disk is checked instead, and here it is "hello" in full.
+    #[test]
+    fn a_whole_part_file_is_verified_rather_than_fetched_again() {
+        let (mut artifact, server) = server(vec![Reply::Respond(
+            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )]);
+        artifact.sha256 = Some(HELLO.to_owned());
+        artifact.size = Some(5);
+        let dir = std::env::temp_dir().join(format!("ailocal-whole-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("x.gguf.part"), b"hello").unwrap();
+
+        let mut seen = Recorded::default();
+        let (path, outcome) = fetch(&Client::new(), &artifact, &dir, &mut seen).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(
+            outcome,
+            Fetched::Downloaded {
+                bytes: 5,
+                resumed_from: 5
+            }
+        );
+        assert_eq!(seen.begun, Some((Some(5), 5)));
+        assert!(seen.finished);
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+        assert!(!dir.join("x.gguf.part").exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 }
