@@ -23,7 +23,8 @@ pub const MIN_USEFUL_CONTEXT: u64 = 4096;
 /// unreadable' and 'weights do not fit' into one `None` and proceeded on both, which
 /// downloaded 16 GB of a model that could never load. Not knowing and knowing it will
 /// fail are opposite answers, and only one of them is safe to continue from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Fit {
     /// Metadata could not be read, so no judgement was possible.
     Unknown,

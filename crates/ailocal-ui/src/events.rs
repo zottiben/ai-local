@@ -6,6 +6,10 @@
 //! fingerprint of everything the console shows and announces a difference. The event
 //! carries no payload: the client refetches, because the machine is the state and a
 //! second, granular model of it would be one more thing to keep honest.
+//!
+//! The jobs are the exception, and the same stream carries them in full. They exist
+//! only in this process, so there is nothing to refetch them from, and a download's
+//! progress is the one thing here that changes four times a second.
 
 use std::convert::Infallible;
 use std::path::Path;
@@ -138,18 +142,34 @@ async fn events(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let mut changes = state.subscribe();
+    let mut jobs = state.jobs().subscribe();
     let stream = async_stream::stream! {
+        // The list as it is now, first: a page reloaded in the middle of a download
+        // picks it up here rather than at the next chunk.
+        let listed = jobs.borrow_and_update().clone();
+        yield Ok(Event::default().event("jobs").data(&*listed));
         loop {
-            match changes.recv().await {
-                Ok(generation) => {
-                    yield Ok(Event::default().event("changed").data(generation.to_string()));
-                }
-                // This client fell behind the buffer. The event says only "something
-                // changed", so a missed one and a delivered one mean the same thing.
-                Err(RecvError::Lagged(_)) => {
-                    yield Ok(Event::default().event("changed").data("lagged"));
-                }
-                Err(RecvError::Closed) => break,
+            let event = tokio::select! {
+                change = changes.recv() => match change {
+                    Ok(generation) => {
+                        Some(Event::default().event("changed").data(generation.to_string()))
+                    }
+                    // This client fell behind the buffer. The event says only "something
+                    // changed", so a missed one and a delivered one mean the same thing.
+                    Err(RecvError::Lagged(_)) => {
+                        Some(Event::default().event("changed").data("lagged"))
+                    }
+                    Err(RecvError::Closed) => None,
+                },
+                // Only the newest list is ever sent; a client too slow for every
+                // update gets the latest one and loses nothing it needed.
+                listed = jobs.changed() => listed.ok().map(|()| {
+                    Event::default().event("jobs").data(&*jobs.borrow_and_update().clone())
+                }),
+            };
+            match event {
+                Some(event) => yield Ok(event),
+                None => break,
             }
         }
     };

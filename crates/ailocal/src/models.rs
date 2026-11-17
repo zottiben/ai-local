@@ -198,7 +198,8 @@ fn catalogue_stem(candidate: &Candidate) -> Option<String> {
 pub type UnitBinary<'a> = &'a dyn Fn() -> anyhow::Result<PathBuf>;
 
 /// What became of the model service after the default changed.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Repoint {
     /// No model service is installed, so there was nothing to change.
     NoService,
@@ -209,7 +210,7 @@ pub enum Repoint {
     /// It was installed but not running; its definition names the new default.
     Updated,
     /// It still names the old model.
-    Failed(anyhow::Error),
+    Failed(#[serde(serialize_with = "crate::wire::error")] anyhow::Error),
 }
 
 /// Point an installed model service at the configured default.
@@ -256,7 +257,8 @@ pub fn repoint_model_service(cfg: &Config, unit_binary: UnitBinary) -> Repoint {
 }
 
 /// What setting the default did.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DefaultChange {
     /// It already was the default; nothing was written.
     Unchanged,
@@ -266,12 +268,16 @@ pub enum DefaultChange {
 /// Record `name` as the model this machine serves, and make that true.
 ///
 /// # Errors
-/// If the config cannot be read or written.
+/// If the config cannot be read or written, or no model of that name is installed.
 pub fn set_default(name: &str, unit_binary: UnitBinary) -> anyhow::Result<DefaultChange> {
     let mut cfg = Config::load()?;
     if cfg.default_model.as_deref() == Some(name) {
         return Ok(DefaultChange::Unchanged);
     }
+    // Every caller on the command line names a model it has just installed or listed.
+    // The console takes the name from a request, and a default naming nothing makes
+    // the model service crash-loop at the next boot.
+    find(&cfg, name)?;
 
     cfg.default_model = Some(name.to_owned());
     cfg.save()?;
@@ -282,7 +288,7 @@ pub fn set_default(name: &str, unit_binary: UnitBinary) -> anyhow::Result<Defaul
 }
 
 /// A model about to be deleted, and what deleting it will also change.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Removal {
     pub name: String,
     pub path: PathBuf,
@@ -298,14 +304,7 @@ pub struct Removal {
 /// # Errors
 /// If no such model is installed, or the running server's record cannot be read.
 pub fn plan_removal(cfg: &Config, name: &str) -> anyhow::Result<Removal> {
-    let models = registry::scan(&cfg.models_dir)?;
-    let model = models.into_iter().find(|m| m.name == name).ok_or_else(|| {
-        anyhow::anyhow!(
-            "no model named {name:?} in {}; `ailocal model ls` shows what is installed",
-            cfg.models_dir.display()
-        )
-    })?;
-
+    let model = find(cfg, name)?;
     Ok(Removal {
         loaded: serve::running()?.is_some_and(|i| i.model == name),
         is_default: cfg.default_model.as_deref() == Some(name),
@@ -315,14 +314,29 @@ pub fn plan_removal(cfg: &Config, name: &str) -> anyhow::Result<Removal> {
     })
 }
 
+/// The installed model called `name`.
+fn find(cfg: &Config, name: &str) -> anyhow::Result<registry::Model> {
+    registry::scan(&cfg.models_dir)?
+        .into_iter()
+        .find(|m| m.name == name)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no model named {name:?} in {}; `ailocal model ls` shows what is installed",
+                cfg.models_dir.display()
+            )
+        })
+}
+
 /// What deleting a model did, beyond the delete.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct Removed {
     /// It was loaded, and was stopped before the file went.
     pub stopped: bool,
     /// What became of `default_model`, if it named the model.
+    #[serde(serialize_with = "crate::wire::optional_result")]
     pub default: Option<anyhow::Result<Repoint>>,
     /// Whether Pi had an entry for it, which is now gone.
+    #[serde(serialize_with = "crate::wire::result")]
     pub pi: anyhow::Result<bool>,
     /// Claude Code's env file still names it. That file is sourced by hand rather
     /// than read through us, so it cannot be quietly repointed.
@@ -417,6 +431,44 @@ mod tests {
         assert!(!plan.is_default);
         assert!(path.exists());
         std::fs::remove_dir_all(cfg.models_dir.parent().unwrap()).ok();
+    }
+
+    /// The window's confirm dialog and its result read these names. A delete whose
+    /// default could not be cleared reports the cause, and a model service that was
+    /// left pointing at the old model says why.
+    #[test]
+    fn a_removal_and_its_outcome_serialise_for_the_window() {
+        let plan = serde_json::to_value(Removal {
+            name: "qwen3-coder-30b".into(),
+            path: PathBuf::from("/m/qwen3-coder-30b.gguf"),
+            size_mib: 17_800,
+            loaded: true,
+            is_default: false,
+        })
+        .unwrap();
+        assert_eq!(plan["size_mib"], 17_800);
+        assert_eq!(plan["loaded"], true);
+
+        let outcome = serde_json::to_value(Removed {
+            stopped: true,
+            default: Some(Ok(Repoint::Failed(anyhow::anyhow!("launchctl exited 5")))),
+            pi: Err(anyhow::anyhow!("not valid JSON").context("reading models.json")),
+            claude_code_pinned: true,
+        })
+        .unwrap();
+        assert_eq!(outcome["default"]["failed"], "launchctl exited 5");
+        assert_eq!(
+            outcome["pi"]["error"],
+            "reading models.json: not valid JSON"
+        );
+        assert_eq!(outcome["claude_code_pinned"], true);
+
+        let unchanged = serde_json::to_value(DefaultChange::Changed(Repoint::NoService)).unwrap();
+        assert_eq!(unchanged["changed"], "no_service");
+        assert_eq!(
+            serde_json::to_value(DefaultChange::Unchanged).unwrap(),
+            "unchanged"
+        );
     }
 
     /// The same error the command has always given for a name that is not installed,

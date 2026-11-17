@@ -371,17 +371,17 @@ pub fn start(service: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Where to look when a service will not start.
+/// Where to look when `service` - [`GATEWAY`] or [`MODEL`] - will not start.
 ///
 /// The two platforms keep this in completely different places, and "check the logs" is
 /// useless advice without the path.
 #[must_use]
-pub fn log_hint() -> String {
+pub fn log_hint(service: &str) -> String {
     match manager() {
-        Manager::Systemd => format!("journalctl --user -u {GATEWAY_UNIT} -n 50"),
+        Manager::Systemd => format!("journalctl --user -u {service} -n 50"),
         Manager::Launchd => log_dir().map_or_else(
             |_| "~/Library/Logs/ailocal/".to_owned(),
-            |dir| format!("{}/{GATEWAY_LABEL}.log", dir.display()),
+            |dir| format!("{}/{service}.log", dir.display()),
         ),
     }
 }

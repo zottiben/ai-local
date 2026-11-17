@@ -71,7 +71,8 @@ pub fn resolve(cfg: &Config, client: &Client, source: Source) -> anyhow::Result<
 }
 
 /// What the head of the file said.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Header {
     Read {
         arch: Option<String>,
@@ -85,7 +86,7 @@ pub enum Header {
     NotGguf,
     /// The head could not be fetched. The model may be one llama.cpp refuses, and
     /// nothing has looked.
-    Unreadable(anyhow::Error),
+    Unreadable(#[serde(serialize_with = "crate::wire::error")] anyhow::Error),
 }
 
 /// Whether a model can load and run here, judged from the head of its file.
@@ -120,6 +121,25 @@ impl Check {
         matches!(self.header, Header::Unreadable(_))
             || self.encoder().is_some()
             || matches!(self.fit, Fit::ContextTooSmall(_) | Fit::WeightsTooLarge)
+    }
+}
+
+/// The fields, and whether it is blocked.
+///
+/// Written out by hand for that last one, as [`crate::catalogue::Candidate`] is for
+/// `fits`: [`Check::blocked`] is where the CLI draws the line for `--force`, and a
+/// window that worked it out again from the header could draw it somewhere else.
+impl serde::Serialize for Check {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct as _;
+
+        let mut out = serializer.serialize_struct("Check", 5)?;
+        out.serialize_field("header", &self.header)?;
+        out.serialize_field("fit", &self.fit)?;
+        out.serialize_field("weights_mib", &self.weights_mib)?;
+        out.serialize_field("available_mib", &self.available_mib)?;
+        out.serialize_field("blocked", &self.blocked())?;
+        out.end()
     }
 }
 
@@ -174,7 +194,7 @@ pub fn check(client: &Client, resolved: &Resolved, budget: &Budget, cache: Cache
 }
 
 /// A model now on disk.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct OnDisk {
     /// What the registry, `serve`, `default_model` and a harness will call it.
     pub name: String,
@@ -276,5 +296,42 @@ mod tests {
             available_mib: 39_312,
         };
         assert!(!check.blocked());
+    }
+
+    /// The window words a refusal from these fields and enables "download anyway"
+    /// from `blocked`. devstral-small-2:24b's 222 encoder tensors of 585 arrive as
+    /// numbers, and an unreadable head arrives as the message the CLI prints.
+    #[test]
+    fn a_check_serialises_with_the_clis_verdict() {
+        let encoder = serde_json::to_value(Check {
+            header: Header::Read {
+                arch: Some("mistral3".into()),
+                trained_context: Some(131_072),
+                encoder_tensors: Some(222),
+                tensor_count: 585,
+            },
+            fit: Fit::Fits(131_072),
+            weights_mib: 14_336,
+            available_mib: 39_312,
+        })
+        .unwrap();
+        assert_eq!(encoder["blocked"], true);
+        assert_eq!(encoder["header"]["read"]["encoder_tensors"], 222);
+        assert_eq!(encoder["header"]["read"]["tensor_count"], 585);
+        assert_eq!(encoder["fit"]["fits"], 131_072);
+
+        let unreadable = serde_json::to_value(Check {
+            header: Header::Unreadable(anyhow::anyhow!("connection reset").context("reading x")),
+            fit: Fit::Unknown,
+            weights_mib: 1801,
+            available_mib: 39_312,
+        })
+        .unwrap();
+        assert_eq!(unreadable["blocked"], true);
+        assert_eq!(
+            unreadable["header"]["unreadable"],
+            "reading x: connection reset"
+        );
+        assert_eq!(unreadable["fit"], "unknown");
     }
 }

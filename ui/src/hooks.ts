@@ -54,3 +54,50 @@ export function useResource<T>(fetcher: () => Promise<T>, deps: readonly unknown
 
   return { data, error, loading };
 }
+
+export interface Actions {
+  /** Start one, remembering which is in flight and what it said if it failed. */
+  run: (key: string, action: () => Promise<unknown>) => void;
+  /** The key of the action in flight, or `null`. */
+  busy: string | null;
+  /** The last failure, with the key of the button that caused it. */
+  failed: { key: string; message: string } | null;
+}
+
+/**
+ * One action at a time, for buttons that change the machine.
+ *
+ * Everything they do is machine-wide and single-tenant - one model is resident, one
+ * install runs, one default is set - so serialising them costs nothing real and makes
+ * a double-click impossible. The key is the button's, so a failure appears beside the
+ * one that caused it rather than at the top of the page.
+ */
+export function useActions(): Actions {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [failed, setFailed] = useState<{ key: string; message: string } | null>(null);
+  const live = useRef(true);
+
+  useEffect(() => {
+    live.current = true;
+    return () => {
+      live.current = false;
+    };
+  }, []);
+
+  function run(key: string, action: () => Promise<unknown>) {
+    if (busy !== null) return;
+    setBusy(key);
+    setFailed(null);
+    action()
+      .catch((err: unknown) => {
+        if (live.current) {
+          setFailed({ key, message: err instanceof Error ? err.message : String(err) });
+        }
+      })
+      .finally(() => {
+        if (live.current) setBusy(null);
+      });
+  }
+
+  return { run, busy, failed };
+}

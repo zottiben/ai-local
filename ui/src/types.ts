@@ -46,6 +46,15 @@ export interface Instance {
   desktop_mib: number | null;
   cache_ram_mib: number | null;
   reasoning: string;
+  /** `null` for a model a service runs, whose output goes to the service's log. */
+  log: string | null;
+}
+
+/** `ailocal::server_memory_mib`: what the loaded server holds, and the word for it. */
+export interface Memory {
+  /** `memory` on unified memory, where it is the server's own footprint; `vram` on a card. */
+  label: string;
+  mib: number;
 }
 
 /** `null` when the gateway was not asked because it is not answering. */
@@ -78,6 +87,119 @@ export interface Installed {
   max_context: number | null;
   thinking: Thinking;
 }
+
+/** `registry::Fit`: whether a model can hold a usable context here. */
+export type Fit =
+  | { fits: number }
+  | { context_too_small: number }
+  | "weights_too_large"
+  | "unknown";
+
+/** `install::Header`: what the head of the file said. */
+export type Header =
+  | {
+      read: {
+        arch: string | null;
+        trained_context: number | null;
+        /** Vision or audio encoder tensors packed into the weights. */
+        encoder_tensors: number | null;
+        tensor_count: number;
+      };
+    }
+  /** Not a GGUF this parser understands, which has always meant "could not judge". */
+  | "not_gguf"
+  /** The head could not be fetched, with the message the CLI would print. */
+  | { unreadable: string };
+
+/** `install::Check`: whether a model can load and run here, judged before downloading. */
+export interface Check {
+  header: Header;
+  fit: Fit;
+  weights_mib: number;
+  available_mib: number;
+  /** The CLI's own verdict, never worked out again here. `--force` is what overrides it. */
+  blocked: boolean;
+}
+
+/** `download::Fetched`. */
+export type Fetched = "already_present" | { downloaded: { bytes: number; resumed_from: number } };
+
+/** `install::OnDisk`: a model now in the models directory. */
+export interface OnDisk {
+  name: string;
+  path: string;
+  outcome: Fetched;
+}
+
+/** `jobs::Kind`. */
+export type JobKind = "install" | "serve";
+
+/**
+ * `jobs::State`, internally tagged on `phase`. The `installed` and `served` phases carry
+ * their payload's fields alongside the tag, as serde writes a newtype variant.
+ */
+export type JobState =
+  | { phase: "resolving" }
+  | { phase: "checking"; weights_mib: number }
+  | { phase: "downloading"; written: number; total: number | null; resumed_from: number }
+  | { phase: "verifying"; total: number | null }
+  | { phase: "preparing" }
+  | { phase: "starting"; context: number; evicting: string | null }
+  | ({ phase: "installed" } & OnDisk)
+  | ({ phase: "served" } & Instance)
+  | { phase: "refused" }
+  | { phase: "cancelled"; written: number; total: number | null }
+  | { phase: "failed"; error: string };
+
+/** `jobs::Job`: work running in the console, followed over the event stream. */
+export interface Job {
+  id: number;
+  kind: JobKind;
+  /** The reference being installed, or the model being served. */
+  target: string;
+  force: boolean;
+  check: Check | null;
+  state: JobState;
+}
+
+/** `models::Repoint`: what became of the model service after the default changed. */
+export type Repoint = "no_service" | "restarted" | "cleared" | "updated" | { failed: string };
+
+/** `models::DefaultChange`. */
+export type DefaultChange = "unchanged" | { changed: Repoint };
+
+/** A step that failed, as `wire::result` writes it. */
+export interface Failed {
+  error: string;
+}
+
+/** `models::Removal`: what deleting a model would involve. */
+export interface Removal {
+  name: string;
+  path: string;
+  size_mib: number;
+  /** llama-server has it open, so it will be stopped first. */
+  loaded: boolean;
+  /** It is `default_model`, which will be cleared. */
+  is_default: boolean;
+}
+
+/** `models::Removed`: what deleting it did, beyond the delete. */
+export interface Removed {
+  stopped: boolean;
+  /** `null` when it was not the default. */
+  default: Repoint | Failed | null;
+  /** Whether Pi had an entry for it, which is now gone. */
+  pi: boolean | Failed;
+  claude_code_pinned: boolean;
+}
+
+/** `read::Log`: where the loaded model's output is. */
+export type LogView =
+  | { kind: "idle" }
+  /** A model a service runs, or one in the foreground: not in a file ailocal keeps. */
+  | { kind: "elsewhere"; service_log: string }
+  | { kind: "file"; path: string; from: number; to: number; text: string };
 
 /** `catalogue::Entry`. */
 export interface Entry {

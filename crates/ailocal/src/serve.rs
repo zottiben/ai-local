@@ -73,6 +73,16 @@ pub struct Instance {
     /// for every task to be sure which mode it was in.
     #[serde(default = "unknown_reasoning")]
     pub reasoning: String,
+
+    /// The file its output goes to, when it has one.
+    ///
+    /// `None` for a server a service manager runs, whose output is in the service's
+    /// log, and for a state file written before this was recorded. Not assumed from
+    /// [`log_path`], because every background start reuses that file: what is there
+    /// for a model the service loaded is some earlier server's output, and showing it
+    /// as this one's would be wrong.
+    #[serde(default)]
+    pub log: Option<PathBuf>,
 }
 
 /// What to assume for a state file written before `reasoning` was recorded.
@@ -144,6 +154,17 @@ pub fn state_path() -> anyhow::Result<PathBuf> {
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     Ok(dir.join("ailocal/server.json"))
+}
+
+/// Where a server started in the background writes its output.
+///
+/// One file, truncated by each start, beside the state file and for the same reason:
+/// it describes this boot.
+///
+/// # Errors
+/// If no suitable directory can be determined.
+pub fn log_path() -> anyhow::Result<PathBuf> {
+    Ok(state_path()?.with_file_name("server.log"))
 }
 
 /// Whether a process is still alive.
@@ -451,6 +472,21 @@ impl Prepared {
     pub fn start(&self) -> anyhow::Result<Instance> {
         start(&self.model, &self.budget, &self.opts)
     }
+
+    /// Launch it in the background and hand back the process, for a caller that goes
+    /// on running and so has to wait on it.
+    ///
+    /// [`Prepared::start`] drops the handle because the command calling it exits a
+    /// moment later and the server is reparented. A long-lived caller - the console -
+    /// that dropped it would keep a zombie once the server exited, and `kill(pid, 0)`
+    /// answers for a zombie: a server that died would still be reported as running,
+    /// and stopping or evicting it would sit out the whole grace period first.
+    ///
+    /// # Errors
+    /// As [`start`].
+    pub fn start_owned(&self) -> anyhow::Result<(Instance, std::process::Child)> {
+        spawn(&self.model, &self.budget, &self.opts, Stdio::LogFile)
+    }
 }
 
 /// Launch llama-server for `model`, evicting anything already running.
@@ -526,7 +562,7 @@ fn spawn(
     // against a 128k window on a server serving 65536.
     wait_for_free_port(&opts.host, opts.port, PORT_RELEASE_TIMEOUT)?;
 
-    let log = state_path()?.with_file_name("server.log");
+    let log = log_path()?;
     if let Some(dir) = log.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -583,6 +619,7 @@ fn spawn(
         desktop_mib,
         cache_ram_mib,
         reasoning: opts.reasoning.clone(),
+        log: (stdio == Stdio::LogFile).then(|| log.clone()),
     };
 
     match await_healthy(&mut child, &instance) {
@@ -832,7 +869,19 @@ mod tests {
             desktop_mib: Some(desktop_mib),
             cache_ram_mib: Some(512),
             reasoning: "auto".into(),
+            log: None,
         }
+    }
+
+    /// A state file from before the log was recorded, as one written by 0.6.3 is,
+    /// still reads: its server's output is simply not known to be anywhere.
+    #[test]
+    fn a_state_file_without_a_log_reads_as_having_none() {
+        let mut json = serde_json::to_value(instance(900)).unwrap();
+        json.as_object_mut().unwrap().remove("log");
+        let read: Instance = serde_json::from_value(json).unwrap();
+        assert_eq!(read, instance(900));
+        assert_eq!(read.log, None);
     }
 
     /// Sized from the model, and well under the 8192 MiB default it replaces.
@@ -995,6 +1044,7 @@ mod tests {
             desktop_mib: None,
             cache_ram_mib: None,
             reasoning: "off".into(),
+            log: None,
         };
 
         let started = Instant::now();

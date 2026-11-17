@@ -1643,7 +1643,7 @@ fn setup(args: &SetupArgs) -> anyhow::Result<()> {
         std::time::Duration::from_secs(20),
     ) {
         println!("   FAIL  no gateway answering on {url}");
-        println!("         logs: {}", service::log_hint());
+        println!("         logs: {}", service::log_hint(service::GATEWAY));
         anyhow::bail!(
             "the gateway did not come up. Everything else is configured, so fixing it \
              and re-running `ailocal setup` will finish the job."
@@ -1663,31 +1663,14 @@ fn setup(args: &SetupArgs) -> anyhow::Result<()> {
 /// write a build path if there is none.
 fn unit_binary() -> anyhow::Result<std::path::PathBuf> {
     let current = std::env::current_exe()?.canonicalize()?;
-    if !ailocal::update::is_build_dir(&current) {
-        return Ok(current);
+    let unit = ailocal::update::unit_binary(&current)?;
+    if unit != current {
+        eprintln!(
+            "note: running from a build directory; units will point at {}",
+            unit.display()
+        );
     }
-
-    let installed = ailocal::update::which("ailocal")
-        .and_then(|p| p.canonicalize().ok())
-        .filter(|p| !ailocal::update::is_build_dir(p));
-
-    match installed {
-        Some(path) => {
-            eprintln!(
-                "note: running from a build directory; units will point at {}",
-                path.display()
-            );
-            Ok(path)
-        }
-        None => anyhow::bail!(
-            "running from {} - a systemd unit must not point into a build directory, \
-             because `cargo clean` would break the service.\n\
-             Install it first, e.g. `install -Dm755 {} ~/.local/bin/ailocal`, then \
-             re-run this from there.",
-            current.display(),
-            current.display()
-        ),
-    }
+    Ok(unit)
 }
 
 fn gateway_check(url: &str) -> anyhow::Result<()> {
@@ -1827,7 +1810,7 @@ fn service_install(no_start: bool) -> anyhow::Result<()> {
                  \x20        {}",
                 service::GATEWAY,
                 cfg.gateway_port,
-                service::log_hint()
+                service::log_hint(service::GATEWAY)
             );
         }
     }
