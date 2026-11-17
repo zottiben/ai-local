@@ -14,12 +14,30 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 
 /// Names used on Linux.
-pub const GATEWAY_UNIT: &str = "ailocal-gateway.service";
-pub const MODEL_UNIT: &str = "ailocal-model.service";
+const GATEWAY_UNIT: &str = "ailocal-gateway.service";
+const MODEL_UNIT: &str = "ailocal-model.service";
 
 /// Labels used on macOS. launchd identifies jobs by reverse-DNS label, not filename.
-pub const GATEWAY_LABEL: &str = "io.github.zottiben.ailocal.gateway";
-pub const MODEL_LABEL: &str = "io.github.zottiben.ailocal.model";
+const GATEWAY_LABEL: &str = "io.github.zottiben.ailocal.gateway";
+const MODEL_LABEL: &str = "io.github.zottiben.ailocal.model";
+
+/// The gateway service, by the name this platform's manager knows it.
+///
+/// The only names callers get. The per-platform ones above used to be public, and the
+/// systemd names were passed to every query on macOS too, where launchd has never heard
+/// of `ailocal-gateway.service`: with the gateway agent loaded, `status` listed it as
+/// running and then advised `service install` because "nothing is serving yet", a
+/// changed default never reached the model agent, and the eval never paused it.
+pub const GATEWAY: &str = match manager() {
+    Manager::Systemd => GATEWAY_UNIT,
+    Manager::Launchd => GATEWAY_LABEL,
+};
+
+/// The model service, by the name this platform's manager knows it. See [`GATEWAY`].
+pub const MODEL: &str = match manager() {
+    Manager::Systemd => MODEL_UNIT,
+    Manager::Launchd => MODEL_LABEL,
+};
 
 /// Which init system we are talking to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,11 +58,8 @@ pub const fn manager() -> Manager {
 
 /// Names of the two services, as this platform knows them.
 #[must_use]
-pub fn service_names() -> [&'static str; 2] {
-    match manager() {
-        Manager::Systemd => [GATEWAY_UNIT, MODEL_UNIT],
-        Manager::Launchd => [GATEWAY_LABEL, MODEL_LABEL],
-    }
+pub const fn service_names() -> [&'static str; 2] {
+    [GATEWAY, MODEL]
 }
 
 /// Directory holding the unit or plist files.
@@ -371,6 +386,22 @@ pub fn log_hint() -> String {
     }
 }
 
+/// The command that starts `service` by hand, for when [`start`] could not.
+#[must_use]
+pub fn start_hint(service: &str) -> String {
+    match manager() {
+        Manager::Systemd => format!("systemctl --user start {service}"),
+        Manager::Launchd => match unit_dir() {
+            Ok(dir) => format!(
+                "launchctl bootstrap {} {}",
+                domain(),
+                dir.join(file_name(service)).display()
+            ),
+            Err(_) => "ailocal service install".to_owned(),
+        },
+    }
+}
+
 /// Whether a service is currently running.
 #[must_use]
 pub fn is_active(service: &str) -> bool {
@@ -552,6 +583,30 @@ mod tests {
                 assert_eq!(
                     file_name(gateway),
                     "io.github.zottiben.ailocal.gateway.plist"
+                );
+            }
+        }
+    }
+
+    /// The names callers query by are the names `install` writes. On macOS they were
+    /// not: every query asked launchd for `ailocal-gateway.service`, so a loaded
+    /// gateway agent was reported running by `status` and missing by its next step.
+    #[test]
+    fn callers_query_the_names_install_writes() {
+        assert_eq!(service_names(), [GATEWAY, MODEL]);
+        match manager() {
+            Manager::Systemd => {
+                assert_eq!(MODEL, "ailocal-model.service");
+                assert_eq!(
+                    start_hint(MODEL),
+                    "systemctl --user start ailocal-model.service"
+                );
+            }
+            Manager::Launchd => {
+                assert_eq!(MODEL, "io.github.zottiben.ailocal.model");
+                assert!(
+                    start_hint(MODEL)
+                        .ends_with("Library/LaunchAgents/io.github.zottiben.ailocal.model.plist")
                 );
             }
         }

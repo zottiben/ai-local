@@ -452,10 +452,10 @@ fn config_gateway_port(port: Option<u16>) -> anyhow::Result<()> {
 
     // The unit bakes the port into its ExecStart, so the config alone would leave the
     // service on the old one.
-    if service::is_enabled(service::GATEWAY_UNIT) || service::is_active(service::GATEWAY_UNIT) {
+    if service::is_enabled(service::GATEWAY) || service::is_active(service::GATEWAY) {
         match restart_gateway_service(&cfg) {
-            Ok(()) => println!("restarted {} on port {wanted}", service::GATEWAY_UNIT),
-            Err(e) => println!("note: could not restart {}: {e:#}", service::GATEWAY_UNIT),
+            Ok(()) => println!("restarted {} on port {wanted}", service::GATEWAY),
+            Err(e) => println!("note: could not restart {}: {e:#}", service::GATEWAY),
         }
     }
 
@@ -492,7 +492,7 @@ fn config_max_context(tokens: Option<u64>) -> anyhow::Result<()> {
     // while the server serves another.
     match serve::running()? {
         Some(instance) if instance.context != wanted => {
-            let command = if service::is_active(service::MODEL_UNIT) {
+            let command = if service::is_active(service::MODEL) {
                 // The foreground parent exits with its child and launchd/systemd
                 // restarts it from the new config. Starting a detached sibling would
                 // race the supervisor for the same port.
@@ -521,10 +521,10 @@ fn restart_gateway_service(cfg: &Config) -> anyhow::Result<()> {
         cfg.default_model.as_deref(),
     )?;
     service::reload()?;
-    if service::is_active(service::GATEWAY_UNIT) {
-        service::stop(service::GATEWAY_UNIT)?;
+    if service::is_active(service::GATEWAY) {
+        service::stop(service::GATEWAY)?;
     }
-    service::start(service::GATEWAY_UNIT)
+    service::start(service::GATEWAY)
 }
 
 fn budget() -> anyhow::Result<()> {
@@ -898,8 +898,7 @@ fn set_default_model(name: &str) -> anyhow::Result<()> {
 /// and would load it again at the next boot. Best-effort: a service that cannot be
 /// updated must not turn a successful download into a failed command.
 fn repoint_model_service(cfg: &Config) {
-    let installed =
-        service::is_enabled(service::MODEL_UNIT) || service::is_active(service::MODEL_UNIT);
+    let installed = service::is_enabled(service::MODEL) || service::is_active(service::MODEL);
     if !installed {
         return;
     }
@@ -913,31 +912,31 @@ fn repoint_model_service(cfg: &Config) {
             cfg.default_model.as_deref(),
         )?;
         service::reload()?;
-        let running = service::is_active(service::MODEL_UNIT);
+        let running = service::is_active(service::MODEL);
         let wanted = cfg.default_model.is_some();
         if running {
-            service::stop(service::MODEL_UNIT)?;
+            service::stop(service::MODEL)?;
             // Only start it again if there is something to serve. With no default
             // model `install` deletes the definition, so starting would ask the
             // service manager for a unit that no longer exists.
             if wanted {
-                service::start(service::MODEL_UNIT)?;
+                service::start(service::MODEL)?;
             }
         }
         Ok(running && wanted)
     })();
 
     match outcome {
-        Ok(true) => println!("  restarted {} on it", service::MODEL_UNIT),
+        Ok(true) => println!("  restarted {} on it", service::MODEL),
         Ok(false) if cfg.default_model.is_none() => println!(
             "  stopped {} - no default model left to preload",
-            service::MODEL_UNIT
+            service::MODEL
         ),
-        Ok(false) => println!("  updated {}", service::MODEL_UNIT),
+        Ok(false) => println!("  updated {}", service::MODEL),
         Err(e) => println!(
             "  note: {} still points at the old model ({e:#})\n\
              \x20       run `ailocal service install` to update it",
-            service::MODEL_UNIT
+            service::MODEL
         ),
     }
 }
@@ -1143,7 +1142,7 @@ fn next_step(cfg: &Config) -> NextStep {
     NextStep::from_state(
         runnable_models(cfg).is_ok_and(|m| !m.is_empty()),
         gateway::answers_as_gateway(&cfg.gateway_host, cfg.gateway_port),
-        service::is_enabled(service::GATEWAY_UNIT) || service::is_active(service::GATEWAY_UNIT),
+        service::is_enabled(service::GATEWAY) || service::is_active(service::GATEWAY),
         !harness::configured().is_empty(),
     )
 }
@@ -1661,8 +1660,7 @@ fn offer_to_start_the_gateway(cfg: Config, url: &str) -> anyhow::Result<Config> 
         return Ok(cfg);
     }
 
-    let installed =
-        service::is_enabled(service::GATEWAY_UNIT) || service::is_active(service::GATEWAY_UNIT);
+    let installed = service::is_enabled(service::GATEWAY) || service::is_active(service::GATEWAY);
 
     if !installed && ailocal::prompt::interactive() {
         println!("The gateway is not running, so a harness pointed at it cannot answer.");
@@ -1703,11 +1701,11 @@ fn warn_if_gateway_is_not_answering(cfg: &Config, url: &str) {
         // still starting, or - the case worth naming - the unit was written for a
         // different port, which is what happens when `gateway_port` is edited by hand
         // without reinstalling the service.
-        _ if service::is_active(service::GATEWAY_UNIT) => println!(
+        _ if service::is_active(service::GATEWAY) => println!(
             "  {} is running, but not on port {}. If you changed the port, the unit\n\
              \x20 still has the old one - `ailocal service install` rewrites it.\n\
              \x20 Otherwise it may just be starting; `ailocal gateway check` will say.",
-            service::GATEWAY_UNIT,
+            service::GATEWAY,
             cfg.gateway_port
         ),
         _ => println!(
@@ -2160,7 +2158,7 @@ fn service_install(no_start: bool) -> anyhow::Result<()> {
             println!(
                 "\nWARNING: {} started but nothing is answering on port {}.\n\
                  \x20        {}",
-                service::GATEWAY_UNIT,
+                service::GATEWAY,
                 cfg.gateway_port,
                 service::log_hint()
             );
@@ -2229,7 +2227,7 @@ fn gateway_run(host: &str, port: u16, log_requests: bool) -> anyhow::Result<()> 
         gateway::PortStatus::Ours => anyhow::bail!(
             "an ailocal gateway is already listening on {host}:{port}.\n\
              Use it as it is, or stop it first ({}).",
-            if service::is_active(service::GATEWAY_UNIT) {
+            if service::is_active(service::GATEWAY) {
                 "it is running as a service"
             } else {
                 "it was started by hand"
