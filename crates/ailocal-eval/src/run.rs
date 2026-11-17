@@ -79,14 +79,14 @@ impl ModelServiceGuard {
     /// If the unit is active but cannot be stopped, since proceeding would then race
     /// the supervisor for the GPU.
     pub fn take() -> anyhow::Result<Self> {
-        if !service::is_active(service::MODEL_UNIT) {
+        if !service::is_active(service::MODEL) {
             return Ok(Self { resume: false });
         }
         eprintln!(
             "pausing {} for the run; it will be started again afterwards",
-            service::MODEL_UNIT
+            service::MODEL
         );
-        service::stop(service::MODEL_UNIT)?;
+        service::stop(service::MODEL)?;
         Ok(Self { resume: true })
     }
 }
@@ -99,13 +99,13 @@ impl Drop for ModelServiceGuard {
         // Starting the unit relaunches the configured model, which also evicts whatever
         // the last arm left resident - that is the point, it restores the machine to
         // the state the eval found it in.
-        eprintln!("\nrestarting {}", service::MODEL_UNIT);
-        if let Err(e) = service::start(service::MODEL_UNIT) {
+        eprintln!("\nrestarting {}", service::MODEL);
+        if let Err(e) = service::start(service::MODEL) {
             eprintln!(
                 "WARNING: could not restart {}: {e}\n\
-                 Start it yourself with `systemctl --user start {}`",
-                service::MODEL_UNIT,
-                service::MODEL_UNIT
+                 Start it yourself with `{}`",
+                service::MODEL,
+                service::start_hint(service::MODEL)
             );
         }
     }
