@@ -7,7 +7,8 @@
 //! in VRAM. General-purpose GGUF crates mmap the whole file and cannot do that.
 //!
 //! Format: magic `GGUF`, u32 version, u64 tensor count, u64 metadata count, then that
-//! many (key, type, value) triples. All little-endian.
+//! many (key, type, value) triples, then one index entry per tensor - name, dimensions,
+//! type and offset. All little-endian.
 
 use std::collections::BTreeMap;
 
@@ -133,6 +134,14 @@ pub struct Metadata {
     pub tensor_count: u64,
     /// True when the input ran out before all declared keys were read.
     pub truncated: bool,
+    /// How many tensors belong to a vision or audio encoder rather than the language
+    /// model, or `None` if the input ran out before the whole tensor index was read.
+    ///
+    /// Ollama ships some multimodal models with the encoder inside the weights file -
+    /// `devstral-small-2:24b` holds 222 such tensors of its 585 - where llama.cpp only
+    /// loads one from a separate mmproj file. A model holding them fails to load: every
+    /// tensor in the file has to be one its text architecture creates.
+    pub encoder_tensors: Option<u64>,
     keys: BTreeMap<String, Value>,
 }
 
@@ -407,6 +416,33 @@ impl<'a> Cursor<'a> {
     }
 }
 
+/// Name prefixes llama.cpp keeps for multimodal encoders, from `tools/mtmd` in 1.0
+/// (b12359). None of the names in libllama's own tensor table use them, so a tensor
+/// under one is never part of the language model.
+const ENCODER_NAMESPACES: &[&str] = &["v", "a", "mm", "adapter", "resampler"];
+
+/// Count the encoder tensors in the index, or `None` if it runs out first.
+///
+/// All or nothing. Encoder tensors come after the language model's in every blob
+/// measured - the first at #310 of 721 in `qwen3-vl:2b` - so counting a partial index
+/// would answer zero for exactly the files this exists to catch.
+fn count_encoder_tensors(c: &mut Cursor<'_>, tensor_count: u64) -> Option<u64> {
+    let mut encoder = 0;
+    for _ in 0..tensor_count {
+        let name = c.string()?;
+        for _ in 0..c.u32()? {
+            c.u64()?;
+        }
+        c.u32()?;
+        c.u64()?;
+        let namespace = name.split('.').next().unwrap_or_default();
+        if ENCODER_NAMESPACES.contains(&namespace) {
+            encoder += 1;
+        }
+    }
+    Some(encoder)
+}
+
 /// Parse metadata from the head of a GGUF file.
 ///
 /// Returns `Ok` with `truncated: true` when `bytes` ends mid-metadata, since that is
@@ -439,11 +475,17 @@ pub fn parse_head(bytes: &[u8]) -> anyhow::Result<Metadata> {
         };
         keys.insert(entry.0, entry.1);
     }
+    let encoder_tensors = if truncated {
+        None
+    } else {
+        count_encoder_tensors(&mut c, tensor_count)
+    };
 
     Ok(Metadata {
         version,
         tensor_count,
         truncated,
+        encoder_tensors,
         keys,
     })
 }
@@ -562,6 +604,9 @@ mod tests {
     struct Builder {
         out: Vec<u8>,
         count: u64,
+        /// Index entries written after the metadata. Left empty, the head stops where a
+        /// ranged read usually does on a real file: before the index.
+        tensors: Vec<String>,
     }
 
     impl Builder {
@@ -569,7 +614,13 @@ mod tests {
             Self {
                 out: Vec::new(),
                 count: 0,
+                tensors: Vec::new(),
             }
+        }
+
+        fn tensors(mut self, names: &[&str]) -> Self {
+            self.tensors = names.iter().map(|&n| n.to_owned()).collect();
+            self
         }
 
         fn str_bytes(out: &mut Vec<u8>, s: &str) {
@@ -626,12 +677,25 @@ mod tests {
         }
 
         fn build(self) -> Vec<u8> {
+            let tensor_count = if self.tensors.is_empty() {
+                866
+            } else {
+                self.tensors.len() as u64
+            };
             let mut head = Vec::new();
             head.extend_from_slice(b"GGUF");
             head.extend_from_slice(&3u32.to_le_bytes());
-            head.extend_from_slice(&866u64.to_le_bytes());
+            head.extend_from_slice(&tensor_count.to_le_bytes());
             head.extend_from_slice(&self.count.to_le_bytes());
             head.extend_from_slice(&self.out);
+            for name in &self.tensors {
+                Self::str_bytes(&mut head, name);
+                head.extend_from_slice(&2u32.to_le_bytes());
+                head.extend_from_slice(&4096u64.to_le_bytes());
+                head.extend_from_slice(&4096u64.to_le_bytes());
+                head.extend_from_slice(&0u32.to_le_bytes());
+                head.extend_from_slice(&0u64.to_le_bytes());
+            }
             head
         }
     }
@@ -747,6 +811,58 @@ mod tests {
             with_ssm(qwen35_0_8b().bool_array("qwen35.attention.recurrent_layers", &recurrent));
         let kv = parse_head(&head).unwrap().kv_layout().unwrap();
         assert_eq!(kv.global.layers, 12);
+    }
+
+    /// `devstral-small-2:24b` as Ollama ships it: the Mistral text model, then 218
+    /// `v.*` and 4 `mm.*` tensors of a vision tower, all in the one blob.
+    fn devstral_small_2() -> Vec<u8> {
+        Builder::new()
+            .string("general.architecture", "mistral3")
+            .tensors(&[
+                "token_embd.weight",
+                "blk.0.attn_q.weight",
+                "output_norm.weight",
+                "output.weight",
+                "v.patch_embd.weight",
+                "v.blk.0.attn_q.weight",
+                "mm.1.weight",
+            ])
+            .build()
+    }
+
+    #[test]
+    fn a_vision_tower_inside_the_weights_is_counted() {
+        let md = parse_head(&devstral_small_2()).unwrap();
+        assert_eq!(md.encoder_tensors, Some(3));
+    }
+
+    /// gemma4's text model has its own oddly named tensors, and none of them is an
+    /// encoder's. Its projector ships as a separate layer, so the weights load.
+    #[test]
+    fn a_text_model_has_no_encoder_tensors() {
+        let head = Builder::new()
+            .string("general.architecture", "gemma4")
+            .tensors(&[
+                "token_embd.weight",
+                "per_layer_token_embd.weight",
+                "per_layer_model_proj.weight",
+                "rope_freqs.weight",
+                "blk.0.attn_v.weight",
+                "output_norm.weight",
+            ])
+            .build();
+        assert_eq!(parse_head(&head).unwrap().encoder_tensors, Some(0));
+    }
+
+    /// A head that stops inside the index - or before it, as an 8 MiB read of gemma4
+    /// does - must not answer zero: the encoder's tensors are the ones it did not reach.
+    #[test]
+    fn an_unfinished_index_cannot_say() {
+        let full = devstral_small_2();
+        let md = parse_head(&full[..full.len() - 4]).unwrap();
+        assert!(!md.truncated, "the metadata itself was complete");
+        assert_eq!(md.encoder_tensors, None);
+        assert_eq!(parse_head(&qwen36_27b()).unwrap().encoder_tensors, None);
     }
 
     /// The real reason this parser exists: decide from a ranged request.

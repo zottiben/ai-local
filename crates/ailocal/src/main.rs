@@ -1211,19 +1211,37 @@ fn model_files(repo: &str) -> anyhow::Result<()> {
 /// How much of a remote GGUF to read before deciding whether to download it.
 const PREFLIGHT_BYTES: u64 = 8 << 20;
 
+/// The most the preflight reads looking for the tensor index.
+///
+/// The index follows the tokeniser and chat template, so where it ends depends on the
+/// vocabulary: 6.3 MiB into `qwen3-vl:2b`, 11.4 into `qwen3.6:35b-a3b`, 15.1 into
+/// `gemma4:31b`. The read doubles from [`PREFLIGHT_BYTES`] until it gets there.
+const PREFLIGHT_MAX_BYTES: u64 = 64 << 20;
+
 /// Read a model's metadata from the network and judge whether it can run here.
+///
+/// # Errors
+/// If the file holds tensors llama.cpp will not load, unless `force` is set.
 fn preflight(
     client: &reqwest::blocking::Client,
     artifact: &ailocal::source::Artifact,
     budget: &vram::Budget,
     cache: vram::CacheType,
     weights_mib: u64,
-) -> Fit {
-    let Some(md) = download::head_bytes(client, artifact, PREFLIGHT_BYTES)
-        .ok()
-        .and_then(|head| gguf::parse_head(&head).ok())
-    else {
-        return Fit::Unknown;
+    force: bool,
+) -> anyhow::Result<Fit> {
+    let mut limit = PREFLIGHT_BYTES;
+    let md = loop {
+        let Some(md) = download::head_bytes(client, artifact, limit)
+            .ok()
+            .and_then(|head| gguf::parse_head(&head).ok())
+        else {
+            return Ok(Fit::Unknown);
+        };
+        if md.encoder_tensors.is_some() || limit >= PREFLIGHT_MAX_BYTES {
+            break md;
+        }
+        limit *= 2;
     };
 
     println!(
@@ -1232,13 +1250,23 @@ fn preflight(
         md.context_length().map_or_else(|| "?".into(), format_count)
     );
 
-    registry::assess(
+    if let Some(encoder) = md.encoder_tensors.filter(|&n| n > 0) {
+        println!(
+            "  will not load: {encoder} of its {} tensors are a vision or audio encoder\n  \
+             packed into the weights, and llama.cpp only loads one from a separate\n  \
+             mmproj file - as GGUFs converted by llama.cpp itself ship them",
+            md.tensor_count
+        );
+        anyhow::ensure!(force, "refusing to download; pass --force to override");
+    }
+
+    Ok(registry::assess(
         md.kv_layout(),
         md.context_length(),
         budget,
         cache,
         weights_mib,
-    )
+    ))
 }
 
 /// Download a model, returning the name the registry will know it by.
@@ -1279,7 +1307,7 @@ fn model_install(args: &InstallArgs) -> anyhow::Result<String> {
     // to download it.
     let budget = serve::budget_for_next_launch()
         .unwrap_or_else(|_| vram::Budget::new(ailocal::vram_used_mib().unwrap_or(900)));
-    let fit = preflight(&client, &artifact, &budget, cache, weights_mib);
+    let fit = preflight(&client, &artifact, &budget, cache, weights_mib, args.force)?;
 
     match fit {
         Fit::Unknown => println!("  could not read metadata; skipping the fit check"),
