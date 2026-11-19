@@ -156,6 +156,18 @@ All three files hold live credentials or hand-written config for other providers
 merge, never rewrite, and back up first. `pi --list-models` prints a `thinking` column
 and the context window, which verifies both in one command.
 
+**"Configured" therefore means the catalogue too, not just the credential.** Pi empties
+its own cache whenever a refresh finds nothing to list - which a gateway answers
+honestly while a download is still a `.part`, since the digest of 15 GB takes long
+enough to click something in the meantime. The credential survives that, so a check
+that reads only `auth.json` reports a harness that Pi no longer offers: measured here,
+`ailocal status` said `ok harnesses pi` and the console showed a `configured` badge
+while `pi --list-models` listed anthropic, claude-subscription and openai-codex and no
+llama.cpp at all. Worse, the badge said the same thing before and after, so the one
+button that would have fixed it looked like it did nothing. `harness::is_configured`
+requires a non-empty `models` array beside the credential, and `configure_pi` refuses
+to write an empty catalogue rather than unregistering the provider itself.
+
 Claude Code is configured by **environment**, and `ailocal harness configure claude-code`
 writes a file to `source` rather than touching `~/.claude/settings.json` - settings there
 apply to every Claude Code session on the machine, including ones meant for the real
