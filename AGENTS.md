@@ -232,8 +232,11 @@ was reused stops something the window never touched.
 Tauri reads the version from `Cargo.toml` when `tauri.conf.json` omits it - leave it
 omitted, or the `.dmg` name is a second place for the version to drift from the tag.
 macOS ad-hoc signing happens through `bundle.macOS.signingIdentity: "-"`, during
-bundling, so the signature is inside the `.dmg`; signing the `.app` afterwards signs a
-copy the installer never sees.
+bundling, so the signature is inside the `.dmg`. **Tauri deletes
+`bundle/macos/ai-local.app` once the installer is built**, so anything that touches
+the `.app` afterwards - signing it, verifying it, copying it - is working on a path
+that no longer exists. This failed a release. Mount the `.dmg` and work on the copy
+inside it, which is the one that ships.
 
 ### 9. The core binary stays small; eval and training are opt-in extras
 `ailocal` is what a fresh machine curl-pipes and what runs 24/7 under systemd. Anything

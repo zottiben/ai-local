@@ -153,10 +153,16 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           OUT="target/${{ matrix.target }}/release/bundle"
           if [ "${{ runner.os }}" = "macOS" ]; then
-            # Ad-hoc signed during bundling, by tauri.conf.json's signingIdentity, so
-            # the signature is inside the .dmg rather than applied to a copy beside it.
-            codesign --verify --deep --strict "$OUT/macos/ai-local.app"
-            mv "$OUT"/dmg/*.dmg "ai-local-desktop-v${VERSION}-${{ matrix.label }}.dmg"
+            # Verify the copy inside the .dmg, which is the one that ships. Tauri
+            # removes bundle/macos/ai-local.app once the installer is built, so the
+            # staging path is gone by now - and a signature checked there would have
+            # said nothing about what anybody downloads.
+            DMG=$(ls "$OUT"/dmg/*.dmg)
+            MOUNT=$(mktemp -d)
+            hdiutil attach -nobrowse -readonly -mountpoint "$MOUNT" "$DMG" -quiet
+            codesign --verify --deep --strict "$MOUNT/ai-local.app"
+            hdiutil detach "$MOUNT" -quiet
+            mv "$DMG" "ai-local-desktop-v${VERSION}-${{ matrix.label }}.dmg"
           else
             mv "$OUT"/appimage/*.AppImage "ai-local-desktop-v${VERSION}-${{ matrix.label }}.AppImage"
           fi
