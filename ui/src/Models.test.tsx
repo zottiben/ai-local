@@ -1,18 +1,22 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Actions } from "./hooks";
-import { CatalogueList, InstalledTable, fitLabel } from "./Models";
-import type { Candidate, Installed } from "./types";
+import { CatalogueList, InstalledTable, SearchHuggingFace, fitLabel, quantFit } from "./Models";
+import type { Candidate, Choice, Installed } from "./types";
 
 const install = vi.fn();
 const serve = vi.fn();
 const setDefault = vi.fn();
+const search = vi.fn();
+const files = vi.fn();
 vi.mock("./api", () => ({
   api: {
     install: (...args: unknown[]) => install(...args),
     serve: (...args: unknown[]) => serve(...args),
     setDefault: (...args: unknown[]) => setDefault(...args),
+    search: (...args: unknown[]) => search(...args),
+    files: (...args: unknown[]) => files(...args),
   },
 }));
 
@@ -82,6 +86,9 @@ const candidate = (overrides: Partial<Candidate>): Candidate => ({
 afterEach(() => {
   cleanup();
   for (const mock of [install, serve, setDefault]) mock.mockClear();
+  // Reset rather than clear: these are given per-test answers, and a queued `*Once`
+  // that nothing consumed would otherwise be handed to the next test.
+  for (const mock of [search, files]) mock.mockReset();
 });
 
 describe("InstalledTable", () => {
@@ -294,5 +301,165 @@ describe("the catalogue", () => {
     // because the check would otherwise refuse it.
     fireEvent.click(screen.getByLabelText("Install huge:405b"));
     expect(install).toHaveBeenLastCalledWith("ollama:huge:405b", true);
+  });
+});
+
+describe("quantFit", () => {
+  function choice(over: Partial<Choice> = {}): Choice {
+    return { path: "q4.gguf", size_mib: 8000, headroom_mib: 2000, fits: true, ...over };
+  }
+
+  it("says how much is spare, how much is over, and the gap between them", () => {
+    expect(quantFit(choice())).toBe("2.0 GiB spare");
+    expect(quantFit(choice({ headroom_mib: -3000, fits: false }))).toBe("2.9 GiB too large");
+    // Smaller than the budget and still unusable: the weights fit and the KV cache
+    // has nowhere to go. A bare "too large" would be a lie about a 500 MiB gap.
+    expect(quantFit(choice({ headroom_mib: 500, fits: false }))).toBe("no room for a context");
+  });
+});
+
+describe("SearchHuggingFace", () => {
+  const repos = [
+    { id: "unsloth/gemma-3-12b-it-GGUF", downloads: 86_188 },
+    { id: "bartowski/gemma-3-12b-GGUF", downloads: 12_000 },
+  ];
+  const quants: Choice[] = [
+    { path: "gemma-3-12b-it-BF16.gguf", size_mib: 22_449, headroom_mib: 16_863, fits: true },
+    { path: "UD-Q2_K_XL/gemma-3-12b.gguf", size_mib: 4000, headroom_mib: 35_312, fits: true },
+  ];
+
+  it("searches on submit and lists what came back", async () => {
+    search.mockResolvedValue(repos);
+    render(<SearchHuggingFace actions={spy().actions} busy={false} />);
+
+    // Nothing is asked for until there is something to ask.
+    const button = screen.getByRole("button", { name: "Search" });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("Search Hugging Face"), {
+      target: { value: "  gemma 12b  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    // Trimmed, because a trailing space is a typo rather than part of the query.
+    expect(search).toHaveBeenCalledWith("gemma 12b");
+    expect(await screen.findByText("unsloth/gemma-3-12b-it-GGUF")).toBeTruthy();
+    expect(screen.getByText("86.2K downloads")).toBeTruthy();
+  });
+
+  it("lists a repository's quants on demand and installs the one that was clicked", async () => {
+    search.mockResolvedValue(repos);
+    files.mockResolvedValue(quants);
+    const { actions } = spy();
+    render(<SearchHuggingFace actions={actions} busy={false} />);
+
+    fireEvent.change(screen.getByLabelText("Search Hugging Face"), {
+      target: { value: "gemma" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await screen.findByText("unsloth/gemma-3-12b-it-GGUF");
+
+    // The quants are not fetched until one repository is actually opened: a search
+    // answers with twenty, and listing all of them would be twenty slow requests.
+    expect(files).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByLabelText("Quants in unsloth/gemma-3-12b-it-GGUF"));
+    expect(files).toHaveBeenCalledWith("unsloth/gemma-3-12b-it-GGUF");
+
+    await screen.findByText("gemma-3-12b-it-BF16.gguf");
+    fireEvent.click(screen.getByLabelText("Install gemma-3-12b-it-BF16.gguf"));
+    expect(install).toHaveBeenLastCalledWith(
+      "hf:unsloth/gemma-3-12b-it-GGUF/gemma-3-12b-it-BF16.gguf",
+      false,
+    );
+
+    // A quant in a subdirectory keeps its directory in the reference. The repository
+    // is the first two segments, so this is still the same repository.
+    fireEvent.click(screen.getByLabelText("Install UD-Q2_K_XL/gemma-3-12b.gguf"));
+    expect(install).toHaveBeenLastCalledWith(
+      "hf:unsloth/gemma-3-12b-it-GGUF/UD-Q2_K_XL/gemma-3-12b.gguf",
+      false,
+    );
+  });
+
+  it("shows the server's own words when a repository cannot be read", async () => {
+    search.mockResolvedValue(repos);
+    files.mockRejectedValue(new Error("no repository nope/nope you can read - check the name"));
+    render(<SearchHuggingFace actions={spy().actions} busy={false} />);
+
+    fireEvent.change(screen.getByLabelText("Search Hugging Face"), {
+      target: { value: "gemma" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await screen.findByText("unsloth/gemma-3-12b-it-GGUF");
+    fireEvent.click(screen.getByLabelText("Quants in unsloth/gemma-3-12b-it-GGUF"));
+
+    expect(
+      await screen.findByText("no repository nope/nope you can read - check the name"),
+    ).toBeTruthy();
+  });
+
+  it("drops a quant list that a newer search has already replaced", async () => {
+    // The race that can actually happen. A second search cannot start while the first
+    // is in flight, because the button is disabled and says so - but nothing stops a
+    // search while a quant list is still loading, and Hugging Face is slow and
+    // variable enough from here that the slow listing then lands into a page showing
+    // somebody else's results.
+    search.mockResolvedValueOnce(repos).mockResolvedValueOnce([
+      { id: "second/answer-GGUF", downloads: 1 },
+    ]);
+    let finishListing: (value: unknown) => void = () => {};
+    files.mockImplementationOnce(() => new Promise((resolve) => (finishListing = resolve)));
+
+    render(<SearchHuggingFace actions={spy().actions} busy={false} />);
+    const box = screen.getByLabelText("Search Hugging Face");
+
+    fireEvent.change(box, { target: { value: "first" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await screen.findByText("unsloth/gemma-3-12b-it-GGUF");
+    fireEvent.click(screen.getByLabelText("Quants in unsloth/gemma-3-12b-it-GGUF"));
+
+    fireEvent.change(box, { target: { value: "second" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await screen.findByText("second/answer-GGUF");
+
+    finishListing(quants);
+    await waitFor(() =>
+      expect(screen.queryByText("gemma-3-12b-it-BF16.gguf")).toBeNull(),
+    );
+  });
+
+  it("says it is searching, and will not start a second one meanwhile", async () => {
+    let finish: (value: unknown) => void = () => {};
+    search.mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)));
+    render(<SearchHuggingFace actions={spy().actions} busy={false} />);
+
+    fireEvent.change(screen.getByLabelText("Search Hugging Face"), {
+      target: { value: "gemma" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    const button = await screen.findByRole("button", { name: "Searching" });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+
+    finish(repos);
+    await screen.findByText("unsloth/gemma-3-12b-it-GGUF");
+    expect((screen.getByRole("button", { name: "Search" }) as HTMLButtonElement).disabled).toBe(
+      false,
+    );
+  });
+
+  it("says why a shard-only repository looks empty", async () => {
+    search.mockResolvedValue([repos[0]]);
+    files.mockResolvedValue([]);
+    render(<SearchHuggingFace actions={spy().actions} busy={false} />);
+
+    fireEvent.change(screen.getByLabelText("Search Hugging Face"), {
+      target: { value: "deepseek" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await screen.findByText("unsloth/gemma-3-12b-it-GGUF");
+    fireEvent.click(screen.getByLabelText("Quants in unsloth/gemma-3-12b-it-GGUF"));
+
+    expect(await screen.findByText(/No single-file GGUF here/)).toBeTruthy();
   });
 });

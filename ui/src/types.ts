@@ -224,6 +224,25 @@ export interface Candidate {
   fits: boolean;
 }
 
+/** `source::Repo`: a Hugging Face repository with GGUF files in it. */
+export interface Repo {
+  id: string;
+  downloads: number;
+}
+
+/**
+ * `source::Choice`: one quant in a repository, measured against this machine.
+ *
+ * Same shape of answer as a `Candidate`, for the same reason: `fits` is the library's
+ * line, not one this page redraws from `headroom_mib`.
+ */
+export interface Choice {
+  path: string;
+  size_mib: number;
+  headroom_mib: number;
+  fits: boolean;
+}
+
 /** `models::Downloaded`: an installed model the picker offers. */
 export interface Downloaded {
   name: string;

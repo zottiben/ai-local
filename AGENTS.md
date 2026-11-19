@@ -238,6 +238,20 @@ the `.app` afterwards - signing it, verifying it, copying it - is working on a p
 that no longer exists. This failed a release. Mount the `.dmg` and work on the copy
 inside it, which is the one that ships.
 
+### 8c. A repository listing is not a list of models
+Hugging Face lists everything in the repository, and two kinds of `.gguf` in it cannot
+be loaded as a model: **split shards** (`...-00002-of-00003.gguf`) and **multimodal
+projectors** (`mmproj-*.gguf`, the vision tower served alongside a model via
+`--mmproj`). `source::files` drops both. A projector is the dangerous one - it is a
+few hundred MiB, so it sorts to the row with the most headroom and reads as the safest
+choice in the list.
+
+A Hugging Face repository id is always exactly two segments, so `hf:` references split
+from the **left** at two, not from the right at the last slash. Listings are recursive
+and a quant can sit in a subdirectory: `hf:owner/repo/UD-Q2_K_XL/model.gguf` is that
+repository and that path, not a repository called `owner/repo/UD-Q2_K_XL`. The name on
+disk is the last segment only.
+
 ### 9. The core binary stays small; eval and training are opt-in extras
 `ailocal` is what a fresh machine curl-pipes and what runs 24/7 under systemd. Anything
 occasional or heavy is a separate binary in `crates/ailocal-<name>`, released from the

@@ -26,6 +26,20 @@ export function formatCount(n: number): string {
   return n >= 1024 && n % 1024 === 0 ? `${n / 1024}k` : String(n);
 }
 
+/**
+ * A download count, compactly: `86188` -> `86.2K`, `7298936` -> `7.3M`.
+ *
+ * Not [`formatCount`], which abbreviates only exact multiples of 1024 because a
+ * context length is a power of two. Downloads are a decimal quantity and reach the
+ * millions, and seven digits in a row of metadata is noise rather than information:
+ * nobody is comparing 7,298,936 against 7,298,940.
+ */
+export function formatDownloads(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
+  return String(n);
+}
+
 /** `7039` MiB -> `6.9 GiB`. MiB below a GiB, because `0 GiB` is the wrong impression. */
 export function formatSize(mib: number): string {
   return mib >= 1024 ? `${(mib / 1024).toFixed(1)} GiB` : `${mib} MiB`;

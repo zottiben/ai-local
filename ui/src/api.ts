@@ -7,6 +7,7 @@
 
 import type {
   Applied,
+  Choice,
   Config,
   DefaultChange,
   GatewayCheck,
@@ -22,6 +23,7 @@ import type {
   Overview,
   Removal,
   Removed,
+  Repo,
   Services,
   ServicesInstalled,
   SettingsPatch,
@@ -91,6 +93,8 @@ export const api = {
   overview: () => request<Overview>("/overview"),
   models: () => request<Installed[]>("/models"),
   catalogue: () => request<Offer>("/catalogue"),
+  search: (query: string) => request<Repo[]>(`/search?q=${encodeURIComponent(query)}`),
+  files: (repo: string) => request<Choice[]>(`/files?repo=${encodeURIComponent(repo)}`),
   config: () => request<Config>("/config"),
   loaded: () => request<Instance | null>("/loaded"),
   memory: () => request<Memory | null>("/loaded/memory"),
