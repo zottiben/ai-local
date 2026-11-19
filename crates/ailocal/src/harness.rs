@@ -84,15 +84,48 @@ pub const NAMES: [&str; 2] = ["pi", "claude-code"];
 #[must_use]
 pub fn is_configured(name: &str) -> bool {
     match name {
-        "pi" => pi_auth_path().is_ok_and(|path| {
-            std::fs::read_to_string(path)
-                .ok()
-                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-                .is_some_and(|json| json.get(PI_PROVIDER_ID).is_some())
-        }),
+        "pi" => {
+            let read = |path: anyhow::Result<PathBuf>| {
+                path.ok().and_then(|p| std::fs::read_to_string(p).ok())
+            };
+            pi_is_registered(
+                read(pi_auth_path()).as_deref(),
+                read(pi_models_store_path()).as_deref(),
+            )
+        }
         "claude-code" => claude_code_env_path().is_ok_and(|path| path.is_file()),
         _ => false,
     }
+}
+
+/// Whether Pi would really offer our provider, from the text of its two cached files.
+///
+/// The credential alone is not enough, which is the whole reason three files are
+/// written: Pi builds its provider registry from the catalogue, so a credential beside
+/// an empty `models` array leaves `--provider llama.cpp` failing with "Unknown
+/// provider". Measured here with exactly that pair on disk: `pi --list-models` listed
+/// anthropic, claude-subscription and openai-codex and no llama.cpp at all.
+///
+/// Reading only the credential is what let `ailocal status` report `ok harnesses pi`
+/// and the console show a `configured` badge while Pi had no such provider - so
+/// re-running configure looked like it did nothing, because the badge said the same
+/// thing before and after.
+///
+/// Takes the file contents rather than reading them, so the pairing can be tested
+/// without a `$HOME` full of someone's real credentials.
+fn pi_is_registered(auth: Option<&str>, store: Option<&str>) -> bool {
+    let provider = |text: Option<&str>| {
+        text.and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+            .and_then(|json| json.get(PI_PROVIDER_ID).cloned())
+    };
+
+    provider(auth).is_some()
+        && provider(store).is_some_and(|entry| {
+            entry
+                .get("models")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|models| !models.is_empty())
+        })
 }
 
 /// The harnesses already pointed at us.
@@ -327,6 +360,30 @@ pub fn normalize_base_url(url: &str) -> String {
 /// # Errors
 /// If a file cannot be read, is not a JSON object, or cannot be written.
 pub fn configure_pi(base_url: &str, api_key: &str, models: &[PiModel]) -> anyhow::Result<Outcome> {
+    // An empty catalogue does not mean "a provider with no models yet". Pi builds its
+    // provider registry from this file, so writing `models: []` *unregisters*
+    // llama.cpp: measured here, `pi --list-models` listed anthropic,
+    // claude-subscription and openai-codex and no llama.cpp at all, and listed it
+    // again the moment one entry was restored. Writing it is worse than refusing,
+    // because the credential still lands and the harness then reports itself
+    // configured while `--provider llama.cpp` fails with "Unknown provider".
+    //
+    // The way to arrive here with a model on the way is the reason this is a refusal
+    // rather than a debug assertion: a download is a `.part` until its digest checks
+    // out, `registry::scan` only counts a `.gguf`, and verifying 15 GB takes long
+    // enough to click something. That is what happened here - the last byte landed at
+    // 14:41:54, the harness was configured at 14:42:42 while the file was still being
+    // read back, and Pi lost the provider.
+    if models.is_empty() {
+        return Err(crate::Refused::Missing(
+            "no model is ready to offer pi yet - one still downloading or verifying \
+             does not count, and `ailocal model ls` shows whether the ones already \
+             here fit the memory budget"
+                .to_owned(),
+        )
+        .into());
+    }
+
     let credential = merge_json(
         &pi_auth_path()?,
         PI_PROVIDER_ID,
@@ -677,6 +734,54 @@ fn write_atomically(path: &Path, contents: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// The state this machine was actually left in: a credential naming llama.cpp
+    /// beside a catalogue Pi had emptied. `ailocal status` said `ok harnesses pi` and
+    /// the console showed `configured`, while `pi --list-models` offered anthropic,
+    /// claude-subscription and openai-codex and no llama.cpp - so the one button that
+    /// would have fixed it looked like it was already done.
+    #[test]
+    fn a_credential_without_a_catalogue_is_not_configured() {
+        let auth = r#"{"llama.cpp": {"type": "api_key", "key": "k"}}"#;
+        assert!(
+            !super::pi_is_registered(Some(auth), Some(r#"{"llama.cpp": {"models": []}}"#)),
+            "an empty catalogue unregisters the provider, so this is not configured"
+        );
+        assert!(
+            !super::pi_is_registered(Some(auth), None),
+            "no catalogue at all is the case the credential alone never covered"
+        );
+        assert!(
+            super::pi_is_registered(
+                Some(auth),
+                Some(r#"{"llama.cpp": {"models": [{"id": "qwen3.8-27b"}]}}"#)
+            ),
+            "one entry is what brought the provider back"
+        );
+        assert!(
+            !super::pi_is_registered(None, Some(r#"{"llama.cpp": {"models": [{"id": "x"}]}}"#)),
+            "a catalogue without the credential cannot authenticate"
+        );
+    }
+
+    /// Pi registers its providers from this catalogue, so an empty one removes
+    /// llama.cpp rather than leaving it empty. Measured: with `models: []`,
+    /// `pi --list-models` showed anthropic, claude-subscription and openai-codex and
+    /// no llama.cpp; restoring one entry brought it back. Refusing keeps the harness
+    /// honestly unconfigured instead of configured-but-broken, and never touches the
+    /// files - the credential must not land on its own either.
+    #[test]
+    fn an_empty_catalogue_is_refused_rather_than_written() {
+        let err = super::configure_pi("http://127.0.0.1:8081", "key", &[]).unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::Refused>().is_some(),
+            "the caller can fix this, so it is a refusal: {err}"
+        );
+        assert!(
+            err.to_string().contains("downloading or verifying"),
+            "{err}"
+        );
+    }
+
     /// The bug this ordering exists to fix: `gemma4` sorts before `qwen3`, so taking
     /// the first installed model pinned Claude Code to a model the user never chose.
     #[test]
