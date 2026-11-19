@@ -1,6 +1,16 @@
 [workspace]
 resolver = "3"
-members = ["crates/ailocal", "crates/ailocal-eval", "crates/ailocal-ui"]
+members = [
+    "crates/ailocal",
+    "crates/ailocal-eval",
+    "crates/ailocal-ui",
+    "crates/ailocal-desktop",
+]
+# The desktop app is a member so one `cargo fmt` and one lock file cover it, but not a
+# default member: a webview is minutes of build time and a pile of system libraries,
+# and nobody editing serve.rs should pay for it (D8). Every gate that is not about the
+# window therefore omits `--workspace`, which is what makes this list mean anything.
+default-members = ["crates/ailocal", "crates/ailocal-eval", "crates/ailocal-ui"]
 
 [workspace.package]
 edition = "2024"

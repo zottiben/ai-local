@@ -25,6 +25,7 @@ use tokio::net::TcpListener;
 use crate::state::AppState;
 
 pub use auth::{TOKEN_HEADER, TOKEN_QUERY};
+pub use jobs::stop_owned_model;
 
 /// Whether a real frontend was compiled in, rather than the page explaining that it
 /// was not.

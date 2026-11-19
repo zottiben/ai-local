@@ -59,14 +59,44 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
+      # No --workspace: that would select the desktop app too, and a webview build
+      # has nothing to say about serve.rs. It gets its own job below.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test
 
       - name: Build
-        run: cargo build --workspace --release
+        run: cargo build --release
+
+  # The desktop app, on both platforms, because release.yml bundles a .dmg and an
+  # AppImage from this same source and a Linux break found at tag time is found too
+  # late. Clippy rather than a bundle: this job is about the code compiling against
+  # each platform's webview, not about producing an installer.
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-26]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-workspaces: .
+
+      # Tauri draws through WebKitGTK on Linux. macOS has WKWebView in the system.
+      - name: Linux webview libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Clippy
+        run: cargo clippy -p ailocal-desktop --all-targets -- -D warnings
 
   # The bench scripts encode the VRAM ceiling that keeps this machine alive.
   # A syntax error in them is a real outage, so they get parsed too.
@@ -82,7 +112,7 @@ jobs:
           sh -n install.sh
 
       - name: Python syntax
-        run: python3 -m py_compile scripts/bench/*.py
+        run: python3 -m py_compile scripts/*.py scripts/bench/*.py
 
       - name: Shellcheck
         run: |

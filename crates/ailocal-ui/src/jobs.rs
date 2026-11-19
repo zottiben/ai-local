@@ -10,7 +10,7 @@
 //! sooner, and two models cannot share the budget - starting a second would evict the
 //! first.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -410,11 +410,39 @@ fn load(job: &Handle, name: String) -> anyhow::Result<Instance> {
     });
 
     let (instance, mut child) = prepared.start_owned()?;
+    OURS.store(instance.pid, Ordering::Relaxed);
     // This process goes on running, so the server is its child until it exits, and an
     // exited child nobody waits on is a zombie that `kill(pid, 0)` still answers for
     // (D9). Waiting is all this thread does; the server's record is the library's.
     std::thread::spawn(move || child.wait());
     Ok(instance)
+}
+
+/// The pid of the last model this process started, or 0.
+///
+/// A process id, not a flag: between starting one and quitting, the model may have
+/// been stopped and another started from a terminal, and killing that one on the way
+/// out would stop something this window never touched.
+static OURS: AtomicU32 = AtomicU32::new(0);
+
+/// Stop a model this process started, if it is still the one that is running.
+///
+/// `ailocal ui` never needs this: a terminal delivers Ctrl-C to the whole process
+/// group, and the model is in it. The desktop app has no terminal to deliver that
+/// signal, so quitting the window has to do it (D9) - otherwise closing the window
+/// leaves gigabytes resident with nothing left on screen to stop them.
+///
+/// # Errors
+/// If the running instance cannot be read or the process cannot be signalled.
+pub fn stop_owned_model() -> anyhow::Result<Option<Instance>> {
+    let ours = OURS.load(Ordering::Relaxed);
+    if ours == 0 {
+        return Ok(None);
+    }
+    match serve::running()? {
+        Some(instance) if instance.pid == ours => serve::stop(),
+        _ => Ok(None),
+    }
 }
 
 /// A download's progress, recorded on its job.
@@ -463,6 +491,34 @@ impl Progress for Reporter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Quitting stops only a model this process started and still owns.
+    ///
+    /// One test rather than two, because `OURS` is a static that the whole test
+    /// binary shares: two tests asserting on it race each other, and the second one
+    /// to run sees whatever the first left.
+    ///
+    /// Both halves matter. The window is one of several ways to start a model, and
+    /// the common case on a fresh console is that it started none - at which point
+    /// the only safe answer is to leave whatever is resident alone. And between
+    /// starting one and quitting, it can be stopped and another started from a
+    /// terminal, so the pid it recorded names either nothing or, once the number is
+    /// reused, something else entirely.
+    #[test]
+    fn only_a_model_this_process_still_owns_is_stopped_on_the_way_out() {
+        assert_eq!(OURS.load(Ordering::Relaxed), 0, "no test starts a model");
+        assert!(stop_owned_model().unwrap().is_none());
+
+        // 1 is init on both platforms, so it is certainly running and certainly not a
+        // model this process started.
+        OURS.store(1, Ordering::Relaxed);
+        let left_alone = stop_owned_model().unwrap();
+        OURS.store(0, Ordering::Relaxed);
+        assert!(
+            left_alone.is_none(),
+            "stopped a model that was not the one we started"
+        );
+    }
 
     /// A second install is turned away while the first runs, but a model can load
     /// meanwhile - and once the install has finished, the next one may start.

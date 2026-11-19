@@ -108,6 +108,7 @@ desktop session dies.
 | `ailocal extras list` / `install <name>` | optional companions, see below |
 | `ailocal eval run` | score a model on a coding suite (needs the `eval` extra) |
 | `ailocal ui` | a console for all of the above, in the browser (needs the `ui` extra) |
+| the `ai-local` app | the same console as a desktop app, from the release page |
 
 ## Choosing a model
 
@@ -441,6 +442,23 @@ It listens on 127.0.0.1 only, and every request needs the token in the link it p
 The token is new each run and never written down, so a tab from an earlier run is
 turned away rather than left talking to whatever now holds the port. There is no flag
 to listen anywhere else.
+
+#### The same window, without a terminal
+
+The release page carries `ai-local-desktop-<version>-macos-arm64.dmg` and
+`ai-local-desktop-<version>-linux-x86_64.AppImage`: the console as an app you open.
+It runs the same server in its own process, on a port the OS picks, and points a
+webview at it - one frontend and one API, so the window and the terminal can only
+disagree about chrome. It remembers its size and position between runs.
+
+The app is ad-hoc signed, not notarised, so the first open from a browser download
+needs a right-click and **Open** (macOS offers no other way past an unidentified
+developer). A `curl` download carries no quarantine attribute and opens normally.
+
+One thing it does that `ailocal ui` does not: a model started from the window is
+stopped when you quit it. A terminal delivers Ctrl-C to the whole process group, and
+the model is in it; a window has no such signal to pass on, so closing it would
+otherwise leave gigabytes resident with nothing on screen to stop them.
 
 `EMPTY` and `CUT` are there because reasoning models fail in a way a score alone hides:
 chain-of-thought goes to `reasoning_content` and `content` stays empty until it is done,

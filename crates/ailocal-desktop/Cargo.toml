@@ -1,0 +1,27 @@
+[package]
+name = "ailocal-desktop"
+version = "0.6.3"
+description = "The ai-local console as a desktop app"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ailocal-desktop"
+path = "src/main.rs"
+
+[dependencies]
+ailocal = { path = "../ailocal" }
+ailocal-ui = { path = "../ailocal-ui" }
+anyhow.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-window-state = "2"
+tokio.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[lints]
+workspace = true

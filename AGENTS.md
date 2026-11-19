@@ -28,6 +28,10 @@ Inference is llama.cpp's `llama-server`, Vulkan backend. Models are GGUF from Hu
 - Run it 24/7: `ailocal service install`, then `ailocal service status`
 - Score a model: `ailocal extras install eval`, then `ailocal eval run`
 - Open the console: `ailocal extras install ui`, then `ailocal ui`
+- Build the desktop app: `cd crates/ailocal-desktop && npx @tauri-apps/cli@^2 build`
+  (`--no-bundle` for just the binary). It is a workspace member but **not** a default
+  member, so plain `cargo build` / `clippy` / `test` skip it - that is deliberate, and
+  why those commands must not be given `--workspace`
 - After editing `ui/src`: `cd ui && npm ci && npm run build`. `ui/dist` is committed and
   compiled into `ailocal-ui`; CI fails if it is not what the sources build
 - Check a model's real context limit: `scripts/bench/ctx_probe.sh <model.gguf> q8_0`
@@ -208,6 +212,28 @@ Codebase knowledge is a retrieval problem, not a QLoRA problem. An adapter train
 repo produces confident wrong API signatures and is stale on the next commit. No
 fine-tuning lands before the eval harness can prove it helped - it exists now, as the
 `eval` extra, and `held-out` is the split an adapter must be measured on.
+
+### 8b. The desktop app is a shell, and it owns what it starts
+`crates/ailocal-desktop` runs the same `ailocal_ui::Server` in its own process and
+points a webview at it. There is no second frontend and no second API - a feature
+lands in `ui/src` and both surfaces have it.
+
+It is a workspace member but not a *default* member, so `cargo build`, `clippy` and
+`test` skip the webview unless asked for it by `-p ailocal-desktop`. Adding
+`--workspace` back to those gates undoes that and costs every build minutes.
+
+**A model started from the window has to be stopped when the window closes.** A
+terminal delivers Ctrl-C to the whole process group and the model is in it; a window
+has no such signal, so `RunEvent::Exit` calls `ailocal_ui::stop_owned_model`. That
+compares the recorded pid against the running instance rather than trusting a flag,
+because the model can be replaced from a terminal in between and killing a pid that
+was reused stops something the window never touched.
+
+Tauri reads the version from `Cargo.toml` when `tauri.conf.json` omits it - leave it
+omitted, or the `.dmg` name is a second place for the version to drift from the tag.
+macOS ad-hoc signing happens through `bundle.macOS.signingIdentity: "-"`, during
+bundling, so the signature is inside the `.dmg`; signing the `.app` afterwards signs a
+copy the installer never sees.
 
 ### 9. The core binary stays small; eval and training are opt-in extras
 `ailocal` is what a fresh machine curl-pipes and what runs 24/7 under systemd. Anything
