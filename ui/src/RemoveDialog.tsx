@@ -10,6 +10,7 @@ import { useEffect, useState } from "react";
 
 import { api } from "./api";
 import { describeRemoved, formatSize, tilde } from "./format";
+import { Ticks } from "./Ticks";
 import { useResource } from "./hooks";
 import type { Removed } from "./types";
 
@@ -120,7 +121,9 @@ function Outcome({ removed, name }: { removed: Removed; name: string }) {
       {lines.length > 0 && (
         <ul className="actions">
           {lines.map((line) => (
-            <li key={line}>{line}</li>
+            <li key={line}>
+              <Ticks>{line}</Ticks>
+            </li>
           ))}
         </ul>
       )}

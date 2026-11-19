@@ -6,23 +6,36 @@
 //! the CLI would print it, with the whole chain of causes, because the window shows the
 //! message as written.
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// An error as `{e:#}`: the message and every cause, on one line.
-pub(crate) fn error<S: Serializer>(e: &anyhow::Error, serializer: S) -> Result<S::Ok, S::Error> {
+pub fn error<S: Serializer>(e: &anyhow::Error, serializer: S) -> Result<S::Ok, S::Error> {
     serializer.collect_str(&format_args!("{e:#}"))
 }
 
 /// A result as its value when it succeeded, and as `{"error": "..."}` when it did not.
-pub(crate) fn result<T: Serialize, S: Serializer>(
+pub fn result<T: Serialize, S: Serializer>(
     result: &anyhow::Result<T>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     Answer(result).serialize(serializer)
 }
 
+/// Tell a field that was left out from one that was sent as `null`.
+///
+/// A settings patch means two different things by them - leave this alone, and clear
+/// it - and a plain `Option` collapses both to `None`. With `#[serde(default)]` this
+/// gives `None` for absent, `Some(None)` for null, and `Some(Some(v))` for a value.
+pub fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer).map(Some)
+}
+
 /// [`result`], or `null` for a step that was not taken at all.
-pub(crate) fn optional_result<T: Serialize, S: Serializer>(
+pub fn optional_result<T: Serialize, S: Serializer>(
     result: &Option<anyhow::Result<T>>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {

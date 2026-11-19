@@ -5,6 +5,7 @@
 // it, so the two never describe the same machine differently.
 
 import type {
+  Applied,
   Check,
   Failed,
   Gateway,
@@ -13,9 +14,11 @@ import type {
   Meta,
   NextStep,
   Removed,
+  Probe,
   Repoint,
   Service,
   Thinking,
+  Trouble,
 } from "./types";
 
 /** `131072` -> `128k`, as `model ls` prints a context. An odd size is printed whole. */
@@ -87,8 +90,22 @@ export interface Step {
 }
 
 /** What `NextStep::describe` says, laid out for a panel. `null` when nothing is missing. */
-export function describeStep(next: NextStep, meta: Pick<Meta, "log_hint" | "harnesses">): Step | null {
+export function describeStep(
+  next: NextStep,
+  meta: Pick<Meta, "log_hint" | "harnesses">,
+  llamaServer?: string | null,
+): Step | null {
   switch (next) {
+    case "install_llama_server":
+      return {
+        title: "Install llama.cpp",
+        // Rule 6: installing it needs root, so the command is handed over rather
+        // than offered as a button that would only fail at the password prompt.
+        commands: ["brew install llama.cpp", "sudo pacman -Syu llama-cpp ggml-vulkan"],
+        why:
+          llamaServer ??
+          "Nothing can serve without it: llama-server is what loads a model and answers.",
+      };
     case "install_model":
       return {
         title: "Choose a model for this machine",
@@ -263,4 +280,60 @@ export function describeRemoved(removed: Removed, name: string): string[] {
 export function tilde(path: string): string {
   const home = /^(\/(?:Users|home)\/[^/]+)(?=\/|$)/.exec(path)?.[1];
   return home ? `~${path.slice(home.length)}` : path;
+}
+
+/** Why nothing answers as a gateway, and what fixes it. `null` when it answers. */
+export function describeTrouble(trouble: Trouble | null): { what: string; fix: string } | null {
+  if (trouble === null) return null;
+  if (trouble === "not_running") {
+    return {
+      what: "The gateway is not running.",
+      fix: "Install the services below, or run `ailocal gateway run` in a terminal.",
+    };
+  }
+  if ("port_taken" in trouble) {
+    return {
+      what: "Something that is not ailocal holds that port, so the gateway cannot start.",
+      fix: `Move it to ${trouble.port_taken.free}, which is free.`,
+    };
+  }
+  return {
+    what: `The service is running, but not on port ${trouble.wrong_port.expected}.`,
+    // The unit bakes the port into its ExecStart, which is what a hand-edited config
+    // leaves stale.
+    fix: "If you changed the port, the unit still has the old one. Reinstall the services.",
+  };
+}
+
+/** One line of `gateway check`: what it asserted, and what answered. */
+export function describeProbe(probe: Probe): { ok: boolean; said: string } {
+  const failed = failure(probe.got);
+  if (failed !== null) return { ok: false, said: failed };
+  return {
+    ok: probe.got === probe.expected,
+    said: probe.got === probe.expected ? `${probe.got}` : `got ${probe.got}, expected ${probe.expected}`,
+  };
+}
+
+/** The settings a change wrote, and what it means for what is already running. */
+export function describeApplied(applied: Applied): string[] {
+  if (applied.changed.length === 0) return ["Nothing changed - those are the settings already."];
+
+  const lines = [`Saved ${applied.changed.join(", ")}.`];
+  const restart = applied.gateway_restarted;
+  if (restart !== null) {
+    const failed = failure(restart);
+    lines.push(failed === null ? "Restarted the gateway on the new port." : `The gateway could not be restarted: ${failed}`);
+  }
+  // A resident model keeps the context it was launched with, so the catalogue would
+  // otherwise advertise one number while the server serves another.
+  if (applied.reload_model !== null) {
+    lines.push(`${applied.reload_model} is loaded with the old context. Reload it to pick this up.`);
+  } else if (applied.changed.includes("max_context")) {
+    lines.push("Takes effect the next time a model loads.");
+  }
+  if (applied.repoint_harnesses) {
+    lines.push("Harnesses keep the old URL. Configure them again below.");
+  }
+  return lines;
 }

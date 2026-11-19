@@ -19,11 +19,37 @@ pub mod prompt;
 pub mod registry;
 pub mod serve;
 pub mod service;
+pub mod setup;
 pub mod source;
 pub mod status;
 pub mod update;
 pub mod vram;
-mod wire;
+pub mod wire;
+
+/// A failure the caller caused, as opposed to one the machine did.
+///
+/// Both read the same from a terminal, where every failure is a line of text and a
+/// non-zero exit. Over HTTP they are different answers, and a console that shows
+/// "internal error" for a context someone typed too small is blaming itself for a
+/// typo. Carried through `anyhow` and recovered by downcast, so a library call keeps
+/// one return type and callers that do not care are unaffected.
+#[derive(Debug)]
+pub enum Refused {
+    /// The caller named something that is not here.
+    Missing(String),
+    /// The caller's value is one we will not take.
+    Invalid(String),
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing(message) | Self::Invalid(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for Refused {}
 
 /// Free space on the filesystem holding `path`, in MiB.
 ///
@@ -178,6 +204,14 @@ const LLAMA_SERVER_DIRS: [&str; 4] = [
 ///
 /// # Errors
 /// If it is on neither `PATH` nor any of the usual install directories.
+/// The exact commands that install llama.cpp, for a person to run.
+///
+/// Rule 6: installing it needs root, so it is handed over rather than attempted. Static
+/// text, because it is also shown on a machine that already has llama.cpp - working out
+/// the message from a failed lookup panics there.
+pub const LLAMA_SERVER_INSTALL: &str =
+    "macOS: `brew install llama.cpp`; Arch: `sudo pacman -Syu llama-cpp ggml-vulkan`";
+
 pub fn llama_server() -> anyhow::Result<std::path::PathBuf> {
     static CACHE: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
 
@@ -187,8 +221,7 @@ pub fn llama_server() -> anyhow::Result<std::path::PathBuf> {
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "llama-server not found - not on PATH, and not in {} or ~/.local/bin. \
-                 Install llama.cpp (macOS: `brew install llama.cpp`; Arch: \
-                 `sudo pacman -Syu llama-cpp ggml-vulkan`)",
+                 Install llama.cpp ({LLAMA_SERVER_INSTALL})",
                 LLAMA_SERVER_DIRS.join(", ")
             )
         })

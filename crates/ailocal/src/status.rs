@@ -27,6 +27,10 @@ pub struct Overview {
     pub services: Vec<(&'static str, Service)>,
     /// Harnesses already pointed at the gateway.
     pub harnesses: Vec<&'static str>,
+    /// Why llama.cpp could not be found, with the exact command that installs it.
+    /// `None` when it is there. Nothing can serve without it, so this is the first
+    /// thing a fresh machine is missing and the last thing the ladder used to mention.
+    pub llama_server: Option<String>,
     pub next: NextStep,
 }
 
@@ -55,6 +59,7 @@ pub enum Service {
 /// point of asking is to find the broken link, and an error would hide the rest.
 #[must_use]
 pub fn overview(cfg: &Config) -> Overview {
+    let llama_server = crate::llama_server().err().map(|e| format!("{e:#}"));
     let models = runnable_models(cfg).unwrap_or_default();
     let loaded = serve::running().ok().flatten();
     let gateway = gateway_state(cfg);
@@ -63,6 +68,7 @@ pub fn overview(cfg: &Config) -> Overview {
     let harnesses = harness::configured();
 
     let next = NextStep::from_state(
+        llama_server.is_none(),
         !models.is_empty(),
         gateway == Gateway::Answering,
         services
@@ -84,6 +90,7 @@ pub fn overview(cfg: &Config) -> Overview {
         advertised,
         services,
         harnesses,
+        llama_server,
         next,
     }
 }
@@ -209,6 +216,8 @@ pub fn advertised_models(cfg: &Config) -> anyhow::Result<Vec<String>> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NextStep {
+    /// llama.cpp is not installed, so nothing can serve at all.
+    InstallLlamaServer,
     InstallModel,
     /// Nothing is serving, and no service exists to do it.
     StartGateway,
@@ -223,11 +232,15 @@ impl NextStep {
     /// Decide from the parts rather than by probing, so this is testable.
     #[must_use]
     pub const fn from_state(
+        has_llama_server: bool,
         has_model: bool,
         gateway_answering: bool,
         service_installed: bool,
         harness_configured: bool,
     ) -> Self {
+        if !has_llama_server {
+            return Self::InstallLlamaServer;
+        }
         if !has_model {
             return Self::InstallModel;
         }
@@ -248,6 +261,11 @@ impl NextStep {
     #[must_use]
     pub fn describe(&self) -> Option<String> {
         Some(match self {
+            Self::InstallLlamaServer => format!(
+                "Next: install llama.cpp - nothing can serve without it.\n\
+                 \x20     {}",
+                crate::LLAMA_SERVER_INSTALL
+            ),
             Self::InstallModel => {
                 "Next: ailocal model pick   (choose a model for this machine)".to_owned()
             }
@@ -272,6 +290,7 @@ impl NextStep {
 #[must_use]
 pub fn next_step(cfg: &Config) -> NextStep {
     NextStep::from_state(
+        crate::llama_server().is_ok(),
         runnable_models(cfg).is_ok_and(|m| !m.is_empty()),
         gateway::answers_as_gateway(&cfg.gateway_host, cfg.gateway_port),
         service::is_enabled(service::GATEWAY) || service::is_active(service::GATEWAY),
@@ -283,23 +302,40 @@ pub fn next_step(cfg: &Config) -> NextStep {
 mod tests {
     use super::*;
 
+    /// Without llama.cpp nothing can serve, so no later rung is reachable - and the
+    /// ladder used to skip straight to "choose a model", which downloads gigabytes
+    /// that then cannot be loaded.
+    #[test]
+    fn nothing_outranks_a_missing_llama_cpp() {
+        assert_eq!(
+            NextStep::from_state(false, true, true, true, true),
+            NextStep::InstallLlamaServer
+        );
+        // Rule 6: the step hands over the exact command rather than describing it.
+        let advice = NextStep::from_state(false, false, false, false, false)
+            .describe()
+            .unwrap();
+        assert!(advice.contains("brew install llama.cpp"), "got: {advice}");
+        assert!(advice.contains("pacman -Syu"), "got: {advice}");
+    }
+
     /// The exact sequence a fresh machine walks, in order.
     #[test]
     fn the_next_step_follows_the_setup_sequence() {
         assert_eq!(
-            NextStep::from_state(false, false, false, false),
+            NextStep::from_state(true, false, false, false, false),
             NextStep::InstallModel
         );
         assert_eq!(
-            NextStep::from_state(true, false, false, false),
+            NextStep::from_state(true, true, false, false, false),
             NextStep::StartGateway
         );
         assert_eq!(
-            NextStep::from_state(true, true, true, false),
+            NextStep::from_state(true, true, true, true, false),
             NextStep::ConfigureHarness
         );
         assert_eq!(
-            NextStep::from_state(true, true, true, true),
+            NextStep::from_state(true, true, true, true, true),
             NextStep::Ready
         );
     }
@@ -309,7 +345,7 @@ mod tests {
     /// "Connection error" at the first prompt.
     #[test]
     fn a_model_without_a_gateway_does_not_send_you_to_the_harness() {
-        let step = NextStep::from_state(true, false, false, false);
+        let step = NextStep::from_state(true, true, false, false, false);
         assert_ne!(step, NextStep::ConfigureHarness);
         let advice = step.describe().unwrap();
         assert!(advice.contains("service install"), "got: {advice}");
@@ -320,11 +356,11 @@ mod tests {
     #[test]
     fn a_dead_gateway_outranks_an_already_configured_harness() {
         assert_eq!(
-            NextStep::from_state(true, false, true, true),
+            NextStep::from_state(true, true, false, true, true),
             NextStep::FixGateway
         );
         assert_eq!(
-            NextStep::from_state(true, false, false, true),
+            NextStep::from_state(true, true, false, false, true),
             NextStep::StartGateway
         );
     }
@@ -333,10 +369,10 @@ mod tests {
     /// command to run, the other is a log to read.
     #[test]
     fn a_missing_service_and_a_broken_one_are_told_apart() {
-        let missing = NextStep::from_state(true, false, false, false)
+        let missing = NextStep::from_state(true, true, false, false, false)
             .describe()
             .unwrap();
-        let broken = NextStep::from_state(true, false, true, false)
+        let broken = NextStep::from_state(true, true, false, true, false)
             .describe()
             .unwrap();
         assert!(missing.contains("service install"), "got: {missing}");
@@ -362,6 +398,7 @@ mod tests {
                 .context("asking http://127.0.0.1:8081/v1/models"))),
             services: vec![(service::GATEWAY, Service::InstalledNotRunning)],
             harnesses: vec!["pi"],
+            llama_server: None,
             next: NextStep::FixGateway,
         };
 
@@ -386,7 +423,7 @@ mod tests {
     #[test]
     fn a_ready_machine_is_told_nothing() {
         assert!(
-            NextStep::from_state(true, true, true, true)
+            NextStep::from_state(true, true, true, true, true)
                 .describe()
                 .is_none()
         );

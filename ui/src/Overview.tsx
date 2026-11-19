@@ -9,7 +9,8 @@ import {
   serviceShortName,
   tilde,
 } from "./format";
-import { useResource } from "./hooks";
+import { useActions, useResource } from "./hooks";
+import { type View, navigate } from "./router";
 import type { Config, Meta, Overview as OverviewData } from "./types";
 
 interface Props {
@@ -44,7 +45,9 @@ export function Overview({ generation, meta }: Props) {
 }
 
 export function NextStepPanel({ overview, meta }: { overview: OverviewData; meta: Meta }) {
-  const step = describeStep(overview.next, meta);
+  const step = describeStep(overview.next, meta, overview.llama_server);
+  const actions = useActions();
+  const act = nextAction(overview.next);
   if (!step) {
     return (
       <section className="panel ready">
@@ -60,6 +63,24 @@ export function NextStepPanel({ overview, meta }: { overview: OverviewData; meta
       <h3>Next step</h3>
       <h2>{step.title}</h2>
       <p className="muted">{step.why}</p>
+      {/* The button does it; the commands stay because the terminal is still how
+          this gets scripted, and because a step needing root has no button (rule 6). */}
+      {act && (
+        <div className="controls">
+          <button
+            type="button"
+            className="primary"
+            disabled={actions.busy !== null}
+            onClick={() => {
+              if (act.go) return navigate(act.go);
+              actions.run("next-step", () => act.run());
+            }}
+          >
+            {actions.busy === "next-step" ? `${act.label}…` : act.label}
+          </button>
+        </div>
+      )}
+      {actions.failed && <p className="bad small">{actions.failed.message}</p>}
       <ul className="commands">
         {step.commands.map((command) => (
           <li key={command}>
@@ -222,4 +243,30 @@ function SettingsPanel({
       )}
     </section>
   );
+}
+
+/**
+ * What the next step's button does: go somewhere, or do it here.
+ *
+ * Installing llama.cpp has neither, because it needs root - rule 6 says that is handed
+ * to a person as an exact command, and a button that could only fail at a password
+ * prompt would be worse than none.
+ */
+function nextAction(
+  next: OverviewData["next"],
+): { label: string; go?: View; run: () => Promise<unknown> } | null {
+  switch (next) {
+    case "install_llama_server":
+      return null;
+    case "install_model":
+      return { label: "Choose a model", go: "models", run: () => Promise.resolve() };
+    case "start_gateway":
+      return { label: "Install and start it", run: () => api.installServices() };
+    case "fix_gateway":
+      return { label: "Check the gateway", go: "setup", run: () => Promise.resolve() };
+    case "configure_harness":
+      return { label: "Point a harness at it", go: "setup", run: () => Promise.resolve() };
+    case "ready":
+      return null;
+  }
 }

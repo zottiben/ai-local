@@ -148,15 +148,16 @@ pub fn preferred<'a>(
     let find = |name: &str| models.iter().find(|m| m.id == name);
 
     if let Some(name) = wanted {
-        let found = find(name).ok_or_else(|| {
-            anyhow::anyhow!(
+        let found = find(name).ok_or_else(|| -> anyhow::Error {
+            crate::Refused::Missing(format!(
                 "no model named {name:?} can run here; available: {}",
                 models
                     .iter()
                     .map(|m| m.id.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
-            )
+            ))
+            .into()
         })?;
         return Ok((found, Chose::Requested));
     }

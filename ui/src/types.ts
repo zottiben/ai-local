@@ -14,6 +14,7 @@ export type Service = "running" | "installed_not_running" | "not_installed";
 
 /** `status::NextStep`. */
 export type NextStep =
+  | "install_llama_server"
   | "install_model"
   | "start_gateway"
   | "fix_gateway"
@@ -70,6 +71,8 @@ export interface Overview {
   advertised: Advertised;
   services: [string, Service][];
   harnesses: string[];
+  /** Why llama.cpp could not be found, with the command that installs it. */
+  llama_server: string | null;
   next: NextStep;
 }
 
@@ -251,4 +254,115 @@ export interface Config {
   system_prompt?: string;
   gateway_host: string;
   gateway_port: number;
+}
+
+// --- setup ---
+
+/** `setup::Unit`: one service, as the manager reports it. */
+export interface Unit {
+  name: string;
+  active: boolean;
+  enabled: boolean;
+}
+
+/** `setup::Services`. */
+export interface Services {
+  /** Without it the units only start after a login, so a headless reboot leaves the
+   * gateway down. */
+  linger: boolean;
+  units: Unit[];
+}
+
+/** `setup::Installed`: what writing the units did. */
+export interface ServicesInstalled {
+  units: string[];
+  unit_dir: string;
+  exe: string;
+  chose_default: string | null;
+  gateway_only: boolean;
+  /** `null` when the units were written but not started. */
+  answering: boolean | null;
+  linger: boolean;
+}
+
+/** `setup::Trouble`: why nothing answers as a gateway. */
+export type Trouble =
+  | "not_running"
+  | { port_taken: { free: number } }
+  | { wrong_port: { expected: number } };
+
+/** What `GET /gateway` reports. */
+export interface GatewayView {
+  url: string;
+  port: number;
+  state: Gateway;
+  trouble: Trouble | null;
+  key: string | null;
+}
+
+/** `gateway::Probe`: one assertion `gateway check` makes. */
+export interface Probe {
+  label: string;
+  expected: number;
+  /** The status it gave, or `{ error }` when the request did not finish. */
+  got: number | { error: string };
+}
+
+/** `gateway::Check`. */
+export interface GatewayCheck {
+  base: string;
+  reachable: boolean;
+  probes: Probe[];
+}
+
+/** `setup::HarnessPlan`: what pointing a harness at the gateway would do. */
+export interface HarnessPlan {
+  harness: string;
+  url: string;
+  model: string;
+  context: number;
+  why: string;
+  others: string[];
+  /** Models whose chat template offers no thinking mode at all. */
+  without_thinking: string[];
+  trouble: Trouble | null;
+  already_configured: boolean;
+}
+
+/** One harness, as `GET /harnesses` lists it. */
+export interface HarnessView {
+  name: string;
+  configured: boolean;
+  /** The file that points it at us. Claude Code's has to be sourced by hand. */
+  path: string | null;
+  /** `{ error }` when nothing here could be pointed at it. */
+  plan: HarnessPlan | { error: string };
+}
+
+/** `setup::HarnessConfigured`: the plan, plus what was written. */
+export type HarnessConfigured = HarnessPlan & {
+  unchanged: boolean;
+  path: string | null;
+  backup: string | null;
+};
+
+/** `setup::Settings`: only the fields being changed. */
+export interface SettingsPatch {
+  cache_type?: string;
+  reasoning?: string;
+  reasoning_budget?: number;
+  max_context?: number;
+  gateway_port?: number;
+  /** `null` clears the house rule; leaving it out keeps it. */
+  system_prompt?: string | null;
+}
+
+/** `setup::Applied`: what changed, and what it means for what is running. */
+export interface Applied {
+  changed: string[];
+  path: string | null;
+  gateway_restarted: null | { error: string } | Record<string, never>;
+  /** The resident model still on the old context, which has to reload to pick it up. */
+  reload_model: string | null;
+  repoint_harnesses: boolean;
 }
