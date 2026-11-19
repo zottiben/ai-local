@@ -970,23 +970,27 @@ fn model_files(repo: &str) -> anyhow::Result<()> {
     // Weight size alone decides most of it, and the KV cache needs room on top. Show
     // the headroom rather than a bare yes/no so an almost-fitting quant is visible.
     let available = budget.available_mib();
+    let choices = ailocal::source::weigh(files, available);
+
     println!("{available} MiB available for weights + KV cache\n");
     println!("{:<52} {:>8}  VERDICT", "FILE", "SIZE");
-    for f in &files {
-        let verdict = if f.size_mib >= available {
-            "too large".to_owned()
+    for c in &choices {
+        let verdict = if c.fits() {
+            format!("{} MiB left for context", c.headroom_mib)
+        } else if c.headroom_mib < 0 {
+            format!("{} MiB too large", -c.headroom_mib)
         } else {
-            format!("{} MiB left for context", available - f.size_mib)
+            "no room for a context".to_owned()
         };
         println!(
             "{:<52} {:>5} G  {verdict}",
-            truncate(&f.path, 52),
-            f.size_mib / 1024
+            truncate(&c.file.path, 52),
+            c.file.size_mib / 1024
         );
     }
 
-    if let Some(best) = files.iter().rev().find(|f| f.size_mib + 2048 < available) {
-        println!("\nNext: ailocal model install hf:{repo}/{}", best.path);
+    if let Some(best) = choices.iter().find(|c| c.fits()) {
+        println!("\nNext: ailocal model install hf:{repo}/{}", best.file.path);
     }
     Ok(())
 }

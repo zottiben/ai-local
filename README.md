@@ -438,6 +438,19 @@ request and refreshed as it changes - a model installed from a terminal appears 
 open window without a reload. Every answer is the CLI's own: the console calls the
 same library functions the commands do, so the two cannot disagree.
 
+Three tabs. **Overview** is `status`, with the one next step it would tell you to take.
+**Models** is `model ls` and `model pick`, plus installing, loading, deleting and
+choosing a default. **Setup** is the services, the gateway and the harnesses: what
+`service install`, `gateway check` and `harness configure` do, with the same plans
+printed before anything happens.
+
+Installing reaches past the catalogue. The search box is `model search` and `model
+files`: find a repository on Hugging Face, open it, and every single-file GGUF in it
+is listed against this machine's budget, largest first, with the same verdict
+`model files` prints. Click the one that fits. Split shards and multimodal projectors
+are left out - neither can be loaded on its own, and a projector is small enough to
+look like the most comfortable choice in the list.
+
 It listens on 127.0.0.1 only, and every request needs the token in the link it prints.
 The token is new each run and never written down, so a tab from an earlier run is
 turned away rather than left talking to whatever now holds the port. There is no flag

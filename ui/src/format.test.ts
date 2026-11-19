@@ -7,6 +7,7 @@ import {
   describeStep,
   formatBytes,
   formatCount,
+  formatDownloads,
   formatSize,
   serviceShortName,
   tilde,
@@ -25,6 +26,16 @@ describe("format", () => {
     expect(formatCount(262_144)).toBe("256k");
     // A size that is not a whole number of k is printed whole, not rounded.
     expect(formatCount(4000)).toBe("4000");
+  });
+
+  it("abbreviates a download count decimally, unlike a context length", () => {
+    expect(formatDownloads(86_188)).toBe("86.2K");
+    expect(formatDownloads(7_298_936)).toBe("7.3M");
+    // Under a thousand there is nothing to abbreviate, and "0.9K" reads worse.
+    expect(formatDownloads(912)).toBe("912");
+    // The same number through the context formatter is left alone: 86188 is not a
+    // multiple of 1024, so there is no round number of k to call it.
+    expect(formatCount(86_188)).toBe("86188");
   });
 
   it("never rounds a small file down to 0 GiB", () => {

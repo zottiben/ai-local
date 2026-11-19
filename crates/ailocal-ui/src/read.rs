@@ -28,6 +28,8 @@ pub fn routes() -> Router<AppState> {
         .route("/overview", get(overview))
         .route("/models", get(installed))
         .route("/catalogue", get(catalogue))
+        .route("/search", get(search))
+        .route("/files", get(files))
         .route("/config", get(config))
         .route("/loaded", get(loaded))
         .route("/loaded/log", get(log))
@@ -88,6 +90,72 @@ async fn catalogue(State(state): State<AppState>) -> Result<Json<Offer>> {
     let remote = state.catalogue(&cfg, budget).await?;
     Ok(Json(
         blocking(move || Offer::from_candidates(&cfg, budget, remote)).await?,
+    ))
+}
+
+/// How many repositories a search answers with.
+///
+/// The CLI defaults to the same number. Past about this many the list stops being a
+/// shortlist and becomes something to search again, and every row costs a line in a
+/// panel that has to share the page with what is already installed.
+const SEARCH_LIMIT: usize = 20;
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: String,
+}
+
+/// What `ailocal model search` finds: Hugging Face repositories with GGUF files.
+///
+/// Hugging Face only. Ollama publishes no search endpoint, which is a fact about the
+/// registry rather than a gap here - [`ailocal::source::search`] says so at length.
+/// What Ollama has is in the catalogue, which this panel sits beside.
+async fn search(
+    query: std::result::Result<Query<SearchQuery>, QueryRejection>,
+) -> Result<Json<Vec<ailocal::source::Repo>>> {
+    let Query(query) = query.map_err(|e| Error::BadRequest(e.body_text()))?;
+    if query.q.trim().is_empty() {
+        return Err(Error::BadRequest("give me something to search for".into()));
+    }
+    Ok(Json(
+        blocking(move || {
+            ailocal::source::search(&ailocal::install::client()?, query.q.trim(), SEARCH_LIMIT)
+        })
+        .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct FilesQuery {
+    repo: String,
+}
+
+/// What `ailocal model files` lists: the quants in a repository, best first.
+///
+/// Measured against this machine here rather than in the page, so the verdict a
+/// person reads is the one `model install` will act on.
+async fn files(
+    query: std::result::Result<Query<FilesQuery>, QueryRejection>,
+) -> Result<Json<Vec<ailocal::source::Choice>>> {
+    let Query(query) = query.map_err(|e| Error::BadRequest(e.body_text()))?;
+    if query.repo.trim().is_empty() {
+        return Err(Error::BadRequest("which repository?".into()));
+    }
+    Ok(Json(
+        blocking(move || {
+            let cfg = Config::load()?;
+            let token = ailocal::source::hf_token(&cfg.hf_home);
+            let found = ailocal::source::files(
+                &ailocal::install::client()?,
+                query.repo.trim(),
+                token.as_deref(),
+            )?;
+            Ok(ailocal::source::weigh(
+                found,
+                serve::budget_or_estimate().available_mib(),
+            ))
+        })
+        .await?,
     ))
 }
 

@@ -366,13 +366,15 @@ abbr {
 
 /* --- badges and tones --- */
 
+/* No text-transform. Every literal badge is already written lowercase ("default",
+   "loaded", "forced"), and the computed ones carry a unit: lowercasing turned
+   "16.5 GiB spare" into "16.5 gib spare". */
 .badge {
   font-size: 0.72rem;
   padding: 0.05rem 0.45rem;
   border-radius: 999px;
   border: 1px solid currentColor;
   white-space: nowrap;
-  text-transform: lowercase;
 }
 .badge.accent {
   color: var(--accent);
@@ -513,6 +515,36 @@ button.small {
 }
 
 /* --- adding and managing models --- */
+
+/* The quants inside one search result. Indented under the repository that holds them,
+   and a grid rather than a flex row so the sizes and verdicts line up down the column
+   instead of wandering with the length of each filename. */
+.quants {
+  list-style: none;
+  margin: 0.5rem 0 0.2rem;
+  padding: 0 0 0 0.9rem;
+  border-left: 2px solid color-mix(in srgb, var(--line) 70%, transparent);
+}
+.quants li {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.25rem 0;
+}
+.quants li.unfit {
+  opacity: 0.6;
+}
+.quants code {
+  background: transparent;
+  padding: 0;
+  overflow-wrap: anywhere;
+}
+/* A failure belongs under the row it came from, across the whole width. */
+.quants li p {
+  grid-column: 1 / -1;
+  margin: 0.15rem 0 0;
+}
 
 .install-form {
   display: flex;

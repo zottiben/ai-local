@@ -118,12 +118,18 @@ pub struct Candidate {
     pub context: Option<u64>,
 }
 
+/// Spare VRAM below which no context is worth having, whatever the attention layout.
+///
+/// One constant rather than a number per caller: a catalogue entry and a Hugging Face
+/// file are the same question asked about two sources, and a window that showed a
+/// quant as usable which the catalogue would have called too large is telling a
+/// person something the next step will contradict.
+pub const MIN_HEADROOM_MIB: i64 = 1024;
+
 impl Candidate {
     #[must_use]
     pub fn fits(&self) -> bool {
-        // Below roughly this much spare there is no room for a usable context, whatever
-        // the model's attention layout.
-        self.headroom_mib >= 1024
+        self.headroom_mib >= MIN_HEADROOM_MIB
     }
 
     /// One line for a picker.
