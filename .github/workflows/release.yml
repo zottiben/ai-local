@@ -31,7 +31,7 @@ jobs:
       - name: Check version
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          for crate in ailocal ailocal-eval ailocal-ui; do
+          for crate in ailocal ailocal-eval ailocal-ui ailocal-desktop; do
             CARGO_VERSION="$(grep '^version' "crates/${crate}/Cargo.toml" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
             echo "tag=$VERSION ${crate}=$CARGO_VERSION"
             if [ "$VERSION" != "$CARGO_VERSION" ]; then
@@ -61,7 +61,7 @@ jobs:
         run: |
           set -eux
           VERSION="${GITHUB_REF_NAME#v}"
-          cargo build --release --workspace --target ${{ matrix.target }}
+          cargo build --release --target ${{ matrix.target }}
           mkdir -p stage
           # One archive per binary, each holding just that binary, so install.sh can
           # fetch an extra without pulling the core down again.
@@ -91,8 +91,8 @@ jobs:
         run: |
           set -eux
           VERSION="${GITHUB_REF_NAME#v}"
-          cargo build --release --workspace --target aarch64-apple-darwin
-          cargo build --release --workspace --target x86_64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
           mkdir -p stage
           for binary in ailocal ailocal-eval ailocal-ui; do
             lipo -create -output "stage/${binary}" \
@@ -110,9 +110,66 @@ jobs:
           path: ailocal*-v*-macos-universal.tar.gz
           if-no-files-found: error
 
+  # The window, as something a person double-clicks. A separate job from the CLI
+  # binaries because it is a bundle rather than a binary, builds against a webview, and
+  # must not be able to hold up the thing every machine actually installs.
+  #
+  # Not a universal binary like the CLI: a .dmg is opened once on the Mac it was
+  # downloaded to, so the wasted architecture would be carried for nothing.
+  desktop:
+    name: Desktop ${{ matrix.label }}
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-26, label: macos-arm64, target: aarch64-apple-darwin }
+          - { runner: ubuntu-latest, label: linux-x86_64, target: x86_64-unknown-linux-gnu }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+          cache-workspaces: .
+
+      - name: Linux webview libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Bundle
+        working-directory: crates/ailocal-desktop
+        run: npx --yes @tauri-apps/cli@^2 build --target ${{ matrix.target }}
+
+      # Named like every other asset, so install.sh's naming and a person reading the
+      # release page see the same scheme. Tauri's own names carry its version and arch
+      # spelling, which are the two things most likely to drift from the tag.
+      - name: Rename
+        run: |
+          set -eux
+          VERSION="${GITHUB_REF_NAME#v}"
+          OUT="target/${{ matrix.target }}/release/bundle"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            # Ad-hoc signed during bundling, by tauri.conf.json's signingIdentity, so
+            # the signature is inside the .dmg rather than applied to a copy beside it.
+            codesign --verify --deep --strict "$OUT/macos/ai-local.app"
+            mv "$OUT"/dmg/*.dmg "ai-local-desktop-v${VERSION}-${{ matrix.label }}.dmg"
+          else
+            mv "$OUT"/appimage/*.AppImage "ai-local-desktop-v${VERSION}-${{ matrix.label }}.AppImage"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.label }}
+          path: ai-local-desktop-v*
+          if-no-files-found: error
+
   release:
     name: publish release
-    needs: [linux, macos]
+    needs: [linux, macos, desktop]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -120,7 +177,7 @@ jobs:
           merge-multiple: true
 
       - name: Generate checksums
-        run: sha256sum ailocal*-v* > checksums.txt
+        run: sha256sum ailocal*-v* ai-local-desktop-v* > checksums.txt
 
       - name: Publish
         env:
@@ -130,4 +187,4 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes \
-            ailocal*-v* checksums.txt
+            ailocal*-v* ai-local-desktop-v* checksums.txt

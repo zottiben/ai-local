@@ -42,7 +42,12 @@ impl IntoResponse for Error {
             Self::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",
-                "missing or wrong token - open the link `ailocal ui` printed".to_owned(),
+                // Not "the link `ailocal ui` printed": the desktop app serves this
+                // same API and prints no link, so that would name the wrong thing
+                // for half the people who ever see it.
+                "missing or wrong token - the token is minted per run, so open the \
+                 console again rather than reusing an old link"
+                    .to_owned(),
             ),
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, "bad_request", message),
             Self::NotFound(message) => (StatusCode::NOT_FOUND, "not_found", message),

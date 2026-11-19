@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ai-local",
+  "identifier": "io.github.zottiben.ailocal.desktop",
+  "app": {
+    "windows": [],
+    "withGlobalTauri": false
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "appimage"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns"
+    ],
+    "category": "DeveloperTool",
+    "macOS": {
+      "signingIdentity": "-",
+      "minimumSystemVersion": "13.0"
+    },
+    "shortDescription": "Models, gateway and services on this machine",
+    "longDescription": "A window for the models, gateway, services and harness setup that the ailocal CLI manages. It runs the same local server the CLI does, on loopback only."
+  }
+}

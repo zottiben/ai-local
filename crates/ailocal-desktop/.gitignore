@@ -1,0 +1,4 @@
+# Written by tauri-build on every build, and partly platform-specific: macOS-schema.json
+# only appears on a Mac, so committing these would mean a dirty tree on the other
+# platform. Never hand-edit; change tauri.conf.json and rebuild.
+/gen/
