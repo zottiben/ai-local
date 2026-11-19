@@ -1,6 +1,6 @@
 [package]
 name = "ailocal-desktop"
-version = "0.7.0"
+version = "0.7.1"
 description = "The ai-local console as a desktop app"
 edition.workspace = true
 rust-version.workspace = true
