@@ -1,6 +1,6 @@
 [package]
 name = "ailocal-ui"
-version = "0.7.1"
+version = "0.7.2"
 description = "A local console for ailocal's models, gateway and services, in the browser"
 edition.workspace = true
 rust-version.workspace = true
