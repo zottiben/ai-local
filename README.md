@@ -108,7 +108,7 @@ desktop session dies.
 | `ailocal extras list` / `install <name>` | optional companions, see below |
 | `ailocal eval run` | score a model on a coding suite (needs the `eval` extra) |
 | `ailocal ui` | a console for all of the above, in the browser (needs the `ui` extra) |
-| the `ai-local` app | the same console as a desktop app, from the release page |
+| `ailocal update --app` | the same console as a desktop app, see below |
 
 ## Choosing a model
 
@@ -458,15 +458,33 @@ to listen anywhere else.
 
 #### The same window, without a terminal
 
-The release page carries `ai-local-desktop-<version>-macos-arm64.dmg` and
-`ai-local-desktop-<version>-linux-x86_64.AppImage`: the console as an app you open.
+```
+ailocal update --app           # already have ailocal: installs just the app
+```
+
+or on a machine with nothing on it yet:
+
+```
+curl -fsSL https://zottiben.github.io/ai-local/install.sh | sh -s -- --app
+```
+
+That puts `ai-local.app` in `/Applications` on macOS, or an AppImage on your `PATH`
+with a launcher entry on Linux. `ailocal update` refreshes it from then on without
+being asked, because the app embeds the console's own server and an old window against
+a new core is exactly the version skew the split is meant to avoid.
+
+The app is built per architecture rather than universal, since it is opened once on the
+machine it was downloaded to: Apple Silicon and Linux x86_64. Elsewhere the same
+console still runs in a browser with `ailocal ui`.
+
 It runs the same server in its own process, on a port the OS picks, and points a
 webview at it - one frontend and one API, so the window and the terminal can only
 disagree about chrome. It remembers its size and position between runs.
 
-The app is ad-hoc signed, not notarised, so the first open from a browser download
-needs a right-click and **Open** (macOS offers no other way past an unidentified
-developer). A `curl` download carries no quarantine attribute and opens normally.
+The app is ad-hoc signed, not notarised, so a **browser** download needs a right-click
+and **Open** the first time (macOS offers no other way past an unidentified developer).
+Installing it with the command above avoids that entirely: a `curl` download carries no
+quarantine attribute, and the installer clears one if anything set it.
 
 One thing it does that `ailocal ui` does not: a model started from the window is
 stopped when you quit it. A terminal delivers Ctrl-C to the whole process group, and
