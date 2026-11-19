@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use ailocal::{
     auth, config::Config, download, extras, gateway, harness, install, registry, registry::Fit,
-    serve, service, source::Source, vram,
+    serve, service, setup, source::Source, vram,
 };
 use clap::{Args, Parser, Subcommand};
 
@@ -421,7 +421,7 @@ fn extras_remove(name: &str) -> anyhow::Result<()> {
 }
 
 fn config_gateway_port(port: Option<u16>) -> anyhow::Result<()> {
-    let mut cfg = Config::load()?;
+    let cfg = Config::load()?;
 
     let Some(wanted) = port else {
         let status = gateway::port_status(&cfg.gateway_host, cfg.gateway_port);
@@ -445,35 +445,23 @@ fn config_gateway_port(port: Option<u16>) -> anyhow::Result<()> {
         return Ok(());
     };
 
-    if wanted == cfg.gateway_port {
+    let applied = setup::apply_settings(
+        &setup::Settings {
+            gateway_port: Some(wanted),
+            ..setup::Settings::default()
+        },
+        &unit_binary,
+    )?;
+    if applied.changed.is_empty() {
         println!("the gateway port is already {wanted}");
         return Ok(());
     }
-    anyhow::ensure!(
-        gateway::port_status(&cfg.gateway_host, wanted) != gateway::PortStatus::Taken,
-        "port {wanted} is in use by something else; pick another"
-    );
-
-    cfg.gateway_port = wanted;
-    println!("wrote {}", cfg.save()?.display());
-
-    // The unit bakes the port into its ExecStart, so the config alone would leave the
-    // service on the old one.
-    if service::is_enabled(service::GATEWAY) || service::is_active(service::GATEWAY) {
-        match restart_gateway_service(&cfg) {
-            Ok(()) => println!("restarted {} on port {wanted}", service::GATEWAY),
-            Err(e) => println!("note: could not restart {}: {e:#}", service::GATEWAY),
-        }
-    }
-
-    // Harnesses hold the URL in their own config, so they do not follow on their own.
-    println!("\nNext: re-point your harnesses at the new port");
-    println!("  ailocal harness configure pi        (and claude-code)");
+    print_applied(&applied);
     Ok(())
 }
 
 fn config_max_context(tokens: Option<u64>) -> anyhow::Result<()> {
-    let mut cfg = Config::load()?;
+    let cfg = Config::load()?;
 
     let Some(wanted) = tokens else {
         println!("max context  {} tokens", cfg.max_context);
@@ -486,52 +474,60 @@ fn config_max_context(tokens: Option<u64>) -> anyhow::Result<()> {
         return Ok(());
     };
 
-    anyhow::ensure!(
-        wanted >= registry::MIN_USEFUL_CONTEXT,
-        "{wanted} tokens is below the {} a model needs to be worth loading",
-        registry::MIN_USEFUL_CONTEXT
-    );
-    cfg.max_context = wanted;
-    println!("wrote {}", cfg.save()?.display());
-
-    // The context is fixed when llama-server starts, so a resident model keeps the
-    // window it was launched with - and the catalogue would then advertise one number
-    // while the server serves another.
-    match serve::running()? {
-        Some(instance) if instance.context != wanted => {
-            let command = if service::is_active(service::MODEL) {
-                // The foreground parent exits with its child and launchd/systemd
-                // restarts it from the new config. Starting a detached sibling would
-                // race the supervisor for the same port.
-                "ailocal stop".to_owned()
-            } else {
-                format!("ailocal serve {}", instance.model)
-            };
-            println!(
-                "\n{} is loaded with {} tokens. Reload it to pick this up:\n  {command}",
-                instance.model, instance.context
-            );
-        }
-        _ => println!("\nTakes effect the next time a model loads."),
+    let applied = setup::apply_settings(
+        &setup::Settings {
+            max_context: Some(wanted),
+            ..setup::Settings::default()
+        },
+        &unit_binary,
+    )?;
+    if applied.changed.is_empty() {
+        println!("max context is already {wanted} tokens");
+        return Ok(());
     }
+    print_applied(&applied);
     println!("\nAfter it reloads, refresh Pi's cached window:\n  ailocal harness configure pi");
     Ok(())
 }
 
-/// Rewrite the gateway unit for the current config and restart it.
-fn restart_gateway_service(cfg: &Config) -> anyhow::Result<()> {
-    let exe = unit_binary()?;
-    service::install(
-        &exe,
-        &cfg.gateway_host,
-        cfg.gateway_port,
-        cfg.default_model.as_deref(),
-    )?;
-    service::reload()?;
-    if service::is_active(service::GATEWAY) {
-        service::stop(service::GATEWAY)?;
+/// Say what a settings change wrote, and what it means for what is already running.
+fn print_applied(applied: &setup::Applied) {
+    if let Some(path) = &applied.path {
+        println!("wrote {}", path.display());
     }
-    service::start(service::GATEWAY)
+
+    match &applied.gateway_restarted {
+        Some(Ok(())) => println!("restarted {}", service::GATEWAY),
+        Some(Err(e)) => println!("note: could not restart {}: {e:#}", service::GATEWAY),
+        None => {}
+    }
+
+    // The context is fixed when llama-server starts, so a resident model keeps the
+    // window it was launched with - and the catalogue would then advertise one number
+    // while the server serves another.
+    match &applied.reload_model {
+        Some(model) => {
+            // The foreground parent exits with its child and launchd/systemd restarts
+            // it from the new config. Starting a detached sibling would race the
+            // supervisor for the same port.
+            let command = if service::is_active(service::MODEL) {
+                "ailocal stop".to_owned()
+            } else {
+                format!("ailocal serve {model}")
+            };
+            println!("\n{model} is loaded with the old context. Reload it:\n  {command}");
+        }
+        None if applied.changed.iter().any(|c| c == "max_context") => {
+            println!("\nTakes effect the next time a model loads.");
+        }
+        None => {}
+    }
+
+    // Harnesses hold the URL in their own config, so they do not follow on their own.
+    if applied.repoint_harnesses {
+        println!("\nNext: re-point your harnesses at the new port");
+        println!("  ailocal harness configure pi        (and claude-code)");
+    }
 }
 
 fn budget() -> anyhow::Result<()> {
@@ -1211,54 +1207,39 @@ fn serve_model(args: &ServeArgs) -> anyhow::Result<()> {
 }
 
 fn harness_configure(name: &str, url: &str, wanted: Option<&str>) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        matches!(name, "pi" | "claude-code"),
-        "unknown harness {name:?}; expected `pi` or `claude-code`"
-    );
-
-    let cfg = Config::load()?;
-    let mut models = ailocal::status::runnable_models(&cfg)?;
-    anyhow::ensure!(
-        !models.is_empty(),
-        "no installed model can run here; `ailocal model ls` shows why"
-    );
+    // Planned before the gateway offer so a typo in --model refuses outright, rather
+    // than first installing a service and only then refusing.
+    setup::plan_harness(&Config::load()?, name, url, wanted)?;
 
     // A harness stores this URL and only finds out it is wrong when a prompt fails
     // with a bare "Connection error", which says nothing about the port. Far better to
     // say it here, while there is still context - and better still to offer the fix.
-    let cfg = offer_to_start_the_gateway(cfg, url)?;
+    let cfg = offer_to_start_the_gateway(Config::load()?)?;
+    let done = setup::configure_harness(&cfg, name, url, wanted)?;
+    let plan = &done.plan;
 
-    let loaded = serve::running()?.map(|i| i.model);
-    let (preferred, why) = harness::preferred(
-        &models,
-        wanted,
-        cfg.default_model.as_deref(),
-        loaded.as_deref(),
-    )?;
-    let (preferred, why) = (preferred.clone(), why);
-
-    let key = auth::load_or_create()?;
+    if let Some(trouble) = &plan.trouble {
+        print_trouble(trouble, url);
+        println!("  Configuring anyway - the harness will work once the gateway is up.\n");
+    }
 
     if name == "claude-code" {
-        let (path, outcome) =
-            harness::configure_claude_code(url, &key, &preferred.id, preferred.context_window)?;
-        match outcome {
-            harness::Outcome::AlreadyConfigured => println!("claude-code env already current"),
-            harness::Outcome::Configured { .. } => println!("wrote {}", path.display()),
+        let path = done.path.clone().unwrap_or_default();
+        if done.unchanged {
+            println!("claude-code env already current");
+        } else {
+            println!("wrote {}", path.display());
         }
         // Claude Code takes exactly one model, so which one it got is the single most
         // useful thing to say - and the thing that used to be decided invisibly.
         println!(
             "  model: {} ({} context) - {}",
-            preferred.id,
-            format_count(preferred.context_window),
-            why.why()
+            plan.model,
+            format_count(plan.context),
+            plan.why
         );
-        if models.len() > 1 {
-            println!(
-                "  others installed: {}",
-                others(&models, &preferred.id).join(", ")
-            );
+        if !plan.others.is_empty() {
+            println!("  others installed: {}", plan.others.join(", "));
             println!("  change it with `ailocal harness configure claude-code --model <name>`");
         }
         println!("  source it in a shell, then run claude there:");
@@ -1271,25 +1252,15 @@ fn harness_configure(name: &str, url: &str, wanted: Option<&str>) -> anyhow::Res
         return Ok(());
     }
 
-    // Pi keeps the whole catalogue and chooses per session, so the preference only
-    // decides the order it sees them in - and which one the hint below names.
-    if let Some(at) = models.iter().position(|m| m.id == preferred.id) {
-        let chosen = models.remove(at);
-        models.insert(0, chosen);
-    }
-
-    match harness::configure_pi(url, &key, &models)? {
-        harness::Outcome::AlreadyConfigured => {
-            println!("pi already points at {url}");
-        }
-        harness::Outcome::Configured { backup } => {
-            println!("pi configured to use {url}");
-            if let Some(b) = backup {
-                println!("  backup: {}", b.display());
-            }
+    if done.unchanged {
+        println!("pi already points at {url}");
+    } else {
+        println!("pi configured to use {url}");
+        if let Some(b) = &done.backup {
+            println!("  backup: {}", b.display());
         }
     }
-    for m in &models {
+    for m in ailocal::status::runnable_models(&cfg)? {
         println!(
             "  {} ({} context, thinking {})",
             m.id,
@@ -1299,17 +1270,16 @@ fn harness_configure(name: &str, url: &str, wanted: Option<&str>) -> anyhow::Res
     }
     // Said here because the alternative is finding out from `/effort`, which reports
     // it as the harness refusing a level rather than the model not having one.
-    if let Some(m) = models.iter().find(|m| !m.thinking.is_available()) {
+    if let Some(id) = plan.without_thinking.first() {
         println!(
-            "  {} has no thinking mode - its chat template has no `enable_thinking`,\n\
-             \x20 so `/thinking` and `/effort` in pi can only ever offer `off` for it.",
-            m.id
+            "  {id} has no thinking mode - its chat template has no `enable_thinking`,\n\
+             \x20 so `/thinking` and `/effort` in pi can only ever offer `off` for it."
         );
     }
     println!(
         "  try: pi --provider {} --model {}",
         harness::PI_PROVIDER_ID,
-        preferred.id
+        plan.model
     );
     Ok(())
 }
@@ -1322,13 +1292,12 @@ fn harness_configure(name: &str, url: &str, wanted: Option<&str>) -> anyhow::Res
 /// command, ask rather than describe.
 ///
 /// Returns the config, reloaded if starting the service changed it.
-fn offer_to_start_the_gateway(cfg: Config, url: &str) -> anyhow::Result<Config> {
-    if gateway::answers_as_gateway(&cfg.gateway_host, cfg.gateway_port) {
+fn offer_to_start_the_gateway(cfg: Config) -> anyhow::Result<Config> {
+    if setup::trouble(&cfg).is_none() {
         return Ok(cfg);
     }
 
     let installed = service::is_enabled(service::GATEWAY) || service::is_active(service::GATEWAY);
-
     if !installed && ailocal::prompt::interactive() {
         println!("The gateway is not running, so a harness pointed at it cannot answer.");
         if ailocal::prompt::confirm("Install and start it now?", true)? {
@@ -1338,88 +1307,52 @@ fn offer_to_start_the_gateway(cfg: Config, url: &str) -> anyhow::Result<Config> 
         }
         println!();
     }
-
-    warn_if_gateway_is_not_answering(&cfg, url);
-    println!("  Configuring anyway - the harness will work once the gateway is up.\n");
     Ok(cfg)
 }
 
-/// Say so, in terms that name the cause, when the gateway a harness is about to be
-/// pointed at is not going to answer.
+/// Say so, in terms that name the cause, when the gateway is not going to answer.
 ///
-/// Not a refusal: writing the config is still the right thing when the gateway is
+/// Not a refusal: writing a harness config is still the right thing when the gateway is
 /// merely not started yet, and `setup` configures harnesses as part of a sequence that
 /// brings everything up.
 fn warn_if_gateway_is_not_answering(cfg: &Config, url: &str) {
-    if gateway::answers_as_gateway(&cfg.gateway_host, cfg.gateway_port) {
-        return;
+    if let Some(trouble) = setup::trouble(cfg) {
+        print_trouble(&trouble, url);
     }
+}
 
+fn print_trouble(trouble: &setup::Trouble, url: &str) {
     println!("WARNING: nothing is answering as a gateway on {url}");
-    match gateway::port_status(&cfg.gateway_host, cfg.gateway_port) {
-        gateway::PortStatus::Taken => println!(
-            "  Port {} is held by something that is not ailocal, so the gateway cannot\n\
-             \x20 start. Move it with `ailocal config gateway-port {}` and re-run this.",
-            cfg.gateway_port,
-            gateway::usable_port(&cfg.gateway_host, cfg.gateway_port)
-                .unwrap_or(cfg.gateway_port + 1)
+    match trouble {
+        setup::Trouble::PortTaken { free } => println!(
+            "  That port is held by something that is not ailocal, so the gateway\n\
+             \x20 cannot start. Move it with `ailocal config gateway-port {free}` and\n\
+             \x20 re-run this."
         ),
-        // The service is up but nothing answers on the configured port. Either it is
-        // still starting, or - the case worth naming - the unit was written for a
-        // different port, which is what happens when `gateway_port` is edited by hand
-        // without reinstalling the service.
-        _ if service::is_active(service::GATEWAY) => println!(
-            "  {} is running, but not on port {}. If you changed the port, the unit\n\
-             \x20 still has the old one - `ailocal service install` rewrites it.\n\
+        setup::Trouble::WrongPort { expected } => println!(
+            "  {} is running, but not on port {expected}. If you changed the port, the\n\
+             \x20 unit still has the old one - `ailocal service install` rewrites it.\n\
              \x20 Otherwise it may just be starting; `ailocal gateway check` will say.",
-            service::GATEWAY,
-            cfg.gateway_port
+            service::GATEWAY
         ),
-        _ => println!(
+        setup::Trouble::NotRunning => println!(
             "  The gateway is not running. Start it with `ailocal service install`,\n\
              \x20 or `ailocal gateway run` in another terminal."
         ),
     }
 }
 
-/// The other model names, for a "you also have these" line.
-fn others(models: &[harness::PiModel], chosen: &str) -> Vec<String> {
-    models
-        .iter()
-        .filter(|m| m.id != chosen)
-        .map(|m| m.id.clone())
-        .collect()
-}
-
 fn harness_unconfigure(name: &str) -> anyhow::Result<()> {
-    if name == "claude-code" {
-        let path = harness::claude_code_env_path()?;
-        if path.exists() {
-            std::fs::remove_file(&path)?;
-            println!("removed {}", path.display());
-        } else {
-            println!("claude-code was not configured");
-        }
-        return Ok(());
-    }
-    anyhow::ensure!(
-        name == "pi",
-        "unknown harness {name:?}; expected `pi` or `claude-code`"
-    );
-    if harness::unconfigure_pi()? {
-        println!("removed the {} entry from pi", harness::PI_PROVIDER_ID);
-    } else {
-        println!("pi was not configured");
+    let was = setup::unconfigure_harness(name)?;
+    match (name, was) {
+        ("claude-code", true) => println!("removed {}", harness::claude_code_env_path()?.display()),
+        ("claude-code", false) => println!("claude-code was not configured"),
+        (_, true) => println!("removed the {} entry from pi", harness::PI_PROVIDER_ID),
+        (_, false) => println!("pi was not configured"),
     }
     Ok(())
 }
 
-/// Settle where the large files go, writing a config if there is not one yet.
-///
-/// Asked rather than assumed, because the default cannot be right for everyone: model
-/// weights are tens of gigabytes and the only machine that knows where there is room is
-/// this one. `--data-dir` answers it for a script; a terminal gets a prompt; anything
-/// else takes the default rather than blocking on a question nobody will see.
 fn resolve_data_dir(args: &SetupArgs) -> anyhow::Result<Config> {
     let path = Config::path()?;
     let mut cfg = Config::load()?;
@@ -1674,137 +1607,70 @@ fn unit_binary() -> anyhow::Result<std::path::PathBuf> {
 }
 
 fn gateway_check(url: &str) -> anyhow::Result<()> {
-    let base = url.trim_end_matches('/');
     let key = auth::load_or_create()?;
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
+    let check = gateway::check(url, &key)?;
 
-    let mut failures = 0;
-    let mut check =
-        |label: &str, expected: u16, send: &dyn Fn() -> anyhow::Result<u16>| match send() {
-            Ok(status) if status == expected => println!("  ok    {label} ({status})"),
-            Ok(status) => {
-                failures += 1;
-                println!("  FAIL  {label}: got {status}, expected {expected}");
-            }
-            Err(e) => {
-                failures += 1;
-                println!("  FAIL  {label}: {e}");
-            }
-        };
-
-    println!("checking {base}");
-
-    // Four identical "error sending request" lines say the same thing four times and
-    // none of them says what to do. When the connection itself fails, the auth
-    // assertions are meaningless - report the one real problem instead.
-    if client.get(format!("{base}/health")).send().is_err() {
-        println!("  FAIL  nothing is listening on {base}");
-        let cfg = Config::load()?;
+    println!("checking {}", check.base);
+    if !check.reachable {
+        println!("  FAIL  nothing is listening on {}", check.base);
         println!();
-        warn_if_gateway_is_not_answering(&cfg, base);
+        warn_if_gateway_is_not_answering(&Config::load()?, &check.base);
         anyhow::bail!("the gateway is not reachable");
     }
 
-    check("health, unauthenticated", 200, &|| {
-        Ok(client
-            .get(format!("{base}/health"))
-            .send()?
-            .status()
-            .as_u16())
-    });
-    // If this returns 200 the endpoint is open to the internet.
-    check("models rejects no credential", 401, &|| {
-        Ok(client
-            .get(format!("{base}/v1/models"))
-            .send()?
-            .status()
-            .as_u16())
-    });
-    check("models rejects a wrong credential", 401, &|| {
-        Ok(client
-            .get(format!("{base}/v1/models"))
-            .bearer_auth("ail_definitely_wrong")
-            .send()?
-            .status()
-            .as_u16())
-    });
-    check("models accepts the real key", 200, &|| {
-        Ok(client
-            .get(format!("{base}/v1/models"))
-            .bearer_auth(&key)
-            .send()?
-            .status()
-            .as_u16())
-    });
+    for probe in &check.probes {
+        match &probe.got {
+            Ok(status) if probe.passed() => println!("  ok    {} ({status})", probe.label),
+            Ok(status) => println!(
+                "  FAIL  {}: got {status}, expected {}",
+                probe.label, probe.expected
+            ),
+            Err(e) => println!("  FAIL  {}: {e:#}", probe.label),
+        }
+    }
 
+    let failures = check.failures();
     anyhow::ensure!(failures == 0, "{failures} check(s) failed");
     println!("all checks passed");
     Ok(())
 }
 
 fn service_install(no_start: bool) -> anyhow::Result<()> {
-    let mut cfg = Config::load()?;
+    let installed = setup::install_services(&unit_binary()?, !no_start)?;
 
-    // The model unit is only written when a model is named, so without one the gateway
-    // comes up alone and nothing is resident - every first prompt then pays a cold
-    // model load on top of processing the harness's system prompt. That is the
-    // difference between a few seconds and a few minutes, and it used to happen in
-    // silence.
-    if cfg.default_model.is_none() {
-        match ailocal::status::runnable_models(&cfg)?.first() {
-            Some(first) => {
-                cfg.default_model = Some(first.id.clone());
-                cfg.save()?;
-                println!(
-                    "default model set to {} so it is loaded before you need it",
-                    first.id
-                );
-            }
-            None => println!(
-                "note: no installed model can run here, so only the gateway is installed.\n\
-                 \x20     Nothing will be resident, and the first request will wait for a\n\
-                 \x20     model to load. `ailocal model pick` fixes that."
-            ),
-        }
+    if let Some(model) = &installed.chose_default {
+        println!("default model set to {model} so it is loaded before you need it");
+    }
+    if installed.gateway_only {
+        println!(
+            "note: no installed model can run here, so only the gateway is installed.\n\
+             \x20     Nothing will be resident, and the first request will wait for a\n\
+             \x20     model to load. `ailocal model pick` fixes that."
+        );
     }
 
-    let exe = unit_binary()?;
-
-    let units = service::install(
-        &exe,
-        &cfg.gateway_host,
-        cfg.gateway_port,
-        cfg.default_model.as_deref(),
-    )?;
     println!(
         "wrote {} into {}",
-        units.join(", "),
-        service::unit_dir()?.display()
+        installed.units.join(", "),
+        installed.unit_dir.display()
     );
-    println!("  ExecStart uses {}", exe.display());
+    println!("  ExecStart uses {}", installed.exe.display());
 
-    service::reload()?;
-    if !no_start {
-        for unit in &units {
-            service::enable(unit)?;
-            println!("  enabled and started {unit}");
-        }
-
-        // "Started" only means the job forked. Waiting for the listener is the
-        // difference between this command reporting the truth and reporting a hope.
-        if gateway::wait_until_answering(
-            &cfg.gateway_host,
-            cfg.gateway_port,
-            std::time::Duration::from_secs(20),
-        ) {
+    match installed.answering {
+        None => {}
+        Some(true) => {
+            for unit in &installed.units {
+                println!("  enabled and started {unit}");
+            }
+            let cfg = Config::load()?;
             println!(
                 "  answering on http://{}:{}",
                 gateway::loopback_for(&cfg.gateway_host),
                 cfg.gateway_port
             );
-        } else {
+        }
+        Some(false) => {
+            let cfg = Config::load()?;
             println!(
                 "\nWARNING: {} started but nothing is answering on port {}.\n\
                  \x20        {}",
@@ -1815,7 +1681,7 @@ fn service_install(no_start: bool) -> anyhow::Result<()> {
         }
     }
 
-    if !service::linger_enabled() {
+    if !installed.linger {
         println!(
             "\nnote: user services only run once you have logged in. For the gateway to\n\
              come up at boot and survive logout, enable lingering (needs root):\n\
@@ -1827,12 +1693,7 @@ fn service_install(no_start: bool) -> anyhow::Result<()> {
 }
 
 fn service_uninstall() -> anyhow::Result<()> {
-    for unit in service::service_names() {
-        service::disable(unit).ok();
-    }
-    let removed = service::uninstall()?;
-    service::reload()?;
-
+    let removed = setup::remove_services()?;
     if removed.is_empty() {
         println!("no units were installed");
     } else {
@@ -1842,27 +1703,21 @@ fn service_uninstall() -> anyhow::Result<()> {
 }
 
 fn service_status() -> anyhow::Result<()> {
+    let services = setup::services();
     println!(
         "linger      {}",
-        if service::linger_enabled() {
+        if services.linger {
             "enabled (starts at boot, survives logout)"
         } else {
             "disabled (units start at login only)"
         }
     );
-    for unit in service::service_names() {
+    for unit in &services.units {
         println!(
-            "{unit:<40} {:<10} {}",
-            if service::is_active(unit) {
-                "active"
-            } else {
-                "inactive"
-            },
-            if service::is_enabled(unit) {
-                "enabled"
-            } else {
-                "disabled"
-            }
+            "{:<40} {:<10} {}",
+            unit.name,
+            if unit.active { "active" } else { "inactive" },
+            if unit.enabled { "enabled" } else { "disabled" }
         );
     }
     Ok(())

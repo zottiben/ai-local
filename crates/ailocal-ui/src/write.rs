@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use ailocal::config::Config;
 use ailocal::models::{self, DefaultChange, Removed};
 use ailocal::serve::{self, Instance};
+use ailocal::setup;
 use ailocal::source::Source;
 
 use crate::error::{Error, Result, blocking};
@@ -30,6 +31,13 @@ pub fn routes() -> Router<AppState> {
         .route("/models/{name}", delete(remove))
         .route("/default", put(set_default))
         .route("/stop", post(stop))
+        .route("/settings", put(settings))
+        .route("/services", post(install_services))
+        .route("/services", delete(remove_services))
+        .route("/services/{name}/{action}", post(service_action))
+        .route("/gateway/check", post(gateway_check))
+        .route("/harnesses/{name}", put(configure_harness))
+        .route("/harnesses/{name}", delete(unconfigure_harness))
 }
 
 #[derive(Deserialize)]
@@ -132,6 +140,113 @@ async fn stop() -> Result<Json<Option<Instance>>> {
     Ok(Json(blocking(serve::stop).await?))
 }
 
+/// `ailocal config <setting> <value>`, for whichever settings the body names.
+///
+/// A patch rather than the whole config: the window sends the one field its input
+/// changed, so a setting someone else edited in a terminal a second ago survives
+/// instead of being quietly reverted to what the page loaded.
+async fn settings(
+    body: std::result::Result<Json<setup::Settings>, JsonRejection>,
+) -> Result<Json<setup::Applied>> {
+    let Json(settings) = body.map_err(rejected)?;
+    Ok(Json(
+        blocking(move || setup::apply_settings(&settings, &unit_binary)).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct InstallServicesRequest {
+    /// Write the units but leave them stopped, as `service install --no-start` does.
+    #[serde(default)]
+    no_start: bool,
+}
+
+/// `ailocal service install`.
+async fn install_services(
+    body: std::result::Result<Json<InstallServicesRequest>, JsonRejection>,
+) -> Result<Json<setup::Installed>> {
+    let Json(request) = body.map_err(rejected)?;
+    Ok(Json(
+        blocking(move || setup::install_services(&unit_binary()?, !request.no_start)).await?,
+    ))
+}
+
+/// `ailocal service uninstall`: the units that were there.
+async fn remove_services() -> Result<Json<Vec<String>>> {
+    Ok(Json(blocking(setup::remove_services).await?))
+}
+
+/// `ailocal service start|stop <unit>`, and what the manager says afterwards.
+///
+/// The state is read back rather than assumed, because `start` only means the manager
+/// accepted the job: a unit that exits immediately reports started and is not running.
+async fn service_action(
+    path: std::result::Result<Path<(String, String)>, PathRejection>,
+) -> Result<Json<setup::Services>> {
+    let Path((name, action)) = path.map_err(rejected)?;
+    if !ailocal::service::service_names().contains(&name.as_str()) {
+        return Err(Error::NotFound(format!("no unit named {name:?}")));
+    }
+    Ok(Json(
+        blocking(move || {
+            match action.as_str() {
+                "start" => ailocal::service::start(&name)?,
+                "stop" => ailocal::service::stop(&name)?,
+                other => anyhow::bail!("unknown action {other:?}; expected `start` or `stop`"),
+            }
+            Ok(setup::services())
+        })
+        .await?,
+    ))
+}
+
+/// `ailocal gateway check`: every assertion it makes, and what answered.
+async fn gateway_check() -> Result<Json<ailocal::gateway::Check>> {
+    Ok(Json(
+        blocking(|| {
+            let cfg = Config::load()?;
+            let key = ailocal::auth::load_or_create()?;
+            ailocal::gateway::check(&crate::read::gateway_url(&cfg), &key)
+        })
+        .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct HarnessRequest {
+    /// Which model to point it at. `None` lets the library choose, in the order a
+    /// person would expect: configured, then loaded, then the first alphabetically.
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// `ailocal harness configure <name> [--model <model>]`.
+async fn configure_harness(
+    path: std::result::Result<Path<String>, PathRejection>,
+    body: std::result::Result<Json<HarnessRequest>, JsonRejection>,
+) -> Result<Json<setup::HarnessConfigured>> {
+    let Path(name) = path.map_err(rejected)?;
+    let Json(request) = body.map_err(rejected)?;
+    Ok(Json(
+        blocking(move || {
+            let cfg = Config::load()?;
+            let url = crate::read::gateway_url(&cfg);
+            setup::configure_harness(&cfg, &name, &url, request.model.as_deref())
+        })
+        .await?,
+    ))
+}
+
+/// `ailocal harness unconfigure <name>`: whether it was pointing at us.
+async fn unconfigure_harness(
+    path: std::result::Result<Path<String>, PathRejection>,
+) -> Result<Json<bool>> {
+    let Path(name) = path.map_err(rejected)?;
+    Ok(Json(
+        blocking(move || setup::unconfigure_harness(&name)).await?,
+    ))
+}
+
 /// The `ailocal` a service should run when a change made here rewrites one.
 ///
 /// Never this binary: a unit that ran `ailocal-ui` would start a console where the
@@ -146,6 +261,24 @@ fn unit_binary() -> anyhow::Result<PathBuf> {
 
 /// A body that is not the JSON a route takes. axum's own answer is plain text; this
 /// API answers every error in one shape.
-fn rejected(rejection: JsonRejection) -> Error {
+fn rejected(rejection: impl Rejected) -> Error {
     Error::BadRequest(rejection.body_text())
+}
+
+/// Axum gives each extractor its own rejection type with its own `body_text`, and no
+/// trait over them, so one is declared here rather than repeating the conversion.
+trait Rejected {
+    fn body_text(self) -> String;
+}
+
+impl Rejected for JsonRejection {
+    fn body_text(self) -> String {
+        Self::body_text(&self)
+    }
+}
+
+impl Rejected for PathRejection {
+    fn body_text(self) -> String {
+        Self::body_text(&self)
+    }
 }

@@ -320,10 +320,11 @@ fn find(cfg: &Config, name: &str) -> anyhow::Result<registry::Model> {
         .into_iter()
         .find(|m| m.name == name)
         .ok_or_else(|| {
-            anyhow::anyhow!(
+            crate::Refused::Missing(format!(
                 "no model named {name:?} in {}; `ailocal model ls` shows what is installed",
                 cfg.models_dir.display()
-            )
+            ))
+            .into()
         })
 }
 

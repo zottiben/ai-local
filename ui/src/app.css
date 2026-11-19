@@ -620,3 +620,106 @@ button.small {
 .actions li {
   padding: 0.15rem 0;
 }
+
+/* --- setup --- */
+
+/* A row of controls, left-aligned. `.row-actions` right-aligns for a table cell,
+   which reads as an afterthought when the buttons are the point of the panel. */
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+.status-value .controls,
+.harness .controls {
+  margin-top: 0;
+}
+.status-value .controls {
+  justify-content: flex-end;
+}
+
+/* Something handed over to be run by a person, or a consequence worth keeping in
+   view: rule 6's exact commands, and what a saved setting means for what is loaded. */
+.note {
+  margin: 0.75rem 0 0;
+  padding: 0.5rem 0.7rem;
+  border-left: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+.note p {
+  margin: 0;
+}
+.note p + p {
+  margin-top: 0.3rem;
+}
+
+.harness + .harness {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+.harness .panel-head {
+  margin-bottom: 0.4rem;
+}
+.harness h3 {
+  margin: 0;
+}
+.harness p {
+  margin: 0.25rem 0;
+}
+
+.settings-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 1rem;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+}
+.field-label {
+  font-weight: 550;
+}
+/* The house rule is prose, so it gets the full width rather than a 16rem column. */
+.settings-form .field:has(textarea) {
+  grid-column: 1 / -1;
+}
+.settings-form .controls {
+  grid-column: 1 / -1;
+}
+
+.field input,
+.field select,
+.field textarea {
+  font: inherit;
+  padding: 0.35rem 0.5rem;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: inherit;
+  min-width: 0;
+}
+.field textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+.field input:focus-visible,
+.field select:focus-visible,
+.field textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.harness select {
+  font: inherit;
+  padding: 0.3rem 0.5rem;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: inherit;
+}

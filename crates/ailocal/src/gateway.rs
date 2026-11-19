@@ -179,6 +179,102 @@ pub fn usable_port(host: &str, preferred: u16) -> Option<u16> {
 /// the listener exists - so anything that checks immediately after starting the
 /// service races it and reports a healthy gateway as broken.
 #[must_use]
+/// One assertion `gateway check` makes, and what the gateway actually answered.
+#[derive(Debug, serde::Serialize)]
+pub struct Probe {
+    pub label: String,
+    pub expected: u16,
+    /// The status it gave, or why the request did not finish.
+    #[serde(serialize_with = "crate::wire::result")]
+    pub got: anyhow::Result<u16>,
+}
+
+impl Probe {
+    #[must_use]
+    pub fn passed(&self) -> bool {
+        matches!(&self.got, Ok(status) if *status == self.expected)
+    }
+}
+
+/// What `gateway check` found.
+#[derive(Debug, serde::Serialize)]
+pub struct Check {
+    pub base: String,
+    /// Nothing is listening at all. The auth assertions are meaningless then, so they
+    /// are not made: four identical "error sending request" lines say the same thing
+    /// four times and none of them says what to do.
+    pub reachable: bool,
+    pub probes: Vec<Probe>,
+}
+
+impl Check {
+    #[must_use]
+    pub fn failures(&self) -> usize {
+        self.probes.iter().filter(|p| !p.passed()).count()
+    }
+
+    #[must_use]
+    pub fn passed(&self) -> bool {
+        self.reachable && self.failures() == 0
+    }
+}
+
+/// Prove the gateway answers, and that it refuses anything without the right key.
+///
+/// The second assertion is the one that matters: a `/v1/models` that answers 200 with
+/// no credential is a gateway open to whatever can reach the port.
+///
+/// # Errors
+/// If an HTTP client cannot be built.
+pub fn check(base: &str, key: &str) -> anyhow::Result<Check> {
+    let base = base.trim_end_matches('/').to_owned();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    if client.get(format!("{base}/health")).send().is_err() {
+        return Ok(Check {
+            base,
+            reachable: false,
+            probes: Vec::new(),
+        });
+    }
+
+    let status = |request: reqwest::blocking::RequestBuilder| -> anyhow::Result<u16> {
+        Ok(request.send()?.status().as_u16())
+    };
+    let models = || client.get(format!("{base}/v1/models"));
+
+    let probes = vec![
+        Probe {
+            label: "health, unauthenticated".to_owned(),
+            expected: 200,
+            got: status(client.get(format!("{base}/health"))),
+        },
+        Probe {
+            label: "models rejects no credential".to_owned(),
+            expected: 401,
+            got: status(models()),
+        },
+        Probe {
+            label: "models rejects a wrong credential".to_owned(),
+            expected: 401,
+            got: status(models().bearer_auth("ail_definitely_wrong")),
+        },
+        Probe {
+            label: "models accepts the real key".to_owned(),
+            expected: 200,
+            got: status(models().bearer_auth(key)),
+        },
+    ];
+
+    Ok(Check {
+        base,
+        reachable: true,
+        probes,
+    })
+}
+
 pub fn wait_until_answering(host: &str, port: u16, limit: std::time::Duration) -> bool {
     let deadline = std::time::Instant::now() + limit;
     loop {

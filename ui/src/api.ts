@@ -6,8 +6,13 @@
 // header the page sends.
 
 import type {
+  Applied,
   Config,
   DefaultChange,
+  GatewayCheck,
+  GatewayView,
+  HarnessConfigured,
+  HarnessView,
   Installed,
   Instance,
   LogView,
@@ -17,6 +22,9 @@ import type {
   Overview,
   Removal,
   Removed,
+  Services,
+  ServicesInstalled,
+  SettingsPatch,
 } from "./types";
 
 const TOKEN_KEY = "ailocal.token";
@@ -99,4 +107,21 @@ export const api = {
   remove: (name: string) => request<Removed>(`/models/${encodeURIComponent(name)}`, "DELETE"),
   setDefault: (name: string) => request<DefaultChange>("/default", "PUT", { name }),
   stop: () => request<Instance | null>("/stop", "POST"),
+
+  services: () => request<Services>("/services"),
+  gateway: () => request<GatewayView>("/gateway"),
+  harnesses: () => request<HarnessView[]>("/harnesses"),
+
+  installServices: (noStart = false) =>
+    request<ServicesInstalled>("/services", "POST", { no_start: noStart }),
+  removeServices: () => request<string[]>("/services", "DELETE"),
+  serviceAction: (name: string, action: "start" | "stop") =>
+    request<Services>(`/services/${encodeURIComponent(name)}/${action}`, "POST"),
+  checkGateway: () => request<GatewayCheck>("/gateway/check", "POST"),
+  configureHarness: (name: string, model?: string) =>
+    request<HarnessConfigured>(`/harnesses/${encodeURIComponent(name)}`, "PUT", { model }),
+  unconfigureHarness: (name: string) =>
+    request<boolean>(`/harnesses/${encodeURIComponent(name)}`, "DELETE"),
+  /** Only the settings being changed; the rest are left as they are on disk. */
+  saveSettings: (patch: SettingsPatch) => request<Applied>("/settings", "PUT", patch),
 };

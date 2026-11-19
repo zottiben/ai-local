@@ -17,7 +17,7 @@ use ailocal::config::Config;
 use ailocal::models::{self, Installed, Offer, Removal};
 use ailocal::serve::Instance;
 use ailocal::status::{self, Overview};
-use ailocal::{harness, serve, service};
+use ailocal::{harness, serve, service, setup};
 
 use crate::error::{Error, Result, blocking};
 use crate::state::AppState;
@@ -33,6 +33,9 @@ pub fn routes() -> Router<AppState> {
         .route("/loaded/log", get(log))
         .route("/loaded/memory", get(memory))
         .route("/models/{name}/removal", get(removal))
+        .route("/services", get(services))
+        .route("/harnesses", get(harnesses))
+        .route("/gateway", get(gateway))
 }
 
 /// What the client needs to word things for this machine.
@@ -237,6 +240,93 @@ fn tail(path: &Path, from: Option<u64>) -> anyhow::Result<(u64, u64, String)> {
 /// The settings, as `ailocal config show` reads them.
 async fn config() -> Result<Json<Config>> {
     Ok(Json(blocking(Config::load).await?))
+}
+
+/// What the service manager says about our units.
+async fn services() -> Result<Json<setup::Services>> {
+    Ok(Json(blocking(|| Ok(setup::services())).await?))
+}
+
+/// One harness, and what pointing it at the gateway would do.
+#[derive(Debug, Serialize)]
+struct Harness {
+    name: &'static str,
+    configured: bool,
+    /// The file that points it at us. Claude Code's has to be sourced by hand, so the
+    /// window has to be able to name it.
+    path: Option<PathBuf>,
+    /// What it would be pointed at, or why it cannot be. A machine with no runnable
+    /// model has no plan for either harness, and saying which one is the whole point.
+    #[serde(serialize_with = "ailocal::wire::result")]
+    plan: anyhow::Result<setup::HarnessPlan>,
+}
+
+/// Both harnesses, planned against the gateway the config names.
+///
+/// Planned on every read rather than cached, because the answer moves on its own: a
+/// model finishes downloading, the default changes, the gateway comes up.
+async fn harnesses() -> Result<Json<Vec<Harness>>> {
+    Ok(Json(
+        blocking(|| {
+            let cfg = Config::load()?;
+            let url = gateway_url(&cfg);
+            Ok(harness::NAMES
+                .into_iter()
+                .map(|name| Harness {
+                    name,
+                    configured: harness::is_configured(name),
+                    path: harness_path(name).ok(),
+                    plan: setup::plan_harness(&cfg, name, &url, None),
+                })
+                .collect())
+        })
+        .await?,
+    ))
+}
+
+/// The gateway: where it is, whether it answers, and what is wrong if it does not.
+#[derive(Debug, Serialize)]
+struct GatewayView {
+    url: String,
+    port: u16,
+    state: status::Gateway,
+    trouble: Option<setup::Trouble>,
+    /// The bearer token a harness needs. Loopback-only and already on this machine's
+    /// disk, so showing it here reveals nothing the window could not read anyway.
+    key: Option<String>,
+}
+
+async fn gateway() -> Result<Json<GatewayView>> {
+    Ok(Json(
+        blocking(|| {
+            let cfg = Config::load()?;
+            Ok(GatewayView {
+                url: gateway_url(&cfg),
+                port: cfg.gateway_port,
+                state: status::gateway_state(&cfg),
+                trouble: setup::trouble(&cfg),
+                key: ailocal::auth::load()?,
+            })
+        })
+        .await?,
+    ))
+}
+
+/// Where a harness keeps what we wrote.
+fn harness_path(name: &str) -> anyhow::Result<PathBuf> {
+    match name {
+        "claude-code" => harness::claude_code_env_path(),
+        _ => harness::pi_models_json_path(),
+    }
+}
+
+/// The URL a harness on this machine should use, which is always a loopback one.
+pub(crate) fn gateway_url(cfg: &Config) -> String {
+    format!(
+        "http://{}:{}",
+        ailocal::gateway::loopback_for(&cfg.gateway_host),
+        cfg.gateway_port
+    )
 }
 
 #[cfg(test)]

@@ -3,11 +3,12 @@
 
 import { useSyncExternalStore } from "react";
 
-export type View = "overview" | "models";
+export type View = "overview" | "models" | "setup";
 
 export const PATHS: Record<View, string> = {
   overview: "/",
   models: "/models",
+  setup: "/setup",
 };
 
 const listeners = new Set<() => void>();
@@ -30,7 +31,10 @@ export function navigate(view: View) {
 
 /** Anything that is not a known path is the overview, as the server serves it. */
 export function parse(path: string): View {
-  return path.replace(/\/+$/, "") === PATHS.models ? "models" : "overview";
+  const trimmed = path.replace(/\/+$/, "");
+  if (trimmed === PATHS.models) return "models";
+  if (trimmed === PATHS.setup) return "setup";
+  return "overview";
 }
 
 export function useView(): View {

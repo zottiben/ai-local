@@ -27,6 +27,7 @@ const overview: Overview = {
     ["io.github.zottiben.ailocal.model", "not_installed"],
   ],
   harnesses: ["pi"],
+  llama_server: null,
   next: "start_gateway",
 };
 

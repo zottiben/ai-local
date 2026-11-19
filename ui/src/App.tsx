@@ -3,11 +3,13 @@ import { useResource } from "./hooks";
 import { type Connection, useLive } from "./live";
 import { Models } from "./Models";
 import { Overview } from "./Overview";
+import { Setup } from "./Setup";
 import { PATHS, type View, navigate, useView } from "./router";
 
 const TABS: { view: View; label: string }[] = [
   { view: "overview", label: "Overview" },
   { view: "models", label: "Models" },
+  { view: "setup", label: "Setup" },
 ];
 
 export function App() {
@@ -65,6 +67,8 @@ function Console() {
           <p className="muted pad">Connecting…</p>
         ) : view === "models" ? (
           <Models generation={generation} jobs={jobs} />
+        ) : view === "setup" ? (
+          <Setup generation={generation} meta={meta.data} />
         ) : (
           <Overview generation={generation} meta={meta.data} />
         )}
