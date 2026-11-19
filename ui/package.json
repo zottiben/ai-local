@@ -1,7 +1,7 @@
 {
   "name": "ailocal-ui",
   "private": true,
-  "version": "0.6.3",
+  "version": "0.7.0",
   "type": "module",
   "description": "The console. Built to static assets and embedded in the ailocal-ui binary.",
   "scripts": {
