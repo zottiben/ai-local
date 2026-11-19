@@ -9,6 +9,7 @@
 #   --version <tag>   install a specific release tag (e.g. v0.1.0) instead of the latest
 #   --extra <name>    also install an optional companion, e.g. --extra eval (repeatable)
 #   --extras-only     install only the named extras, leaving ailocal itself alone
+#   --app             also install the desktop app (the console in its own window)
 #   -h, --help        show this help
 #
 # Linux (x86_64, aarch64) and macOS (universal). Windows is out of scope: llama.cpp's
@@ -33,11 +34,16 @@ Options:
   --version <tag>   install a specific release tag (e.g. v0.1.0) instead of the latest
   --extra <name>    also install an optional companion, e.g. --extra eval (repeatable)
   --extras-only     install only the named extras, leaving ailocal itself alone
+  --app             also install the desktop app (the console in its own window)
   -h, --help        show this help
 
 Extras are separate binaries released from the same tag, so that the core stays small
 for the machines that only serve models. `ailocal update` refreshes whichever ones are
 already installed, keeping their version in step with ailocal's.
+
+The desktop app is not one of them: it is an application, not a subcommand, so it has
+its own flag. It is published for Apple Silicon and for Linux x86_64. `ailocal update`
+refreshes it too once it is installed.
 EOF
 }
 
@@ -57,6 +63,7 @@ FORCE=0
 VERSION=""
 EXTRAS=""
 EXTRAS_ONLY=0
+APP=0
 
 add_extra() {
   for known in $KNOWN_EXTRAS; do
@@ -71,6 +78,11 @@ add_extra() {
     fi
   done
   echo "Unknown extra: $1 (known: ${KNOWN_EXTRAS})" >&2
+  # The likeliest wrong guess, because the app is released from the same tag and
+  # installed by the same script - it is just not a subcommand.
+  case "$1" in
+    desktop | app | ui-app) echo "For the desktop app, use --app instead." >&2 ;;
+  esac
   exit 2
 }
 
@@ -91,6 +103,7 @@ while [ $# -gt 0 ]; do
       ;;
     --extra=*) add_extra "${1#--extra=}" ;;
     --extras-only) EXTRAS_ONLY=1 ;;
+    --app) APP=1 ;;
     -h | --help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -119,6 +132,15 @@ case "$OS" in
     PLATFORM="macos-universal"
     ;;
   *) echo "Unsupported OS: $OS (ailocal targets Linux and macOS)" >&2; exit 1 ;;
+esac
+
+# The desktop app is built per architecture rather than universal, because it is opened
+# once on the machine it was downloaded to. The release publishes two: Apple Silicon and
+# Linux x86_64. An empty label means there is none for this machine.
+case "$OS" in
+  linux) case "$ARCH" in x86_64 | amd64) APP_PLATFORM="linux-x86_64" ;; *) APP_PLATFORM="" ;; esac ;;
+  darwin) case "$ARCH" in arm64) APP_PLATFORM="macos-arm64" ;; *) APP_PLATFORM="" ;; esac ;;
+  *) APP_PLATFORM="" ;;
 esac
 
 # Pick a bin dir on PATH without needing sudo when possible.
@@ -158,7 +180,7 @@ if [ -n "$CURRENT" ] && [ "$CURRENT" = "$VERSION_NUM" ]; then
   fi
   if [ "$FORCE" -eq 0 ]; then
     NEED_CORE=0
-    [ -z "$EXTRAS" ] && { echo "ailocal v${CURRENT} is already installed (use --force to reinstall)."; exit 0; }
+    [ -z "$EXTRAS" ] && [ "$APP" -eq 0 ] && { echo "ailocal v${CURRENT} is already installed (use --force to reinstall)."; exit 0; }
   fi
 elif [ -n "$CURRENT" ] && newer_than "$CURRENT" "$VERSION_NUM"; then
   # A development build, or a hand-picked tag: report it rather than quietly downgrade.
@@ -168,7 +190,7 @@ elif [ -n "$CURRENT" ] && newer_than "$CURRENT" "$VERSION_NUM"; then
   fi
   if [ "$FORCE" -eq 0 ]; then
     NEED_CORE=0
-    [ -z "$EXTRAS" ] && { echo "Nothing to do (use --force to install ${VERSION} anyway)."; exit 0; }
+    [ -z "$EXTRAS" ] && [ "$APP" -eq 0 ] && { echo "Nothing to do (use --force to install ${VERSION} anyway)."; exit 0; }
   fi
 elif [ "$CHECK_ONLY" -eq 1 ]; then
   if [ -n "$CURRENT" ]; then
@@ -246,6 +268,90 @@ install_binary() {
   echo "Installed ${binary} ${VERSION} to ${BIN_DIR}/${binary}"
 }
 
+# --- the desktop app -------------------------------------------------------------
+# Not a binary on PATH and not a subcommand, so it cannot go through install_binary:
+# macOS ships an .app inside a .dmg, Linux an AppImage.
+
+install_app() {
+  if [ -z "$APP_PLATFORM" ]; then
+    echo "No desktop app is published for ${OS} ${ARCH}." >&2
+    echo "The same console runs in a browser: ailocal extras install ui, then ailocal ui" >&2
+    exit 1
+  fi
+
+  if [ "$OS" = "darwin" ]; then
+    filename="ai-local-desktop-v${VERSION_NUM}-${APP_PLATFORM}.dmg"
+  else
+    filename="ai-local-desktop-v${VERSION_NUM}-${APP_PLATFORM}.AppImage"
+  fi
+
+  echo "Downloading the ai-local app ${VERSION} for ${APP_PLATFORM}..."
+  if ! curl -fsSL "${BASE}/${filename}" -o "${TMPDIR}/${filename}"; then
+    echo "Could not fetch ${BASE}/${filename}" >&2
+    echo "Release ${VERSION} may predate the desktop app." >&2
+    exit 1
+  fi
+  verify "$filename"
+
+  if [ "$OS" = "darwin" ]; then
+    # /Applications is group-writable by admin, so this usually needs no sudo.
+    APP_DIR="/Applications"
+    [ -w "$APP_DIR" ] || APP_DIR="${HOME}/Applications"
+    mkdir -p "$APP_DIR"
+
+    mount="${TMPDIR}/mnt"
+    mkdir -p "$mount"
+    hdiutil attach -nobrowse -readonly -mountpoint "$mount" "${TMPDIR}/${filename}" -quiet
+    # Replaced rather than merged: a file left behind inside an old bundle would
+    # outlive the update. A running copy keeps its own inode and is unaffected until
+    # it is next launched.
+    rm -rf "${APP_DIR}/ai-local.app"
+    cp -R "${mount}/ai-local.app" "${APP_DIR}/ai-local.app"
+    hdiutil detach "$mount" -quiet
+
+    # The app is ad-hoc signed, so Gatekeeper refuses a quarantined copy outright
+    # rather than offering the right-click-Open escape. curl sets no quarantine
+    # attribute, but clear it in case the .dmg was re-hosted by something that does.
+    xattr -dr com.apple.quarantine "${APP_DIR}/ai-local.app" 2>/dev/null || true
+    echo "Installed the ai-local app ${VERSION} to ${APP_DIR}/ai-local.app"
+  else
+    # Staged and renamed, as for a binary: a rename over a running AppImage is atomic.
+    staged="${BIN_DIR}/.ai-local-desktop.new.$$"
+    if mkdir -p "$BIN_DIR" 2>/dev/null && [ -w "$BIN_DIR" ]; then
+      cp "${TMPDIR}/${filename}" "$staged"
+      chmod +x "$staged"
+      mv -f "$staged" "${BIN_DIR}/ai-local-desktop"
+    else
+      echo "Installing to ${BIN_DIR} (requires sudo)..."
+      sudo mkdir -p "$BIN_DIR"
+      sudo cp "${TMPDIR}/${filename}" "$staged"
+      sudo chmod +x "$staged"
+      sudo mv -f "$staged" "${BIN_DIR}/ai-local-desktop"
+    fi
+    echo "Installed the ai-local app ${VERSION} to ${BIN_DIR}/ai-local-desktop"
+
+    # A launcher entry, so it is an application rather than a command you have to
+    # remember. Written by hand rather than extracted from the AppImage: extraction
+    # needs the AppImage runtime to cooperate, and a desktop file is eight lines.
+    apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+    if mkdir -p "$apps" 2>/dev/null; then
+      cat > "${apps}/ai-local.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=ai-local
+Comment=Manage local models, services and harnesses
+Exec=${BIN_DIR}/ai-local-desktop
+Icon=ai-local
+Terminal=false
+Categories=Development;
+DESKTOP
+      command -v update-desktop-database >/dev/null 2>&1 &&
+        update-desktop-database "$apps" >/dev/null 2>&1 || true
+      echo "Added a launcher entry at ${apps}/ai-local.desktop"
+    fi
+  fi
+}
+
 # Fetched once and reused for every asset.
 curl -fsSL "${BASE}/checksums.txt" -o "${TMPDIR}/checksums.txt" 2>/dev/null || true
 
@@ -261,6 +367,10 @@ fi
 for extra in $EXTRAS; do
   install_binary "ailocal-${extra}"
 done
+
+if [ "$APP" -eq 1 ]; then
+  install_app
+fi
 
 if [ "$NEED_CORE" -eq 1 ] && [ -n "$CURRENT" ] && [ "$CURRENT" != "$VERSION_NUM" ]; then
   echo "Updated from v${CURRENT}."
@@ -292,3 +402,11 @@ fi
 for extra in $EXTRAS; do
   echo "Try: ailocal ${extra} --help"
 done
+
+if [ "$APP" -eq 1 ]; then
+  if [ "$OS" = "darwin" ]; then
+    echo "Open it from Launchpad, or: open -a ai-local"
+  else
+    echo "Open it from your launcher, or: ai-local-desktop"
+  fi
+fi

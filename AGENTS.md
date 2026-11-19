@@ -262,3 +262,19 @@ name in install.sh's `KNOWN_EXTRAS`, and the binary in release.yml's build loop.
 Versions move in lockstep - `ailocal extras install` pins to the core's own version and
 `ailocal update` refreshes whatever is installed - because a core and an extra from
 different releases is the one failure this split can create on its own.
+
+**The desktop app is not an extra.** An `Extra` is a binary implementing a subcommand,
+which `locate` finds beside `ailocal` or on `PATH`; the app is an application bundle,
+answers to no subcommand, and lives in `/Applications` or as an AppImage. It gets
+install.sh's own `--app` flag, and `update::app_installed` decides whether
+`ailocal update` carries that flag along. Those two paths must agree: if they drift,
+`update` silently leaves an old window beside a new core.
+
+**An app bundle cannot resolve `ailocal` by `PATH` alone** (rule 5 again). There is no
+`ailocal` inside the bundle, and a launcher-started process gets launchd's
+`/usr/bin:/bin:/usr/sbin:/sbin` - without `~/.local/bin`, which is where install.sh
+puts it. Measured on that PATH: installing the services answered "there is no ailocal
+at ... or on PATH for a service to run" while `~/.local/bin/ailocal` was there the
+whole time. `update::installed_ailocal` searches the install directories after `PATH`.
+A window opened with `open` from a terminal inherits that terminal's PATH and never
+sees this, so reproduce it with the bare PATH rather than by launching the app.

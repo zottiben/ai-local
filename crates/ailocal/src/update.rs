@@ -21,8 +21,13 @@ const INSTALL_URL: &str = "https://zottiben.github.io/ai-local/install.sh";
 ///
 /// Extras are carried along rather than left behind, because a core and an extra from
 /// different releases is the one failure this split CLI can create on its own. The
-/// script's `--check` path exits before installing anything, so `update --check` still
-/// only reports.
+/// desktop app travels with them for the same reason: it embeds the console's own
+/// server, so an old window against a new core is that same skew. The script's
+/// `--check` path exits before installing anything, so `update --check` still only
+/// reports.
+///
+/// `--app` is added only when the app is already installed, and never twice: the
+/// caller may have asked for it on the command line.
 ///
 /// # Errors
 /// If curl is missing, the script cannot be downloaded, or it cannot be run.
@@ -32,7 +37,31 @@ pub fn run(args: &[String]) -> anyhow::Result<i32> {
         all.push("--extra".to_owned());
         all.push(extra.to_owned());
     }
+    if app_installed().is_some() && !all.iter().any(|a| a == "--app") {
+        all.push("--app".to_owned());
+    }
     run_script(&all)
+}
+
+/// The installed desktop app, if there is one.
+///
+/// Both paths are the ones `install.sh` writes, and it has to stay that way: this
+/// answers whether `ailocal update` should refresh the app, so a path that disagreed
+/// would quietly leave an old window behind. macOS prefers `/Applications`, falling
+/// back to `~/Applications` when the first is not writable; Linux gets an AppImage on
+/// `PATH`.
+#[must_use]
+pub fn app_installed() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        [PathBuf::from("/Applications")]
+            .into_iter()
+            .chain(home.map(|h| h.join("Applications")))
+            .map(|dir| dir.join("ai-local.app"))
+            .find(|p| p.is_dir())
+    } else {
+        which("ai-local-desktop")
+    }
 }
 
 /// Fetch the published install script and run it, forwarding `args` and inheriting
@@ -122,9 +151,48 @@ pub fn is_build_dir(exe: &Path) -> bool {
 /// If `beside` is missing or in a build directory and no installed `ailocal` is on
 /// `PATH`.
 pub fn unit_binary(beside: &Path) -> anyhow::Result<PathBuf> {
-    choose_unit_binary(beside, || {
-        which("ailocal").and_then(|p| p.canonicalize().ok())
-    })
+    choose_unit_binary(beside, installed_ailocal)
+}
+
+/// Directories `install.sh` writes `ailocal` to, in the order it prefers them.
+///
+/// `$HOME/.local/bin` is first because that is its own first choice whenever the
+/// directory is already on `PATH`.
+const INSTALL_DIRS: &[&str] = &["/usr/local/bin"];
+
+/// An installed `ailocal`, found the way rule 5 requires rather than by `PATH` alone.
+///
+/// A process started by a service manager gets that manager's `PATH`, not a shell's:
+/// launchd hands out `/usr/bin:/bin:/usr/sbin:/sbin`, with no `~/.local/bin` - which
+/// is where `install.sh` puts the binary whenever that directory is already on a
+/// shell's `PATH`. `which` alone therefore cannot see it. Measured on that exact
+/// `PATH`, with no `ailocal` beside the console binary: installing the services
+/// answered "there is no ailocal at ... or on PATH for a service to run" while
+/// `~/.local/bin/ailocal` was present the whole time.
+///
+/// A GUI app launched with `open` from a terminal inherits that terminal's `PATH` and
+/// is unaffected, so this is the launcher-started case rather than every window.
+///
+/// `PATH` still wins, so a deliberately chosen build beats an installed copy.
+fn installed_ailocal() -> Option<PathBuf> {
+    installed_from(
+        which("ailocal"),
+        std::env::var_os("HOME").map(PathBuf::from),
+    )
+}
+
+/// The lookup itself, with the environment passed in so it can be tested without
+/// mutating this process's own (as `data_root_from` is).
+fn installed_from(on_path: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    on_path
+        .or_else(|| {
+            home.map(|h| h.join(".local/bin"))
+                .into_iter()
+                .chain(INSTALL_DIRS.iter().map(PathBuf::from))
+                .map(|dir| dir.join("ailocal"))
+                .find(|p| p.is_file())
+        })
+        .and_then(|p| p.canonicalize().ok())
 }
 
 fn choose_unit_binary(
@@ -189,6 +257,37 @@ mod tests {
         assert!(err.to_string().contains("cargo clean"), "{err}");
         let err = choose_unit_binary(&root.join("bin/missing"), || None).unwrap_err();
         assert!(err.to_string().contains("no ailocal"), "{err}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The bundled app's case: no `ailocal` beside it inside the bundle, and a
+    /// launcher `PATH` that cannot see `~/.local/bin`. Measured before this lookup
+    /// searched the install directories: installing the services over HTTP answered
+    /// "there is no ailocal at /private/tmp/.../ailocal or on PATH for a service to
+    /// run" with ~/.local/bin/ailocal installed all along.
+    #[test]
+    fn an_installed_ailocal_is_found_without_it_being_on_path() {
+        let root = std::env::temp_dir().join(format!("ailocal-finder-{}", std::process::id()));
+        let local = root.join(".local/bin");
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::write(local.join("ailocal"), b"").unwrap();
+
+        // None is what `which` returns on a launcher PATH of /usr/bin:/bin:/usr/sbin:/sbin.
+        assert_eq!(
+            installed_from(None, Some(root.clone())),
+            Some(local.join("ailocal").canonicalize().unwrap())
+        );
+        // A PATH that can answer still wins, so a chosen build beats an installed copy.
+        let built = root.join("target/debug/ailocal");
+        std::fs::create_dir_all(built.parent().unwrap()).unwrap();
+        std::fs::write(&built, b"").unwrap();
+        assert_eq!(
+            installed_from(Some(built.clone()), Some(root.clone())),
+            Some(built.canonicalize().unwrap())
+        );
+        // No HOME and nothing installed is still an honest None rather than a panic.
+        assert_eq!(installed_from(None, None), None);
 
         std::fs::remove_dir_all(&root).ok();
     }
