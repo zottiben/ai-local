@@ -260,11 +260,6 @@ install_binary() {
     sudo chmod +x "$staged"
     sudo mv -f "$staged" "${BIN_DIR}/${binary}"
   fi
-
-  if [ "$OS" = "darwin" ]; then
-    # curl downloads carry no quarantine attribute, but clear it in case of a re-host.
-    xattr -d com.apple.quarantine "${BIN_DIR}/${binary}" 2>/dev/null || true
-  fi
   echo "Installed ${binary} ${VERSION} to ${BIN_DIR}/${binary}"
 }
 
@@ -308,11 +303,6 @@ install_app() {
     rm -rf "${APP_DIR}/ai-local.app"
     cp -R "${mount}/ai-local.app" "${APP_DIR}/ai-local.app"
     hdiutil detach "$mount" -quiet
-
-    # The app is ad-hoc signed, so Gatekeeper refuses a quarantined copy outright
-    # rather than offering the right-click-Open escape. curl sets no quarantine
-    # attribute, but clear it in case the .dmg was re-hosted by something that does.
-    xattr -dr com.apple.quarantine "${APP_DIR}/ai-local.app" 2>/dev/null || true
     echo "Installed the ai-local app ${VERSION} to ${APP_DIR}/ai-local.app"
   else
     # Staged and renamed, as for a binary: a rename over a running AppImage is atomic.

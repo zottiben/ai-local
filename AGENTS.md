@@ -304,3 +304,9 @@ at ... or on PATH for a service to run" while `~/.local/bin/ailocal` was there t
 whole time. `update::installed_ailocal` searches the install directories after `PATH`.
 A window opened with `open` from a terminal inherits that terminal's PATH and never
 sees this, so reproduce it with the bare PATH rather than by launching the app.
+
+**install.sh never touches `com.apple.quarantine`.** The flag is set by the program
+that downloads, never by the host, and curl sets none, so clearing it "in case of a
+re-host" removed nothing. It is also the Gatekeeper-bypass pattern endpoint security
+alerts on - download, strip quarantine, run - and on a managed Mac it did, once per
+update. A quarantined copy is the user's to allow in System Settings.

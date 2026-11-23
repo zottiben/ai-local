@@ -489,7 +489,7 @@ disagree about chrome. It remembers its size and position between runs.
 The app is ad-hoc signed, not notarised, so a **browser** download needs a right-click
 and **Open** the first time (macOS offers no other way past an unidentified developer).
 Installing it with the command above avoids that entirely: a `curl` download carries no
-quarantine attribute, and the installer clears one if anything set it.
+quarantine attribute, so there is nothing for Gatekeeper to stop.
 
 One thing it does that `ailocal ui` does not: a model started from the window is
 stopped when you quit it. A terminal delivers Ctrl-C to the whole process group, and
