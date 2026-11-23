@@ -35,6 +35,18 @@ export interface RunnableModel {
   thinking: Thinking;
 }
 
+/** `sampling::Sampling`: what a publisher set, and nothing for what it did not. */
+export interface Sampling {
+  temperature?: number;
+  top_k?: number;
+  top_p?: number;
+  min_p?: number;
+  presence_penalty?: number;
+  frequency_penalty?: number;
+  repeat_penalty?: number;
+  repeat_last_n?: number;
+}
+
 /** `serve::Instance`: the llama-server that is resident, from its state file. */
 export interface Instance {
   pid: number;
@@ -47,6 +59,8 @@ export interface Instance {
   desktop_mib: number | null;
   cache_ram_mib: number | null;
   reasoning: string;
+  /** Absent when the publisher set none, so the model file and llama.cpp decide. */
+  sampling?: Sampling;
   /** `null` for a model a service runs, whose output goes to the service's log. */
   log: string | null;
 }

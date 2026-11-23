@@ -33,7 +33,7 @@ pub const DEFAULT_PORT: u16 = 8080;
 pub const DEFAULT_HOST: &str = "127.0.0.1";
 
 /// A running llama-server, as recorded on disk.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Instance {
     pub pid: u32,
     pub model: String,
@@ -80,6 +80,14 @@ pub struct Instance {
     /// for every task to be sure which mode it was in.
     #[serde(default = "unknown_reasoning")]
     pub reasoning: String,
+
+    /// The publisher's sampling this server was given as its defaults.
+    ///
+    /// `None` when there were none to give, so the GGUF's own `general.sampling.*` and
+    /// then llama.cpp's defaults decide - and for a state file written before this was
+    /// recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling: Option<crate::sampling::Sampling>,
 
     /// The file its output goes to, when it has one.
     ///
@@ -550,6 +558,9 @@ fn spawn(
     stdio: Stdio,
 ) -> anyhow::Result<(Instance, std::process::Child)> {
     let context = plan_context(model, budget, opts)?;
+    // Read before the eviction below, so a damaged file costs this launch and not the
+    // model that is serving.
+    let sampling = crate::sampling::load(&model.path)?.filter(|s| !s.is_empty());
 
     // Single-tenant: the budget cannot hold two models, so this is eviction. Done only
     // after plan_context has accepted the new load, so a refusal never costs the
@@ -618,6 +629,9 @@ fn spawn(
     if let Some(key) = &opts.api_key {
         cmd.args(["--api-key", key]);
     }
+    if let Some(sampling) = &sampling {
+        cmd.args(sampling.args());
+    }
 
     let mut child = cmd
         .spawn()
@@ -636,6 +650,7 @@ fn spawn(
         desktop_mib,
         cache_ram_mib,
         reasoning: opts.reasoning.clone(),
+        sampling,
         log: (stdio == Stdio::LogFile).then(|| log.clone()),
     };
 
@@ -893,6 +908,7 @@ mod tests {
             desktop_mib: Some(desktop_mib),
             cache_ram_mib: Some(512),
             reasoning: "auto".into(),
+            sampling: None,
             log: None,
         }
     }
@@ -1081,6 +1097,7 @@ mod tests {
             desktop_mib: None,
             cache_ram_mib: None,
             reasoning: "off".into(),
+            sampling: None,
             log: None,
         };
 

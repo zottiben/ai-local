@@ -95,6 +95,9 @@ pub struct Artifact {
     /// Filename to store it under, derived from the reference.
     pub file_name: String,
     pub auth: Option<String>,
+    /// The publisher's recommended sampling, when the registry ships it as a layer of
+    /// its own. Only Ollama does; see [`crate::sampling`].
+    pub params_url: Option<String>,
 }
 
 impl Source {
@@ -131,23 +134,29 @@ impl Source {
 
                 // A manifest carries several layers - template, params, licence. The
                 // weights are the one whose mediaType mentions the model.
-                let layer = manifest["layers"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .find(|l| l["mediaType"].as_str().is_some_and(|m| m.contains("model")))
+                let layers = manifest["layers"].as_array();
+                let layer = |kind: &str| {
+                    layers
+                        .into_iter()
+                        .flatten()
+                        .find(|l| l["mediaType"].as_str().is_some_and(|m| m.contains(kind)))
+                };
+                let model = layer("model")
                     .ok_or_else(|| anyhow::anyhow!("manifest for {self} has no model layer"))?;
 
-                let digest = layer["digest"]
+                let digest = model["digest"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("model layer has no digest"))?;
 
                 Ok(Artifact {
                     url: format!("{OLLAMA_REGISTRY}/{name}/blobs/{digest}"),
-                    size: layer["size"].as_u64(),
+                    size: model["size"].as_u64(),
                     sha256: digest.strip_prefix("sha256:").map(str::to_owned),
                     file_name: self.file_name(),
                     auth: None,
+                    params_url: layer("image.params")
+                        .and_then(|l| l["digest"].as_str())
+                        .map(|d| format!("{OLLAMA_REGISTRY}/{name}/blobs/{d}")),
                 })
             }
 
@@ -179,6 +188,7 @@ impl Source {
                     sha256: None,
                     file_name: self.file_name(),
                     auth,
+                    params_url: None,
                 })
             }
         }

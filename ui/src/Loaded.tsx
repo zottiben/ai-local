@@ -7,7 +7,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { api } from "./api";
-import { formatCount, formatSize } from "./format";
+import { formatCount, formatSampling, formatSize } from "./format";
 import { type Actions, useResource } from "./hooks";
 import type { Instance, LogView } from "./types";
 
@@ -56,6 +56,17 @@ export function Loaded({ instance, actions }: { instance: Instance; actions: Act
         </dd>
         <dt>Reasoning</dt>
         <dd>{instance.reasoning}</dd>
+        <dt>Sampling</dt>
+        <dd>
+          {instance.sampling ? (
+            <>
+              {formatSampling(instance.sampling)}{" "}
+              <span className="muted">(from the publisher)</span>
+            </>
+          ) : (
+            <span className="muted">the model file's, else llama.cpp's defaults</span>
+          )}
+        </dd>
         {memory.data && (
           <>
             <dt>{memory.data.label === "vram" ? "VRAM" : "Memory"}</dt>

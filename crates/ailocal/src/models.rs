@@ -371,6 +371,8 @@ impl Removal {
             serve::stop()?;
         }
 
+        // Before the weights, so that once they are gone nothing is left to fail.
+        crate::sampling::remove(&self.path)?;
         std::fs::remove_file(&self.path).with_context(|| {
             format!(
                 "deleting {}{}",

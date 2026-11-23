@@ -16,6 +16,7 @@ import type {
   Removed,
   Probe,
   Repoint,
+  Sampling,
   Service,
   Thinking,
   Trouble,
@@ -54,6 +55,24 @@ export function formatBytes(bytes: number): string {
   if (mib >= 1024) return `${(mib / 1024).toFixed(1)} GiB`;
   if (mib >= 10) return `${Math.round(mib)} MiB`;
   return `${mib.toFixed(1)} MiB`;
+}
+
+/** What `ailocal ps` prints for sampling, in the same order and words. */
+export function formatSampling(sampling: Sampling): string {
+  const named: [string, number | undefined][] = [
+    ["temperature", sampling.temperature],
+    ["top-k", sampling.top_k],
+    ["top-p", sampling.top_p],
+    ["min-p", sampling.min_p],
+    ["presence", sampling.presence_penalty],
+    ["frequency", sampling.frequency_penalty],
+    ["repeat", sampling.repeat_penalty],
+    ["repeat-last-n", sampling.repeat_last_n],
+  ];
+  return named
+    .filter(([, value]) => value !== undefined)
+    .map(([name, value]) => `${name} ${value}`)
+    .join(", ");
 }
 
 /** A step that failed, as `wire::result` writes it, or `null` when it succeeded. */

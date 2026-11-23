@@ -345,6 +345,7 @@ mod tests {
             sha256: sha256.map(str::to_owned),
             file_name: "x.gguf".into(),
             auth: None,
+            params_url: None,
         }
     }
 

@@ -367,6 +367,14 @@ ailocal model install ollama:qwen3.5:9b
 Its catch is quant coverage - mostly just the default `Q4_K_M` per size. When you need a
 specific quantisation to make something fit, that comes from Hugging Face.
 
+It also publishes each model's recommended sampling - temperature, top-k, top-p, min-p
+and the penalties - beside the weights. Install keeps that as `<name>.params.json` next
+to the `.gguf`, and `serve` starts llama-server with it as the default, so a harness that
+sends no sampling of its own gets what the model was tuned for rather than llama.cpp's
+generic 0.8 / 40 / 0.95 / 0.05. `ailocal ps` shows what the server runs with. A model
+installed before 0.8 has no such file: install it again and only the settings are
+fetched, since the weights verify as already present.
+
 Neither source needs the vendor's CLI installed. For gated or rate-limited Hugging Face
 repos, put a token at `$HF_HOME/token` (`~/.ailocal/hf/token` by default).
 

@@ -1045,6 +1045,14 @@ fn model_install(args: &InstallArgs) -> anyhow::Result<String> {
             );
         }
     }
+    match &landed.sampling {
+        None => {}
+        Some(Ok(s)) if s.is_empty() => {}
+        Some(Ok(s)) => println!("  sampling: {s} (from the publisher)"),
+        Some(Err(e)) => eprintln!(
+            "warning: {e:#}\n  it serves on llama.cpp's defaults until the install is run again"
+        ),
+    }
     Ok(landed.name)
 }
 
@@ -1809,6 +1817,13 @@ fn ps() -> anyhow::Result<()> {
                 println!("{:<12} {mib} MiB", "prompt cache");
             }
             println!("{:<12} {}", "reasoning", i.reasoning);
+            match &i.sampling {
+                Some(s) => println!("{:<12} {s} (from the publisher)", "sampling"),
+                None => println!(
+                    "{:<12} the model file's, else llama.cpp's defaults",
+                    "sampling"
+                ),
+            }
             println!("{:<12} {}", "pid", i.pid);
             let (label, mib) = ailocal::server_memory_mib(i.pid)?;
             println!("{label:<12} {mib} MiB");

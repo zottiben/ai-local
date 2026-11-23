@@ -8,6 +8,7 @@ import {
   formatBytes,
   formatCount,
   formatDownloads,
+  formatSampling,
   formatSize,
   serviceShortName,
   tilde,
@@ -20,6 +21,21 @@ const meta = {
 };
 
 describe("format", () => {
+  it("prints sampling the way ps does, leaving out what the publisher did not set", () => {
+    // The layer the registry serves for qwen3.6:35b-a3b, as the state file records it.
+    expect(
+      formatSampling({
+        temperature: 1,
+        top_k: 20,
+        top_p: 0.95,
+        min_p: 0,
+        presence_penalty: 1.5,
+        repeat_penalty: 1,
+      }),
+    ).toBe("temperature 1, top-k 20, top-p 0.95, min-p 0, presence 1.5, repeat 1");
+    expect(formatSampling({ top_k: 64, top_p: 0.95 })).toBe("top-k 64, top-p 0.95");
+  });
+
   it("prints a context the way model ls does", () => {
     // 131072 is the cap every model here launches at.
     expect(formatCount(131_072)).toBe("128k");

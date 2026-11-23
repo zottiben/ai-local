@@ -13,6 +13,7 @@ use crate::config::Config;
 use crate::download::{self, Progress};
 use crate::gguf;
 use crate::registry::{self, Fit};
+use crate::sampling::{self, Sampling};
 use crate::source::{self, Artifact, Source};
 use crate::vram::{Budget, CacheType};
 
@@ -200,12 +201,22 @@ pub struct OnDisk {
     pub name: String,
     pub path: PathBuf,
     pub outcome: download::Fetched,
+    /// The publisher's sampling, now kept beside the weights. `None` when the registry
+    /// publishes none, which is every Hugging Face file.
+    #[serde(serialize_with = "crate::wire::optional_result")]
+    pub sampling: Option<anyhow::Result<Sampling>>,
 }
 
 /// Download a resolved model into the models directory, resuming and verifying.
 ///
 /// The name is returned because every later step needs it, and it is not the
 /// reference: `ollama:qwen3.6:35b-a3b` lands as `qwen3.6-35b-a3b`.
+///
+/// The publisher's sampling comes along, and is fetched again when the weights were
+/// already here - that is how a model installed before it was kept gets it, by
+/// installing it again. A failure there does not fail the install: the weights are
+/// what took the time, and they serve correctly on llama.cpp's defaults until another
+/// install fetches the settings.
 ///
 /// # Errors
 /// If the transfer fails or the file does not verify.
@@ -216,6 +227,11 @@ pub fn fetch(
     progress: &mut dyn Progress,
 ) -> anyhow::Result<OnDisk> {
     let (path, outcome) = download::fetch(client, &resolved.artifact, &cfg.models_dir, progress)?;
+    let sampling = resolved
+        .artifact
+        .params_url
+        .as_deref()
+        .map(|url| fetch_sampling(client, url, &path));
     Ok(OnDisk {
         name: path.file_stem().map_or_else(
             || resolved.artifact.file_name.clone(),
@@ -223,7 +239,22 @@ pub fn fetch(
         ),
         path,
         outcome,
+        sampling,
     })
+}
+
+fn fetch_sampling(
+    client: &Client,
+    url: &str,
+    weights: &std::path::Path,
+) -> anyhow::Result<Sampling> {
+    let bytes = client
+        .get(url)
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .and_then(reqwest::blocking::Response::bytes)
+        .map_err(|e| anyhow::Error::new(e).context("fetching the publisher's sampling settings"))?;
+    sampling::save(weights, &bytes)
 }
 
 #[cfg(test)]
@@ -239,6 +270,7 @@ mod tests {
                 sha256: None,
                 file_name: "x.gguf".into(),
                 auth: None,
+                params_url: None,
             },
         }
     }

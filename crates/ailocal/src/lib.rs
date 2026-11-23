@@ -17,6 +17,7 @@ pub mod install;
 pub mod models;
 pub mod prompt;
 pub mod registry;
+pub mod sampling;
 pub mod serve;
 pub mod service;
 pub mod setup;
