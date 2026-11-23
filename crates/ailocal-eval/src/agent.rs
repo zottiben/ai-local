@@ -157,6 +157,14 @@ pub fn rules_digest() -> String {
     short_hex(&sha2::Sha256::digest(gateway::AGENT_RULES.as_bytes()))
 }
 
+/// Short hex digest of the Pi extension, recorded for the same reason.
+#[must_use]
+pub fn extension_digest() -> String {
+    use sha2::Digest as _;
+
+    short_hex(&sha2::Sha256::digest(harness::PI_EXTENSION.as_bytes()))
+}
+
 fn short_hex(hash: &[u8]) -> String {
     hash.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
@@ -191,16 +199,21 @@ pub struct Arm {
     /// none - as for every report written before there were any.
     #[serde(default)]
     pub rules: Option<String>,
+    /// [`extension_digest`] of the Pi extension Pi loaded, or `None` when it loaded
+    /// none - as for every report written before there was one.
+    #[serde(default)]
+    pub extension: Option<String>,
 }
 
 impl Arm {
     #[must_use]
     pub fn label(&self) -> String {
         format!(
-            "{} (thinking {}, rules {})",
+            "{} (thinking {}, rules {}, extension {})",
             self.model,
             self.thinking,
-            on_off(self.rules.is_some())
+            on_off(self.rules.is_some()),
+            on_off(self.extension.is_some())
         )
     }
 }
@@ -386,6 +399,8 @@ pub struct Plan {
     pub models: Vec<String>,
     /// Whether the gateway adds its agent rules, per arm.
     pub rules: Vec<bool>,
+    /// Whether Pi loads our extension, per arm.
+    pub extension: Vec<bool>,
     pub thinking: Vec<String>,
     pub tasks: Vec<Task>,
     pub reps: u32,
@@ -540,6 +555,25 @@ fn pi_files(
     ]
 }
 
+/// Give Pi an agent directory holding only our provider, and our extension if asked.
+fn write_pi_dir(
+    dir: &Path,
+    gateway: &Gateway,
+    model: &harness::PiModel,
+    extension: bool,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for (name, value) in pi_files(&gateway.base_url, &gateway.key, model) {
+        std::fs::write(dir.join(name), serde_json::to_string_pretty(&value)?)?;
+    }
+    if extension {
+        let extensions = dir.join("extensions");
+        std::fs::create_dir_all(&extensions)?;
+        std::fs::write(extensions.join("ailocal.ts"), harness::PI_EXTENSION)?;
+    }
+    Ok(())
+}
+
 /// A throwaway directory, removed when dropped.
 struct Scratch(PathBuf);
 
@@ -589,7 +623,7 @@ pub fn run(config: &Config, plan: &Plan) -> anyhow::Result<Vec<Report>> {
         "{} task(s) x {} rep(s), {} arm(s), suite {}{}\n",
         plan.tasks.len(),
         plan.reps,
-        plan.models.len() * plan.rules.len() * plan.thinking.len(),
+        plan.models.len() * plan.rules.len() * plan.extension.len() * plan.thinking.len(),
         digest(),
         if tools.jq {
             ""
@@ -652,27 +686,31 @@ pub fn run(config: &Config, plan: &Plan) -> anyhow::Result<Vec<Report>> {
         };
 
         for (rules, gateway) in &gateways {
-            let pi_dir = scratch
-                .0
-                .join(format!("pi-{}-rules-{}", slug(model), on_off(*rules)));
-            std::fs::create_dir_all(&pi_dir)?;
-            for (name, value) in pi_files(&gateway.base_url, &gateway.key, offered) {
-                std::fs::write(pi_dir.join(name), serde_json::to_string_pretty(&value)?)?;
-            }
+            for &extension in &plan.extension {
+                let pi_dir = scratch.0.join(format!(
+                    "pi-{}-rules-{}-extension-{}",
+                    slug(model),
+                    on_off(*rules),
+                    on_off(extension)
+                ));
+                write_pi_dir(&pi_dir, gateway, offered, extension)?;
 
-            for thinking in &plan.thinking {
-                let arm = Arm {
-                    model: model.clone(),
-                    thinking: thinking.clone(),
-                    context: offered.context_window,
-                    sampling: instance.sampling.as_ref().map(ToString::to_string),
-                    rules: rules.then(rules_digest),
-                };
-                eprintln!("== {}", arm.label());
-                let report = run_arm(config, plan, &tools, &scratch.0, &pi_dir, &target_dir, arm)?;
-                let path = report.save(&config.eval_dir)?;
-                eprintln!("   saved {}\n", path.display());
-                reports.push(report);
+                for thinking in &plan.thinking {
+                    let arm = Arm {
+                        model: model.clone(),
+                        thinking: thinking.clone(),
+                        context: offered.context_window,
+                        sampling: instance.sampling.as_ref().map(ToString::to_string),
+                        rules: rules.then(rules_digest),
+                        extension: extension.then(extension_digest),
+                    };
+                    eprintln!("== {}", arm.label());
+                    let report =
+                        run_arm(config, plan, &tools, &scratch.0, &pi_dir, &target_dir, arm)?;
+                    let path = report.save(&config.eval_dir)?;
+                    eprintln!("   saved {}\n", path.display());
+                    reports.push(report);
+                }
             }
         }
     }
@@ -699,11 +737,12 @@ fn run_arm(
 ) -> anyhow::Result<Report> {
     let started = crate::report::now_epoch();
     let id = format!(
-        "{}-{}-thinking-{}-rules-{}",
+        "{}-{}-thinking-{}-rules-{}-extension-{}",
         crate::report::utc_compact(started),
         slug(&arm.model),
         arm.thinking,
-        on_off(arm.rules.is_some())
+        on_off(arm.rules.is_some()),
+        on_off(arm.extension.is_some())
     );
     let bench = Bench {
         tools,
@@ -956,7 +995,7 @@ fn score(
         transcript
             .calls
             .iter()
-            .find(|c| c.python_on_json())
+            .find(|c| !c.held && c.python_on_json())
             .map_or(Outcome::Pass, |c| Outcome::Fail {
                 why: format!(
                     "ran `{}`",
@@ -1283,6 +1322,30 @@ mod tests {
     }
 
     #[test]
+    fn the_extension_is_in_the_agent_directory_only_when_asked_for() {
+        let root = std::env::temp_dir().join(format!("ailocal-eval-pi-dir-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let gateway = Gateway {
+            base_url: "http://127.0.0.1:9/v1".to_owned(),
+            key: "k".to_owned(),
+        };
+        let model = harness::PiModel {
+            id: "m".to_owned(),
+            context_window: 65536,
+            thinking: ailocal::gguf::Thinking::Toggle,
+        };
+
+        write_pi_dir(&root.join("on"), &gateway, &model, true).unwrap();
+        let installed = std::fs::read_to_string(root.join("on/extensions/ailocal.ts")).unwrap();
+        assert_eq!(installed, harness::PI_EXTENSION);
+
+        write_pi_dir(&root.join("off"), &gateway, &model, false).unwrap();
+        assert!(root.join("off/auth.json").is_file());
+        assert!(!root.join("off/extensions").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn instruction_files_above_a_directory_are_found() {
         let root = std::env::temp_dir()
             .canonicalize()
@@ -1407,6 +1470,7 @@ mod tests {
                 context: 65536,
                 sampling: None,
                 rules: None,
+                extension: None,
             },
             suite: digest(),
             runs: vec![
@@ -1419,7 +1483,10 @@ mod tests {
         assert_eq!(report.rate(CLIPPY), None);
 
         let table = summary_table(&[&report]);
-        assert!(table.contains("m (thinking off, rules off)"), "{table}");
+        assert!(
+            table.contains("m (thinking off, rules off, extension off)"),
+            "{table}"
+        );
         assert!(table.contains("50%"), "{table}");
     }
 

@@ -300,7 +300,7 @@ pub fn configure_harness(
         models.insert(0, chosen);
     }
 
-    let outcome = harness::configure_pi(url, &key, &models)?;
+    let outcome = harness::configure_pi(url, &key, &models, cfg.agent_rules)?;
     Ok(HarnessConfigured {
         unchanged: matches!(outcome, harness::Outcome::AlreadyConfigured),
         path: Some(harness::pi_models_json_path()?),
@@ -441,7 +441,8 @@ pub fn apply_settings(settings: &Settings, unit_binary: UnitBinary) -> anyhow::R
         }
     }
 
-    if let Some(on) = settings.agent_rules.filter(|on| *on != cfg.agent_rules) {
+    let rules_changed = settings.agent_rules.is_some_and(|on| on != cfg.agent_rules);
+    if let Some(on) = settings.agent_rules.filter(|_| rules_changed) {
         cfg.agent_rules = on;
         out.changed.push("agent_rules".to_owned());
     }
@@ -463,6 +464,12 @@ pub fn apply_settings(settings: &Settings, unit_binary: UnitBinary) -> anyhow::R
         return Ok(out);
     }
     out.path = Some(cfg.save()?);
+
+    // The gateway reads the rules from the config, but Pi's half of them is a file of
+    // its own.
+    if rules_changed {
+        harness::sync_pi_extension(cfg.agent_rules)?;
+    }
 
     if port_changed {
         out.repoint_harnesses = true;

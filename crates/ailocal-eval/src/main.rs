@@ -87,6 +87,13 @@ struct AgentArgs {
     #[arg(long, default_value = "on", value_parser = ["on", "off"])]
     rules: Vec<String>,
 
+    /// Whether Pi loads ailocal's extension, which holds an unchecked push and asks
+    /// for the checks before the agent stops. `on` or `off`; repeat to compare both.
+    ///
+    /// On by default, as `harness configure pi` installs it.
+    #[arg(long, default_value = "on", value_parser = ["on", "off"])]
+    extension: Vec<String>,
+
     /// Attempts at each task. The model samples, so one attempt is an anecdote.
     #[arg(long, default_value_t = 3)]
     reps: u32,
@@ -211,6 +218,7 @@ fn run_agent(args: &AgentArgs) -> anyhow::Result<()> {
     let plan = agent::Plan {
         models: resolve_models(&config, &args.model)?,
         rules: args.rules.iter().map(|r| r == "on").collect(),
+        extension: args.extension.iter().map(|e| e == "on").collect(),
         thinking: args.thinking.clone(),
         tasks,
         reps: args.reps,

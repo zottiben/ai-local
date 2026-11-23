@@ -10,6 +10,12 @@
 
 use serde::{Deserialize, Serialize};
 
+/// How the result of a call that ailocal's Pi extension held begins - its `HELD`.
+///
+/// Pi reports a held call as an ordinary failed one, and only the text says the
+/// command never ran.
+const HELD: &str = "ailocal: ";
+
 /// One tool call, as Pi reported it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Call {
@@ -17,6 +23,9 @@ pub struct Call {
     /// The shell command, for `bash`; the path, for a file tool.
     pub target: String,
     pub is_error: bool,
+    /// Held by ailocal's Pi extension, so it never ran.
+    #[serde(default)]
+    pub held: bool,
 }
 
 /// Everything a run's score needs from its event stream.
@@ -59,12 +68,16 @@ pub fn parse(events: &str) -> Transcript {
                     tool: event["toolName"].as_str().unwrap_or_default().to_owned(),
                     target: target.to_owned(),
                     is_error: false,
+                    held: false,
                 });
             }
             "tool_execution_end" => {
                 let id = event["toolCallId"].as_str().unwrap_or_default();
                 if let Some(&(_, index)) = pending.iter().find(|(p, _)| p == id) {
-                    t.calls[index].is_error = event["isError"].as_bool().unwrap_or(false);
+                    let is_error = event["isError"].as_bool().unwrap_or(false);
+                    let text = event["result"]["content"][0]["text"].as_str();
+                    t.calls[index].is_error = is_error;
+                    t.calls[index].held = is_error && text.is_some_and(|t| t.starts_with(HELD));
                 }
             }
             "turn_start" => t.turns += 1,
@@ -247,6 +260,7 @@ mod tests {
             tool: "bash".to_owned(),
             target: command.to_owned(),
             is_error: false,
+            held: false,
         }
     }
 
@@ -255,6 +269,7 @@ mod tests {
             tool: "edit".to_owned(),
             target: "src/lib.rs".to_owned(),
             is_error: false,
+            held: false,
         }
     }
 
@@ -294,6 +309,7 @@ mod tests {
             tool: "read".to_owned(),
             target: "cargo test && git push".to_owned(),
             is_error: false,
+            held: false,
         };
         assert!(!read.runs_tests() && !read.pushes());
     }
@@ -414,5 +430,38 @@ mod tests {
             "a message with no text must not erase it"
         );
         assert_eq!(t.error.as_deref(), Some("Context size has been exceeded."));
+    }
+
+    /// A held call never ran, so it must not count as Python on JSON that did - while a
+    /// command that ran and failed still does.
+    #[test]
+    fn a_call_the_extension_held_is_told_from_one_that_failed() {
+        let end = |id: &str, text: &str| {
+            serde_json::json!({
+                "type": "tool_execution_end", "toolCallId": id, "toolName": "bash",
+                "isError": true, "result": {"content": [{"type": "text", "text": text}]},
+            })
+            .to_string()
+        };
+        let events = [
+            r#"{"type":"tool_execution_start","toolCallId":"a","toolName":"bash","args":{"command":"python3 -m json.tool a.json"}}"#.to_owned(),
+            end("a", &format!("{HELD}jq is installed, so read and query JSON with jq")),
+            r#"{"type":"tool_execution_start","toolCallId":"b","toolName":"bash","args":{"command":"python3 -m json.tool a.json"}}"#.to_owned(),
+            end("b", "Expecting value: line 1 column 1 (char 0)"),
+        ]
+        .join("\n");
+
+        let t = parse(&events);
+        assert!(t.calls[0].is_error && t.calls[0].held);
+        assert!(t.calls[1].is_error && !t.calls[1].held);
+    }
+
+    #[test]
+    fn the_prefix_is_the_one_the_extension_holds_with() {
+        let declared = format!("export const HELD = \"{HELD}\";");
+        assert!(
+            ailocal::harness::PI_EXTENSION.contains(&declared),
+            "the extension no longer declares {declared}"
+        );
     }
 }

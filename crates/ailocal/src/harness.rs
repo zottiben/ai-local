@@ -59,6 +59,77 @@ pub fn pi_models_json_path() -> anyhow::Result<PathBuf> {
     pi_file("models.json")
 }
 
+/// Path to our extension in Pi's global extension directory.
+///
+/// # Errors
+/// If `HOME` is not set.
+pub fn pi_extension_path() -> anyhow::Result<PathBuf> {
+    pi_file("extensions/ailocal.ts")
+}
+
+/// The Pi extension that holds a local model to the checks.
+///
+/// Pi loads every extension for every model, so it acts only for our provider. It
+/// ships with the binary, and the gateway brings the installed copy in line whenever it
+/// starts - which `ailocal update` makes it do - so a new text never waits on someone
+/// remembering to configure Pi again.
+pub const PI_EXTENSION: &str = include_str!("../pi/ailocal.ts");
+
+/// The first line of [`PI_EXTENSION`], which is how a file at our path is known to be
+/// ours rather than something of the same name.
+const PI_EXTENSION_MARKER: &str = "// Written by ailocal.";
+
+/// Install or remove our Pi extension. `true` when it changed anything.
+///
+/// A file at our path that is not ours is backed up before it is replaced, and is
+/// never removed.
+///
+/// # Errors
+/// If the file cannot be read, backed up, written or removed.
+pub fn set_pi_extension(wanted: bool) -> anyhow::Result<bool> {
+    set_pi_extension_at(&pi_extension_path()?, wanted)
+}
+
+fn set_pi_extension_at(path: &Path, wanted: bool) -> anyhow::Result<bool> {
+    let current = match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}", path.display()))),
+    };
+    let ours = current
+        .as_deref()
+        .is_some_and(|text| text.starts_with(PI_EXTENSION_MARKER));
+
+    match (wanted, current) {
+        (true, Some(text)) if text == PI_EXTENSION => Ok(false),
+        (true, current) => {
+            if current.is_some() && !ours {
+                back_up(path)?;
+            }
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)
+                    .with_context(|| format!("creating {}", dir.display()))?;
+            }
+            crate::write_atomically(path, PI_EXTENSION)?;
+            Ok(true)
+        }
+        (false, Some(_)) if ours => {
+            std::fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
+            Ok(true)
+        }
+        (false, _) => Ok(false),
+    }
+}
+
+/// Bring our Pi extension in line with the config: there while Pi is configured and
+/// the agent rules are on, gone otherwise. `true` when it changed anything.
+///
+/// # Errors
+/// If the file cannot be read, written or removed.
+pub fn sync_pi_extension(agent_rules: bool) -> anyhow::Result<bool> {
+    set_pi_extension(agent_rules && is_configured("pi"))
+}
+
 fn pi_file(name: &str) -> anyhow::Result<PathBuf> {
     let home = std::env::var_os("HOME").ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
     Ok(PathBuf::from(home).join(".pi/agent").join(name))
@@ -359,7 +430,12 @@ pub fn normalize_base_url(url: &str) -> String {
 ///
 /// # Errors
 /// If a file cannot be read, is not a JSON object, or cannot be written.
-pub fn configure_pi(base_url: &str, api_key: &str, models: &[PiModel]) -> anyhow::Result<Outcome> {
+pub fn configure_pi(
+    base_url: &str,
+    api_key: &str,
+    models: &[PiModel],
+    agent_rules: bool,
+) -> anyhow::Result<Outcome> {
     // An empty catalogue does not mean "a provider with no models yet". Pi builds its
     // provider registry from this file, so writing `models: []` *unregisters*
     // llama.cpp: measured here, `pi --list-models` listed anthropic,
@@ -397,9 +473,10 @@ pub fn configure_pi(base_url: &str, api_key: &str, models: &[PiModel]) -> anyhow
     )?;
 
     let overrides = set_pi_overrides(pi_model_overrides(models))?;
+    let extension = set_pi_extension(agent_rules)?;
 
     match (credential, catalogue, overrides) {
-        (None, None, Outcome::AlreadyConfigured) => Ok(Outcome::AlreadyConfigured),
+        (None, None, Outcome::AlreadyConfigured) if !extension => Ok(Outcome::AlreadyConfigured),
         (a, b, c) => Ok(Outcome::Configured {
             backup: a.or(b).or(match c {
                 Outcome::Configured { backup } => backup,
@@ -577,7 +654,8 @@ fn stable_part(value: &serde_json::Value) -> serde_json::Value {
     copy
 }
 
-/// Remove our entries from all three of Pi's files, leaving everything else alone.
+/// Remove our entries from all three of Pi's files, and our extension, leaving
+/// everything else alone.
 ///
 /// # Errors
 /// If a file cannot be read or written.
@@ -602,7 +680,8 @@ pub fn unconfigure_pi() -> anyhow::Result<bool> {
         )?;
         removed = true;
     }
-    Ok(unconfigure_pi_models_json()? || removed)
+    let extension = set_pi_extension(false)?;
+    Ok(unconfigure_pi_models_json()? || removed || extension)
 }
 
 /// Take our capability statement back out of Pi's `models.json`.
@@ -765,9 +844,82 @@ mod tests {
     /// no llama.cpp; restoring one entry brought it back. Refusing keeps the harness
     /// honestly unconfigured instead of configured-but-broken, and never touches the
     /// files - the credential must not land on its own either.
+    fn extension_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("ailocal-pi-ext-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        dir
+    }
+
+    fn backups(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".bak")
+            })
+            .count()
+    }
+
+    #[test]
+    fn the_extension_is_written_once_and_replaced_when_it_changes() {
+        let dir = extension_dir("write");
+        let path = dir.join("extensions/ailocal.ts");
+
+        assert!(
+            super::set_pi_extension_at(&path, true).unwrap(),
+            "the directory is created"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), super::PI_EXTENSION);
+        assert!(
+            !super::set_pi_extension_at(&path, true).unwrap(),
+            "already current"
+        );
+
+        // An older release's copy is ours to replace, without a backup of it.
+        std::fs::write(&path, format!("{}\n// older\n", super::PI_EXTENSION_MARKER)).unwrap();
+        assert!(super::set_pi_extension_at(&path, true).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), super::PI_EXTENSION);
+        assert_eq!(backups(path.parent().unwrap()), 0);
+
+        assert!(super::set_pi_extension_at(&path, false).unwrap());
+        assert!(!path.exists());
+        assert!(
+            !super::set_pi_extension_at(&path, false).unwrap(),
+            "already gone"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Pi loads every `.ts` in the directory, so a file of the same name may be someone's
+    /// own extension. Turning ours off must leave it, and writing ours must keep a copy.
+    #[test]
+    fn an_extension_that_is_not_ours_is_kept() {
+        let dir = extension_dir("foreign");
+        let path = dir.join("ailocal.ts");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "export default function () {}\n").unwrap();
+
+        assert!(!super::set_pi_extension_at(&path, false).unwrap());
+        assert!(path.exists());
+
+        assert!(super::set_pi_extension_at(&path, true).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), super::PI_EXTENSION);
+        assert_eq!(backups(&dir), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_extension_starts_with_its_marker() {
+        assert!(super::PI_EXTENSION.starts_with(super::PI_EXTENSION_MARKER));
+    }
+
     #[test]
     fn an_empty_catalogue_is_refused_rather_than_written() {
-        let err = super::configure_pi("http://127.0.0.1:8081", "key", &[]).unwrap_err();
+        let err = super::configure_pi("http://127.0.0.1:8081", "key", &[], true).unwrap_err();
         assert!(
             err.downcast_ref::<crate::Refused>().is_some(),
             "the caller can fix this, so it is a refusal: {err}"

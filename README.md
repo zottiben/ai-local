@@ -215,6 +215,21 @@ GPT session is untouched. A request without tools - a chat - does not get them e
 They cost about 140 tokens per session. `ailocal config agent-rules` prints them, and
 `ailocal config agent-rules off` turns them off; the console has the same switch.
 
+Rules are advice. In Pi they come with an extension that acts on what the model really
+does, which `harness configure pi` installs as `~/.pi/agent/extensions/ailocal.ts`. For
+a local model it:
+
+- holds a `git push` once when no test run has passed since the last file edit, and
+  says why;
+- holds Python over JSON once per command when `jq` is installed;
+- asks once for the checks when the model is about to stop with edits no test has seen.
+
+It nudges and never walls: a held push goes through when it is sent again, so a project
+with no tests can still push. Pi loads every extension for every model, so it checks
+the provider first and does nothing in a Claude or GPT session. It is on and off with
+the rules, and the gateway brings it up to date when it starts, so `ailocal update`
+carries a new version to Pi with no step of your own.
+
 ### A house rule for every harness
 
 Harnesses build their own system prompt and have no notion of a per-machine one, so the
@@ -465,29 +480,41 @@ what CI would see on origin afterwards and what Pi's event stream shows the agen
 the way.
 
 ```
-ailocal eval agent                                 # whatever is loaded, thinking off, rules on
+ailocal eval agent                                 # what is loaded; thinking off, rules and extension on
 ailocal eval agent --rules off --rules on          # two arms, side by side
+ailocal eval agent --extension off --extension on  # with and without the Pi extension
 ailocal eval agent --thinking off --thinking high
 ailocal eval agent --task release-version --reps 5
 ```
 
-This is what the [built-in agent rules](#built-in-rules-for-coding-agents) are for.
-qwen3.6-35b-a3b, three attempts at each of four tasks:
+This is what the [built-in agent rules](#built-in-rules-for-coding-agents) and the Pi
+extension are for. qwen3.6-35b-a3b, three attempts at each of four tasks:
 
 ```
-ARM                                        RUNS  DONE    CI TESTED   FMT CLIPPY TESTS  NO-PY  ERR MIN/RUN
-qwen3.6-35b-a3b (thinking off, rules off)    12   92%   83%    75%   83%   100%  100%    75%    0     0.9
-qwen3.6-35b-a3b (thinking off, rules on)     12   83%  100%   100%  100%   100%  100%   100%    0     1.4
+ARM                                                       RUNS  DONE    CI TESTED   FMT CLIPPY TESTS  NO-PY  ERR MIN/RUN
+qwen3.6-35b-a3b (thinking off, rules off, extension off)    12   92%   92%    75%   92%   100%  100%    75%    0     1.2
+qwen3.6-35b-a3b (thinking off, rules off, extension on)     12   83%   92%   100%   92%   100%  100%    92%    0     1.1
+qwen3.6-35b-a3b (thinking off, rules on, extension off)     12   92%  100%    83%  100%   100%  100%   100%    0     1.0
+qwen3.6-35b-a3b (thinking off, rules on, extension on)      12  100%  100%   100%  100%   100%  100%   100%    0     1.3
 ```
 
-Without them it pushed rustfmt-dirty code twice, and on every attempt at a version bump
-it read the JSON with `python3 -c` and pushed without testing. With them it did neither,
-at a median of 58 seconds a run against 52. Thinking `high` bought nothing on this suite.
+With neither, it pushed rustfmt-dirty code once, and on every attempt at a version bump
+it read the JSON with `python3 -c` and pushed without testing. The rules fixed the
+formatting and the Python, but two of three version bumps still went out untested. The
+extension holds exactly that push: on its own it held all three, and each time the
+model ran the tests before it pushed again. It does not format - that is the rules'
+part - which is why the two are on together.
+
+With both, the extension never had to act: the model tested every time without being
+held, at a median of 69 seconds a run against 49 with the rules alone. That run-to-run
+difference is the model's own; the extension is there for the runs that skip. Thinking
+`high` bought nothing on this suite.
 
 It needs `pi`, `git` and `cargo` with `rustfmt` and `clippy`. Every request goes through
 a gateway the eval hosts itself, and Pi gets an agent directory holding only that
-provider - none of your extensions, skills or instructions - so a score does not move
-when your own setup does. The agent's shell commands run with your privileges, in
+provider and ailocal's own extension - none of your extensions, skills or instructions -
+so a score does not move when your own setup does. A command the extension held never
+ran, so it is not scored as one that did. The agent's shell commands run with your privileges, in
 repositories under the system temp directory. A model that is already loaded is used
 as it is; another one is loaded the way `eval run` loads it. Transcripts are kept
 under `eval/agent/` in the data dir.

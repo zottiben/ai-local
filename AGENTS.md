@@ -36,6 +36,8 @@ Inference is llama.cpp's `llama-server`, Vulkan backend. Models are GGUF from Hu
   why those commands must not be given `--workspace`
 - After editing `ui/src`: `cd ui && npm ci && npm run build`. `ui/dist` is committed and
   compiled into `ailocal-ui`; CI fails if it is not what the sources build
+- After editing the Pi extension: `node --test crates/ailocal/pi/ailocal.test.ts`. It is
+  compiled into `ailocal` and installed by `harness configure pi`
 - Check a model's real context limit: `scripts/bench/ctx_probe.sh <model.gguf> q8_0`
 
 The Rust workspace is established by PR0; until then the cargo commands have nothing to
@@ -234,6 +236,22 @@ Two consequences for the overrides we write:
 - `xhigh` and `max` are mapped to `null` for a toggle model. Pi folds both onto `high`
   before choosing a budget, so offering them would be two controls that do nothing.
   `/effort max` still works - it is an alias that resolves to the highest real level.
+
+### 7c. The Pi extension is ours, and acts only for local models
+`harness configure pi` also writes `~/.pi/agent/extensions/ailocal.ts`, compiled in from
+`crates/ailocal/pi/ailocal.ts`. Unlike the three files above it is wholly ours: the
+gateway replaces it on every start, and `agent-rules off` or `unconfigure` removes it. A
+file of that name without our first line is someone else's, backed up and never deleted.
+
+Pi loads every extension for every model, so every guard checks
+`ctx.model.provider === "llama.cpp"` first - without that, Opus sessions are held too.
+Each guard fires once and says how to go on, and `agent_before_settle` must never return
+an unconditional `continue: true`, which loops.
+
+Only a passing *test* run clears the push hold: counting any linter let a push after
+`cargo clippy` alone go out untested. Pi reports a held call as an ordinary failed one,
+so the eval tells them apart by the extension's `HELD` prefix, which a test keeps in
+step with `transcript::HELD`.
 
 ### 8. Retrieval for facts, fine-tuning for behaviour
 Codebase knowledge is a retrieval problem, not a QLoRA problem. An adapter trained on a

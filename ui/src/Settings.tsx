@@ -141,7 +141,7 @@ export function Settings({ generation, meta, actions, after }: Props) {
 
         <Field
           label="Agent rules"
-          hint="Built-in rules for every request that offers tools: run the project's checks before a commit or push, and use jq on JSON. `ailocal config agent-rules` prints them."
+          hint="Built-in rules for every request that offers tools: run the project's checks before a commit or push, and use jq on JSON. In Pi, an extension also holds a local model's untested push once. `ailocal config agent-rules` prints them."
         >
           <select value={draft.agent_rules} onChange={(e) => edit({ agent_rules: e.target.value })}>
             <option value="on">on</option>

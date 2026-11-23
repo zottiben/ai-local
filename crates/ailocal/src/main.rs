@@ -509,6 +509,12 @@ fn config_agent_rules(state: Option<&str>) -> anyhow::Result<()> {
         for line in gateway::AGENT_RULES.lines() {
             println!("  {line}");
         }
+        println!(
+            "\nIn Pi they come with an extension that holds a local model's push once when\n\
+             no test has passed since its last edit, holds Python over JSON once when jq is\n\
+             installed, and asks for the checks once before the model stops:\n\n  {}",
+            harness::pi_extension_path()?.display()
+        );
         return Ok(());
     };
 
@@ -1318,6 +1324,10 @@ fn harness_configure(name: &str, url: &str, wanted: Option<&str>) -> anyhow::Res
             m.thinking.label()
         );
     }
+    if cfg.agent_rules {
+        println!("  extension: {}", harness::pi_extension_path()?.display());
+        println!("    holds a local model's untested push; `ailocal config agent-rules` says more");
+    }
     // Said here because the alternative is finding out from `/effort`, which reports
     // it as the harness refusing a level rather than the model not having one.
     if let Some(id) = plan.without_thinking.first() {
@@ -1803,6 +1813,15 @@ fn gateway_run(host: &str, port: u16, log_requests: bool) -> anyhow::Result<()> 
     let request_log = log_requests.then(|| config.get().data_dir.join("gateway-requests.jsonl"));
     if let Some(path) = &request_log {
         println!("  recording requests to {}", path.display());
+    }
+
+    // `ailocal update` restarts the gateway, so this is where a new release's Pi
+    // extension reaches a Pi that an older one configured. A failure here must not keep
+    // the gateway down.
+    match harness::sync_pi_extension(config.get().agent_rules) {
+        Ok(true) => println!("  brought the Pi extension up to date"),
+        Ok(false) => {}
+        Err(e) => eprintln!("  could not update the Pi extension: {e:#}"),
     }
 
     let state = Arc::new(gateway::AppState {
