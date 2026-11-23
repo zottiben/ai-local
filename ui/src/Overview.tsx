@@ -233,6 +233,8 @@ function SettingsPanel({
               {config.gateway_host}:{config.gateway_port}
             </code>
           </dd>
+          <dt>Agent rules</dt>
+          <dd>{config.agent_rules === false ? "off" : "on"}</dd>
           {config.system_prompt && (
             <>
               <dt>House rule</dt>

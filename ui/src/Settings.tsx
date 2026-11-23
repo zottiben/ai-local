@@ -139,7 +139,17 @@ export function Settings({ generation, meta, actions, after }: Props) {
           />
         </Field>
 
-        <Field label="House rule" hint="Prepended to every request the gateway forwards.">
+        <Field
+          label="Agent rules"
+          hint="Built-in rules for every request that offers tools: run the project's checks before a commit or push, and use jq on JSON. `ailocal config agent-rules` prints them."
+        >
+          <select value={draft.agent_rules} onChange={(e) => edit({ agent_rules: e.target.value })}>
+            <option value="on">on</option>
+            <option value="off">off</option>
+          </select>
+        </Field>
+
+        <Field label="House rule" hint="Added after the agent rules, to every request the gateway forwards.">
           <textarea
             rows={3}
             value={draft.system_prompt}
@@ -192,6 +202,7 @@ interface Draft {
   reasoning_budget: string;
   max_context: string;
   gateway_port: string;
+  agent_rules: string;
   system_prompt: string;
 }
 
@@ -202,6 +213,7 @@ function toDraft(config: Config): Draft {
     reasoning_budget: String(config.reasoning_budget),
     max_context: String(config.max_context),
     gateway_port: String(config.gateway_port),
+    agent_rules: config.agent_rules === false ? "off" : "on",
     system_prompt: config.system_prompt ?? "",
   };
 }
@@ -216,6 +228,7 @@ export function diff(saved: Draft, draft: Draft): SettingsPatch {
   const patch: SettingsPatch = {};
   if (draft.cache_type !== saved.cache_type) patch.cache_type = draft.cache_type;
   if (draft.reasoning !== saved.reasoning) patch.reasoning = draft.reasoning;
+  if (draft.agent_rules !== saved.agent_rules) patch.agent_rules = draft.agent_rules === "on";
 
   for (const key of ["reasoning_budget", "max_context", "gateway_port"] as const) {
     if (draft[key] === saved[key]) continue;

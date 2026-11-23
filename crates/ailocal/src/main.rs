@@ -283,6 +283,15 @@ enum ConfigCmd {
     /// decide. Lower it to make a model answer faster, raise it to let a session run
     /// longer before the harness compacts it.
     MaxContext { tokens: Option<u64> },
+    /// Show the built-in rules for coding agents, or turn them on or off.
+    ///
+    /// The gateway adds them to every request that offers tools, ahead of your own
+    /// `system_prompt`. They ask a local model to run the project's checks before it
+    /// commits and to use jq on JSON - habits a frontier model has without being told.
+    AgentRules {
+        #[arg(value_parser = ["on", "off"])]
+        state: Option<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -307,6 +316,7 @@ fn main() -> anyhow::Result<()> {
         Command::Config(ConfigCmd::DataDir { path }) => config_data_dir(path),
         Command::Config(ConfigCmd::GatewayPort { port }) => config_gateway_port(port),
         Command::Config(ConfigCmd::MaxContext { tokens }) => config_max_context(tokens),
+        Command::Config(ConfigCmd::AgentRules { state }) => config_agent_rules(state.as_deref()),
         Command::Serve(args) => serve_model(&args),
         Command::Ps => ps(),
         Command::Stop => stop(),
@@ -487,6 +497,34 @@ fn config_max_context(tokens: Option<u64>) -> anyhow::Result<()> {
     }
     print_applied(&applied);
     println!("\nAfter it reloads, refresh Pi's cached window:\n  ailocal harness configure pi");
+    Ok(())
+}
+
+fn config_agent_rules(state: Option<&str>) -> anyhow::Result<()> {
+    let Some(state) = state else {
+        let cfg = Config::load()?;
+        let on = if cfg.agent_rules { "on" } else { "off" };
+        println!("agent rules  {on}");
+        println!("\nAdded to every request that offers tools, ahead of your system_prompt:\n");
+        for line in gateway::AGENT_RULES.lines() {
+            println!("  {line}");
+        }
+        return Ok(());
+    };
+
+    let applied = setup::apply_settings(
+        &setup::Settings {
+            agent_rules: Some(state == "on"),
+            ..setup::Settings::default()
+        },
+        &unit_binary,
+    )?;
+    if applied.changed.is_empty() {
+        println!("agent rules are already {state}");
+        return Ok(());
+    }
+    print_applied(&applied);
+    println!("A running gateway applies it from the next request.");
     Ok(())
 }
 

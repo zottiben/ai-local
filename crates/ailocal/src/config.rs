@@ -121,6 +121,16 @@ pub struct Config {
     #[serde(default)]
     pub system_prompt: Option<String>,
 
+    /// Whether the gateway adds its built-in rules for coding agents.
+    ///
+    /// A local model knows how to run a formatter and the tests. What it lacks is the
+    /// habit of doing so before it calls the work done, which a frontier model has
+    /// without being told. The rules ask for that habit, and reach only requests that
+    /// offer tools - a harness at work, not a chat. Frontier models never pass through
+    /// the gateway, so they never see them.
+    #[serde(default = "default_agent_rules")]
+    pub agent_rules: bool,
+
     /// Address the gateway service binds to.
     ///
     /// Loopback by default. A Cloudflare tunnel reaches this host over the LAN, so
@@ -164,6 +174,11 @@ struct Raw {
     default_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     system_prompt: Option<String>,
+    /// Written only when turned off. An ailocal from before this setting refuses a
+    /// config that names it, so writing the default would break an older service for
+    /// no reason.
+    #[serde(default = "default_agent_rules", skip_serializing_if = "is_on")]
+    agent_rules: bool,
     #[serde(default = "default_gateway_host")]
     gateway_host: String,
     #[serde(default = "default_gateway_port")]
@@ -190,6 +205,7 @@ fn unknown_field_hint(text: &str) -> Option<String> {
         "max_context",
         "default_model",
         "system_prompt",
+        "agent_rules",
         "gateway_host",
         "gateway_port",
     ];
@@ -265,6 +281,7 @@ impl From<Raw> for Config {
             max_context: raw.max_context,
             default_model: raw.default_model,
             system_prompt: raw.system_prompt,
+            agent_rules: raw.agent_rules,
             gateway_host: raw.gateway_host,
             gateway_port: raw.gateway_port,
         }
@@ -288,6 +305,7 @@ impl From<Config> for Raw {
             max_context: c.max_context,
             default_model: c.default_model,
             system_prompt: c.system_prompt,
+            agent_rules: c.agent_rules,
             gateway_host: c.gateway_host,
             gateway_port: c.gateway_port,
         }
@@ -351,6 +369,14 @@ fn default_max_context() -> u64 {
     131_072
 }
 
+fn default_agent_rules() -> bool {
+    true
+}
+
+fn is_on(value: &bool) -> bool {
+    *value
+}
+
 fn default_gateway_host() -> String {
     "127.0.0.1".to_owned()
 }
@@ -373,6 +399,7 @@ impl Default for Config {
             max_context: default_max_context(),
             default_model: None,
             system_prompt: None,
+            agent_rules: default_agent_rules(),
             gateway_host: default_gateway_host(),
             gateway_port: default_gateway_port(),
         }
@@ -564,6 +591,23 @@ mod tests {
         let c = Config::default();
         assert!(!c.hf_home.ends_with(".cache/huggingface"));
         assert_eq!(c.hf_home, c.data_dir.join("hf"));
+    }
+
+    #[test]
+    fn agent_rules_are_written_only_when_turned_off() {
+        // An older ailocal refuses a key it does not know, so the default stays
+        // unwritten.
+        let on = toml::to_string(&Config::default()).unwrap();
+        assert!(!on.contains("agent_rules"), "{on}");
+        assert!(toml::from_str::<Config>("").unwrap().agent_rules);
+
+        let off = Config {
+            agent_rules: false,
+            ..Config::default()
+        };
+        let text = toml::to_string(&off).unwrap();
+        assert!(text.contains("agent_rules = false"), "{text}");
+        assert!(!toml::from_str::<Config>(&text).unwrap().agent_rules);
     }
 
     /// The console saves a setting by rewriting the file, and the gateway that has to

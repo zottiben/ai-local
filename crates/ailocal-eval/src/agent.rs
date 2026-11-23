@@ -143,11 +143,22 @@ pub fn digest() -> String {
         hash.update(text.as_bytes());
         hash.update([0]);
     }
-    hash.finalize()
-        .iter()
-        .take(8)
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    short_hex(&hash.finalize())
+}
+
+/// Short hex digest of the gateway's built-in agent rules.
+///
+/// The text ships with the binary and will be tuned, so a report records which version
+/// it scored rather than only that there was one.
+#[must_use]
+pub fn rules_digest() -> String {
+    use sha2::Digest as _;
+
+    short_hex(&sha2::Sha256::digest(gateway::AGENT_RULES.as_bytes()))
+}
+
+fn short_hex(hash: &[u8]) -> String {
+    hash.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
 // --- reports -------------------------------------------------------------------------
@@ -176,13 +187,26 @@ pub struct Arm {
     /// The server's default sampling, when it had the publisher's; `None` is
     /// llama.cpp's own defaults. Pi sends none of its own.
     pub sampling: Option<String>,
+    /// [`rules_digest`] of the agent rules the gateway added, or `None` when it added
+    /// none - as for every report written before there were any.
+    #[serde(default)]
+    pub rules: Option<String>,
 }
 
 impl Arm {
     #[must_use]
     pub fn label(&self) -> String {
-        format!("{} (thinking {})", self.model, self.thinking)
+        format!(
+            "{} (thinking {}, rules {})",
+            self.model,
+            self.thinking,
+            on_off(self.rules.is_some())
+        )
     }
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
 }
 
 /// One task, attempted once.
@@ -360,6 +384,8 @@ pub fn detail_table(report: &Report) -> String {
 /// What one invocation measures.
 pub struct Plan {
     pub models: Vec<String>,
+    /// Whether the gateway adds its agent rules, per arm.
+    pub rules: Vec<bool>,
     pub thinking: Vec<String>,
     pub tasks: Vec<Task>,
     pub reps: u32,
@@ -451,18 +477,15 @@ fn inherited_context(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// A gateway serving this run alone, on a port of its own.
+///
+/// It lives as long as the runtime it was started on.
 struct Gateway {
     base_url: String,
     key: String,
-    /// Dropping the runtime stops the server.
-    _runtime: tokio::runtime::Runtime,
 }
 
 impl Gateway {
-    fn start(config: Config) -> anyhow::Result<Self> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?;
+    fn start(runtime: &tokio::runtime::Runtime, config: Config) -> anyhow::Result<Self> {
         let listener = runtime.block_on(tokio::net::TcpListener::bind((
             std::net::Ipv4Addr::LOCALHOST,
             0,
@@ -477,12 +500,10 @@ impl Gateway {
             request_log: None,
         });
         runtime.spawn(async move { axum::serve(listener, gateway::router(state)).await });
-        runtime.spawn(stop_on_interrupt());
 
         Ok(Self {
             base_url: format!("http://{address}"),
             key,
-            _runtime: runtime,
         })
     }
 }
@@ -568,7 +589,7 @@ pub fn run(config: &Config, plan: &Plan) -> anyhow::Result<Vec<Report>> {
         "{} task(s) x {} rep(s), {} arm(s), suite {}{}\n",
         plan.tasks.len(),
         plan.reps,
-        plan.models.len() * plan.thinking.len(),
+        plan.models.len() * plan.rules.len() * plan.thinking.len(),
         digest(),
         if tools.jq {
             ""
@@ -583,12 +604,31 @@ pub fn run(config: &Config, plan: &Plan) -> anyhow::Result<Vec<Report>> {
     // service stopped and started around it.
     let mut guard = None;
 
-    // The user's own house rule is theirs, not the model's, and a score that moved
-    // when they edited it would be measuring the rule.
-    let gateway = Gateway::start(Config {
-        system_prompt: None,
-        ..config.clone()
-    })?;
+    // Serves the gateways, and stops a running agent on Ctrl-C. One handler only: a
+    // second would find the first one's interrupt and exit without cleaning up.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.spawn(stop_on_interrupt());
+
+    // One gateway per rules setting, since the gateway is what adds them. The user's
+    // own house rule is theirs, not the model's, and a score that moved when they
+    // edited it would be measuring the rule.
+    let gateways = plan
+        .rules
+        .iter()
+        .map(|&rules| {
+            let gateway = Gateway::start(
+                &runtime,
+                Config {
+                    system_prompt: None,
+                    agent_rules: rules,
+                    ..config.clone()
+                },
+            )?;
+            Ok((rules, gateway))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
     let runnable = ailocal::status::runnable_models(config)?;
     let mut reports = Vec::new();
@@ -611,24 +651,29 @@ pub fn run(config: &Config, plan: &Plan) -> anyhow::Result<Vec<Report>> {
             }
         };
 
-        let pi_dir = scratch.0.join(format!("pi-{}", slug(model)));
-        std::fs::create_dir_all(&pi_dir)?;
-        for (name, value) in pi_files(&gateway.base_url, &gateway.key, offered) {
-            std::fs::write(pi_dir.join(name), serde_json::to_string_pretty(&value)?)?;
-        }
+        for (rules, gateway) in &gateways {
+            let pi_dir = scratch
+                .0
+                .join(format!("pi-{}-rules-{}", slug(model), on_off(*rules)));
+            std::fs::create_dir_all(&pi_dir)?;
+            for (name, value) in pi_files(&gateway.base_url, &gateway.key, offered) {
+                std::fs::write(pi_dir.join(name), serde_json::to_string_pretty(&value)?)?;
+            }
 
-        for thinking in &plan.thinking {
-            let arm = Arm {
-                model: model.clone(),
-                thinking: thinking.clone(),
-                context: offered.context_window,
-                sampling: instance.sampling.as_ref().map(ToString::to_string),
-            };
-            eprintln!("== {}", arm.label());
-            let report = run_arm(config, plan, &tools, &scratch.0, &pi_dir, &target_dir, arm)?;
-            let path = report.save(&config.eval_dir)?;
-            eprintln!("   saved {}\n", path.display());
-            reports.push(report);
+            for thinking in &plan.thinking {
+                let arm = Arm {
+                    model: model.clone(),
+                    thinking: thinking.clone(),
+                    context: offered.context_window,
+                    sampling: instance.sampling.as_ref().map(ToString::to_string),
+                    rules: rules.then(rules_digest),
+                };
+                eprintln!("== {}", arm.label());
+                let report = run_arm(config, plan, &tools, &scratch.0, &pi_dir, &target_dir, arm)?;
+                let path = report.save(&config.eval_dir)?;
+                eprintln!("   saved {}\n", path.display());
+                reports.push(report);
+            }
         }
     }
     Ok(reports)
@@ -654,10 +699,11 @@ fn run_arm(
 ) -> anyhow::Result<Report> {
     let started = crate::report::now_epoch();
     let id = format!(
-        "{}-{}-thinking-{}",
+        "{}-{}-thinking-{}-rules-{}",
         crate::report::utc_compact(started),
         slug(&arm.model),
-        arm.thinking
+        arm.thinking,
+        on_off(arm.rules.is_some())
     );
     let bench = Bench {
         tools,
@@ -1360,6 +1406,7 @@ mod tests {
                 thinking: "off".to_owned(),
                 context: 65536,
                 sampling: None,
+                rules: None,
             },
             suite: digest(),
             runs: vec![
@@ -1372,7 +1419,7 @@ mod tests {
         assert_eq!(report.rate(CLIPPY), None);
 
         let table = summary_table(&[&report]);
-        assert!(table.contains("m (thinking off)"), "{table}");
+        assert!(table.contains("m (thinking off, rules off)"), "{table}");
         assert!(table.contains("50%"), "{table}");
     }
 

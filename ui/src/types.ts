@@ -285,6 +285,8 @@ export interface Config {
   max_context: number;
   default_model: string | null;
   system_prompt?: string;
+  /** Absent when on: the file records it only once it is turned off. */
+  agent_rules?: boolean;
   gateway_host: string;
   gateway_port: number;
 }
@@ -388,6 +390,7 @@ export interface SettingsPatch {
   gateway_port?: number;
   /** `null` clears the house rule; leaving it out keeps it. */
   system_prompt?: string | null;
+  agent_rules?: boolean;
 }
 
 /** `setup::Applied`: what changed, and what it means for what is running. */

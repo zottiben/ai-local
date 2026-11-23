@@ -107,6 +107,17 @@ describe("Settings", () => {
     expect(saveSettings).toHaveBeenCalledWith({ system_prompt: "Answer tersely." });
   });
 
+  it("reads absent agent rules as on and sends a change as a boolean", async () => {
+    await form();
+    // The file records the setting only once it is off, so the saved config has none.
+    const rules = screen.getByLabelText(/Agent rules/) as HTMLSelectElement;
+    expect(rules.value).toBe("on");
+
+    fireEvent.change(rules, { target: { value: "off" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(saveSettings).toHaveBeenCalledWith({ agent_rules: false });
+  });
+
   it("leaves a half-typed number out rather than sending NaN", async () => {
     await form();
     fireEvent.change(screen.getByLabelText(/Gateway port/), { target: { value: "" } });

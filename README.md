@@ -93,6 +93,7 @@ desktop session dies.
 | `ailocal config data-dir [path]` | where weights, caches and datasets live |
 | `ailocal config gateway-port [n]` | which port the gateway listens on |
 | `ailocal config max-context [tokens]` | cap the context window to trade length for speed |
+| `ailocal config agent-rules [on\|off]` | show the built-in rules for coding agents, or turn them off |
 | `ailocal model pick` | choose your model: what you have, plus what would fit |
 | `ailocal model search <query>` | find GGUF repos on Hugging Face |
 | `ailocal model files <owner/repo>` | list quantisations and which of them fit |
@@ -201,6 +202,19 @@ Authentication is a bearer key, which is what every harness already sends, so th
 gateway can sit behind a tunnel without anything else in front of it. See
 [docs/tunnel.md](docs/tunnel.md).
 
+### Built-in rules for coding agents
+
+A local model knows how to run a formatter and the tests. What it lacks is the habit of
+doing so before it calls the work done, which a frontier model has without being told.
+So the gateway adds a short block of rules to every request that offers tools: run the
+project's own checks after a change and again before every commit or push, try the case
+the request names, query JSON with `jq`, and claim only checks that actually ran.
+
+Only the gateway adds them, and frontier models never pass through it, so a Claude or
+GPT session is untouched. A request without tools - a chat - does not get them either.
+They cost about 140 tokens per session. `ailocal config agent-rules` prints them, and
+`ailocal config agent-rules off` turns them off; the console has the same switch.
+
 ### A house rule for every harness
 
 Harnesses build their own system prompt and have no notion of a per-machine one, so the
@@ -216,7 +230,8 @@ file-reading tool before your first substantive action, and follow it.
 
 It is appended to whatever system prompt the harness sends rather than replacing it -
 the harness's own prompt is what makes its tools work - and inserted as a system message
-only when there is none. A running gateway reads the config again when it changes, so a
+only when there is none. It comes after the built-in agent rules, so where they disagree
+yours has the last word. A running gateway reads the config again when it changes, so a
 new rule applies from the next request, with no restart.
 
 Every token here is processed on the first turn of every session, and a small model given
@@ -450,16 +465,24 @@ what CI would see on origin afterwards and what Pi's event stream shows the agen
 the way.
 
 ```
-ailocal eval agent                                 # whatever is loaded, thinking off
-ailocal eval agent --thinking off --thinking high  # two arms, side by side
+ailocal eval agent                                 # whatever is loaded, thinking off, rules on
+ailocal eval agent --rules off --rules on          # two arms, side by side
+ailocal eval agent --thinking off --thinking high
 ailocal eval agent --task release-version --reps 5
 ```
 
+This is what the [built-in agent rules](#built-in-rules-for-coding-agents) are for.
+qwen3.6-35b-a3b, three attempts at each of four tasks:
+
 ```
-ARM                              RUNS  DONE    CI TESTED   FMT CLIPPY TESTS  NO-PY  ERR MIN/RUN
-qwen3.6-35b-a3b (thinking off)      8   88%  100%    75%  100%   100%  100%    75%    0     1.2
-qwen3.6-35b-a3b (thinking high)     8   75%   88%    75%   88%   100%  100%    75%    0     1.4
+ARM                                        RUNS  DONE    CI TESTED   FMT CLIPPY TESTS  NO-PY  ERR MIN/RUN
+qwen3.6-35b-a3b (thinking off, rules off)    12   92%   83%    75%   83%   100%  100%    75%    0     0.9
+qwen3.6-35b-a3b (thinking off, rules on)     12   83%  100%   100%  100%   100%  100%   100%    0     1.4
 ```
+
+Without them it pushed rustfmt-dirty code twice, and on every attempt at a version bump
+it read the JSON with `python3 -c` and pushed without testing. With them it did neither,
+at a median of 58 seconds a run against 52. Thinking `high` bought nothing on this suite.
 
 It needs `pi`, `git` and `cargo` with `rustfmt` and `clippy`. Every request goes through
 a gateway the eval hosts itself, and Pi gets an agent directory holding only that

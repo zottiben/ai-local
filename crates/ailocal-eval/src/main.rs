@@ -79,6 +79,14 @@ struct AgentArgs {
     #[arg(long, default_value = "off")]
     thinking: Vec<String>,
 
+    /// Whether the gateway adds its built-in agent rules, `on` or `off`. Repeat to
+    /// compare both.
+    ///
+    /// On by default, as it is for a fresh install - and fixed rather than read from
+    /// your config, so a score does not move when your setup does.
+    #[arg(long, default_value = "on", value_parser = ["on", "off"])]
+    rules: Vec<String>,
+
     /// Attempts at each task. The model samples, so one attempt is an anecdote.
     #[arg(long, default_value_t = 3)]
     reps: u32,
@@ -202,6 +210,7 @@ fn run_agent(args: &AgentArgs) -> anyhow::Result<()> {
 
     let plan = agent::Plan {
         models: resolve_models(&config, &args.model)?,
+        rules: args.rules.iter().map(|r| r == "on").collect(),
         thinking: args.thinking.clone(),
         tasks,
         reps: args.reps,

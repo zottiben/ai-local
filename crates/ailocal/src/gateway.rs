@@ -19,7 +19,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use crate::anthropic;
-use crate::config;
+use crate::config::{self, Config};
 use crate::registry::{self, Fit};
 use crate::serve;
 use crate::vram;
@@ -572,8 +572,8 @@ async fn messages(
     // Anthropic clients express thinking with a `thinking` block, which survives the
     // translation above as-is; both paths need the same treatment to reach llama.cpp.
     apply_thinking_request(&mut translated);
-    if let Some(extra) = &state.config.get().system_prompt {
-        inject_system_prompt(&mut translated, extra);
+    if let Some(extra) = local_instructions(&state.config.get(), &translated) {
+        inject_system_prompt(&mut translated, &extra);
     }
 
     if wants_stream {
@@ -701,6 +701,35 @@ fn apply_thinking_request(body: &mut serde_json::Value) {
     }
 }
 
+/// Rules for a local model working as a coding agent, added by the gateway.
+///
+/// They ask for habits, not knowledge: a local model can run a formatter and the tests,
+/// and `ailocal eval agent` shows it skipping both on edits that do not look like code,
+/// and answering a JSON question with `python3 -c` while `jq` sat on the PATH.
+///
+/// Measured there on qwen3.6-35b-a3b, 12 attempts each way: pushes CI would pass went
+/// from 83% to 100%, pushes tested since the last edit from 75% to 100%, and Python on
+/// JSON from three attempts to none - for 139 prompt tokens. Change the text and
+/// measure again with `--rules off --rules on`.
+pub const AGENT_RULES: &str = include_str!("agent_rules.md");
+
+/// What this gateway adds to a conversation's system message, if anything.
+///
+/// The built-in rules come first and the user's own rule last, so on anything they
+/// disagree about the user has the final word. The rules talk about checks, commits and
+/// pushes, so a request that offers no tools - a chat, not an agent - does not get them.
+fn local_instructions(config: &Config, body: &serde_json::Value) -> Option<String> {
+    let offers_tools = body["tools"].as_array().is_some_and(|t| !t.is_empty());
+    let rules = (config.agent_rules && offers_tools).then(|| AGENT_RULES.trim());
+    let user = config
+        .system_prompt
+        .as_deref()
+        .filter(|p| !p.trim().is_empty());
+
+    let parts: Vec<&str> = rules.into_iter().chain(user).collect();
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
 /// Append a configured instruction to the conversation's system message.
 ///
 /// Harnesses build their own system prompt and have no notion of a per-machine one, so
@@ -756,8 +785,8 @@ async fn proxy(State(state): State<Arc<AppState>>, request: Request) -> ApiResul
             record_request(log, &path, &payload);
         }
         apply_thinking_request(&mut payload);
-        if let Some(extra) = &state.config.get().system_prompt {
-            inject_system_prompt(&mut payload, extra);
+        if let Some(extra) = local_instructions(&state.config.get(), &payload) {
+            inject_system_prompt(&mut payload, &extra);
         }
         serde_json::to_vec(&payload)
             .map(axum::body::Bytes::from)
@@ -999,6 +1028,60 @@ mod tests {
         let mut body = serde_json::json!({"messages": [{"role": "user", "content": "hi"}]});
         inject_system_prompt(&mut body, "   ");
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+    }
+
+    fn agent_request() -> serde_json::Value {
+        serde_json::json!({
+            "messages": [{"role": "user", "content": "fix it"}],
+            "tools": [{"type": "function", "function": {"name": "bash"}}],
+        })
+    }
+
+    #[test]
+    fn an_agent_gets_the_built_in_rules_by_default() {
+        let added = local_instructions(&Config::default(), &agent_request()).unwrap();
+        assert_eq!(added, AGENT_RULES.trim());
+    }
+
+    #[test]
+    fn a_chat_without_tools_gets_no_agent_rules() {
+        // The rules are about checks, commits and pushes; a chat can do none of them.
+        let chat = serde_json::json!({"messages": [{"role": "user", "content": "hi"}]});
+        assert_eq!(local_instructions(&Config::default(), &chat), None);
+
+        let no_tools = serde_json::json!({"messages": [], "tools": []});
+        assert_eq!(local_instructions(&Config::default(), &no_tools), None);
+    }
+
+    #[test]
+    fn the_users_rule_comes_after_the_built_in_ones() {
+        // Later instructions win where they disagree, and the user's are the ones that
+        // should.
+        let config = Config {
+            system_prompt: Some("Use python for JSON here.".to_owned()),
+            ..Config::default()
+        };
+        let added = local_instructions(&config, &agent_request()).unwrap();
+        assert_eq!(
+            added,
+            format!("{}\n\nUse python for JSON here.", AGENT_RULES.trim())
+        );
+
+        // A chat still gets the user's rule, which is for every request.
+        let chat = serde_json::json!({"messages": []});
+        assert_eq!(
+            local_instructions(&config, &chat).as_deref(),
+            Some("Use python for JSON here.")
+        );
+    }
+
+    #[test]
+    fn the_agent_rules_can_be_turned_off() {
+        let config = Config {
+            agent_rules: false,
+            ..Config::default()
+        };
+        assert_eq!(local_instructions(&config, &agent_request()), None);
     }
 
     #[test]

@@ -352,6 +352,7 @@ pub struct Settings {
     /// `Some(None)` clears it; absent leaves it.
     #[serde(default, deserialize_with = "crate::wire::double_option")]
     pub system_prompt: Option<Option<String>>,
+    pub agent_rules: Option<bool>,
 }
 
 /// What changing the settings means for what is already running.
@@ -438,6 +439,11 @@ pub fn apply_settings(settings: &Settings, unit_binary: UnitBinary) -> anyhow::R
             cfg.system_prompt = prompt;
             out.changed.push("system_prompt".to_owned());
         }
+    }
+
+    if let Some(on) = settings.agent_rules.filter(|on| *on != cfg.agent_rules) {
+        cfg.agent_rules = on;
+        out.changed.push("agent_rules".to_owned());
     }
 
     let mut port_changed = false;
