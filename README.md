@@ -104,7 +104,7 @@ desktop session dies.
 | `ailocal gateway run` / `key` / `check` | the authenticated front end |
 | `ailocal harness configure pi\|claude-code [--model X]` | point a harness at it |
 | `ailocal service install` / `status` | systemd user units for 24/7 |
-| `ailocal update` | install the latest release in place |
+| `ailocal update` | install the latest release in place, restarting the services onto it |
 | `ailocal extras list` / `install <name>` | optional companions, see below |
 | `ailocal eval run` | score a model on a coding suite (needs the `eval` extra) |
 | `ailocal ui` | a console for all of the above, in the browser (needs the `ui` extra) |

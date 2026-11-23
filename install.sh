@@ -372,19 +372,33 @@ if [ "$APP" -eq 1 ]; then
   install_app
 fi
 
+restart_service() {
+  if command -v systemctl >/dev/null 2>&1 &&
+     systemctl --user is-active "$1" >/dev/null 2>&1; then
+    echo "Restarting the $3 to pick it up..."
+    systemctl --user restart "$1" || true
+  elif command -v launchctl >/dev/null 2>&1 &&
+       launchctl print "gui/$(id -u)/$2" >/dev/null 2>&1; then
+    echo "Restarting the $3 to pick it up..."
+    launchctl kickstart -k "gui/$(id -u)/$2" || true
+  else
+    return 1
+  fi
+}
+
 if [ "$NEED_CORE" -eq 1 ] && [ -n "$CURRENT" ] && [ "$CURRENT" != "$VERSION_NUM" ]; then
   echo "Updated from v${CURRENT}."
-  # Service definitions embed the binary path, and a running gateway keeps the old
-  # image mapped, so it has to be restarted to pick up the new one.
-  if command -v systemctl >/dev/null 2>&1 &&
-     systemctl --user is-active ailocal-gateway.service >/dev/null 2>&1; then
-    echo "Restarting the gateway to pick it up..."
-    systemctl --user restart ailocal-gateway.service || true
-  elif command -v launchctl >/dev/null 2>&1 &&
-       launchctl print "gui/$(id -u)/io.github.zottiben.ailocal.gateway" >/dev/null 2>&1; then
-    echo "Restarting the gateway to pick it up..."
-    launchctl kickstart -k "gui/$(id -u)/io.github.zottiben.ailocal.gateway" || true
+  # Service definitions embed the binary path, and a running service keeps the old
+  # image mapped, so each has to be restarted to pick up the new one. That includes the
+  # model, whose llama-server launch flags can change between releases.
+  if ! restart_service ailocal-model.service io.github.zottiben.ailocal.model model; then
+    loaded="$("${BIN_DIR}/ailocal" ps 2>/dev/null | awk '$1 == "model" { print $2 }')" || loaded=""
+    if [ -n "$loaded" ]; then
+      echo "${loaded} is not run by the model service, so it keeps its old launch flags"
+      echo "until you restart it: ailocal serve ${loaded}"
+    fi
   fi
+  restart_service ailocal-gateway.service io.github.zottiben.ailocal.gateway gateway || true
 fi
 
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then

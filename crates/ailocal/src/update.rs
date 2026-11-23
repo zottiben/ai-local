@@ -3,7 +3,7 @@
 //! Deliberately owns no install logic of its own: it fetches the published
 //! `install.sh` and runs it. That script already knows every platform detail - the
 //! architecture matrix, checksum verification, the sudo fallback, restarting the
-//! gateway - and keeping one copy of that knowledge means an update can never drift
+//! services - and keeping one copy of that knowledge means an update can never drift
 //! from a fresh install. This contributes only what the script cannot know on its own:
 //! the running binary's version, passed as `AILOCAL_CURRENT_VERSION` so the script can
 //! answer "already up to date" without downloading a release.
