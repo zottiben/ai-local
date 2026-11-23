@@ -70,7 +70,7 @@ jobs:
             tar czf "${binary}-v${VERSION}-linux-${{ matrix.arch }}.tar.gz" -C stage "${binary}"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.arch }}
           path: ailocal*-v*-linux-*.tar.gz
@@ -104,7 +104,7 @@ jobs:
             tar czf "${binary}-v${VERSION}-macos-universal.tar.gz" -C stage "${binary}"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos-universal
           path: ailocal*-v*-macos-universal.tar.gz
@@ -167,7 +167,7 @@ jobs:
             mv "$OUT"/appimage/*.AppImage "ai-local-desktop-v${VERSION}-${{ matrix.label }}.AppImage"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-${{ matrix.label }}
           path: ai-local-desktop-v*
@@ -178,7 +178,7 @@ jobs:
     needs: [linux, macos, desktop]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
 
