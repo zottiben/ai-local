@@ -530,7 +530,7 @@ fn write_json(path: &Path, root: &serde_json::Value) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    write_atomically(path, &format!("{}\n", serde_json::to_string_pretty(root)?))
+    crate::write_atomically(path, &format!("{}\n", serde_json::to_string_pretty(root)?))
 }
 
 /// Set `key` to `value` in a JSON object file, backing it up if that changes anything.
@@ -562,7 +562,7 @@ fn merge_json(path: &Path, key: &str, value: serde_json::Value) -> anyhow::Resul
 
     let backup = back_up(path)?;
     object.insert(key.to_owned(), value);
-    write_atomically(path, &format!("{}\n", serde_json::to_string_pretty(&root)?))?;
+    crate::write_atomically(path, &format!("{}\n", serde_json::to_string_pretty(&root)?))?;
     Ok(Some(backup))
 }
 
@@ -596,7 +596,7 @@ pub fn unconfigure_pi() -> anyhow::Result<bool> {
             continue;
         }
         back_up(&path)?;
-        write_atomically(
+        crate::write_atomically(
             &path,
             &format!("{}\n", serde_json::to_string_pretty(&root)?),
         )?;
@@ -726,19 +726,6 @@ fn back_up(path: &Path) -> anyhow::Result<PathBuf> {
     std::fs::copy(path, &backup)
         .with_context(|| format!("backing up {} to {}", path.display(), backup.display()))?;
     Ok(backup)
-}
-
-/// Write via a temporary file and rename, so an interrupted write cannot truncate
-/// somebody else's credential store.
-fn write_atomically(path: &Path, contents: &str) -> anyhow::Result<()> {
-    let temp = path.with_extension("ailocal-tmp");
-    std::fs::write(&temp, contents).with_context(|| format!("writing {}", temp.display()))?;
-
-    // Preserve the original's permissions, since this file holds credentials.
-    if let Ok(meta) = std::fs::metadata(path) {
-        std::fs::set_permissions(&temp, meta.permissions()).ok();
-    }
-    std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))
 }
 
 #[cfg(test)]

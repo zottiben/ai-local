@@ -216,7 +216,8 @@ file-reading tool before your first substantive action, and follow it.
 
 It is appended to whatever system prompt the harness sends rather than replacing it -
 the harness's own prompt is what makes its tools work - and inserted as a system message
-only when there is none.
+only when there is none. A running gateway reads the config again when it changes, so a
+new rule applies from the next request, with no restart.
 
 Every token here is processed on the first turn of every session, and a small model given
 instructions that argue with the harness's follows neither well. A sentence or two.

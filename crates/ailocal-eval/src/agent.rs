@@ -472,7 +472,7 @@ impl Gateway {
 
         let state = Arc::new(gateway::AppState {
             key: key.clone(),
-            config,
+            config: ailocal::config::Live::fixed(config),
             client: reqwest::Client::builder().build()?,
             request_log: None,
         });

@@ -11,6 +11,7 @@
 //! scratch volume is still possible.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
@@ -420,8 +421,15 @@ impl Config {
     /// # Errors
     /// If the file exists but cannot be read or parsed.
     pub fn load() -> anyhow::Result<Self> {
-        let path = Self::path()?;
-        match std::fs::read_to_string(&path) {
+        Self::load_from(&Self::path()?)
+    }
+
+    /// [`Config::load`], from a file other than the usual one.
+    ///
+    /// # Errors
+    /// If the file exists but cannot be read or parsed.
+    pub fn load_from(path: &Path) -> anyhow::Result<Self> {
+        match std::fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text).map_err(|e| {
                 anyhow::Error::new(e).context(unknown_field_hint(&text).map_or_else(
                     || format!("parsing {}", path.display()),
@@ -444,10 +452,90 @@ impl Config {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
-        std::fs::write(&path, toml::to_string_pretty(self)?)
-            .with_context(|| format!("writing {}", path.display()))?;
+        // A running gateway re-reads this file whenever it changes, and an empty one
+        // parses as every default.
+        crate::write_atomically(&path, &toml::to_string_pretty(self)?)?;
         Ok(path)
     }
+}
+
+/// A config that follows its file.
+///
+/// The gateway runs for weeks under a service manager, while the console and `ailocal
+/// config` change settings by rewriting the file. Read once at startup, a house rule
+/// saved in the console never reached a running gateway: the same request sent 22
+/// prompt tokens before the save and after it, and 47 only once the gateway was
+/// restarted. A changed context cap or cache type was likewise ignored by every model
+/// the gateway loaded on demand. So every request asks this for the config, and the
+/// file is read again whenever it has changed - one `stat` per request.
+pub struct Live {
+    /// `None` for a config that is not the user's, which no file change may replace.
+    path: Option<PathBuf>,
+    seen: Mutex<Seen>,
+}
+
+struct Seen {
+    stamp: Option<Stamp>,
+    config: Arc<Config>,
+}
+
+/// Enough to tell that a file was rewritten without reading it.
+type Stamp = (std::time::SystemTime, u64);
+
+impl Live {
+    /// A config that never changes, for a gateway the user did not start.
+    #[must_use]
+    pub fn fixed(config: Config) -> Self {
+        Self {
+            path: None,
+            seen: Mutex::new(Seen {
+                stamp: None,
+                config: Arc::new(config),
+            }),
+        }
+    }
+
+    /// The config at `path`, as it is now and whenever it changes.
+    ///
+    /// # Errors
+    /// If the file exists but cannot be read or parsed now. Later, a bad file keeps the
+    /// last good config instead.
+    pub fn follow(path: PathBuf) -> anyhow::Result<Self> {
+        let stamp = stamp(&path);
+        let config = Config::load_from(&path)?;
+        Ok(Self {
+            path: Some(path),
+            seen: Mutex::new(Seen {
+                stamp,
+                config: Arc::new(config),
+            }),
+        })
+    }
+
+    /// The config as of now.
+    ///
+    /// A file that no longer parses - someone half way through editing it by hand -
+    /// keeps the last good config and says so once, rather than failing every request
+    /// until they save again.
+    pub fn get(&self) -> Arc<Config> {
+        let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(path) = &self.path {
+            let now = stamp(path);
+            if now != seen.stamp {
+                seen.stamp = now;
+                match Config::load_from(path) {
+                    Ok(config) => seen.config = Arc::new(config),
+                    Err(e) => eprintln!("keeping the previous config: {e:#}"),
+                }
+            }
+        }
+        Arc::clone(&seen.config)
+    }
+}
+
+fn stamp(path: &Path) -> Option<Stamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
 }
 
 #[cfg(test)]
@@ -476,6 +564,44 @@ mod tests {
         let c = Config::default();
         assert!(!c.hf_home.ends_with(".cache/huggingface"));
         assert_eq!(c.hf_home, c.data_dir.join("hf"));
+    }
+
+    /// The console saves a setting by rewriting the file, and the gateway that has to
+    /// act on it has been running since boot.
+    #[test]
+    fn a_followed_config_sees_a_save_without_a_restart() {
+        let dir = std::env::temp_dir().join(format!("ailocal-live-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "max_context = 65536\n").unwrap();
+
+        let live = Live::follow(path.clone()).unwrap();
+        assert_eq!(live.get().system_prompt, None);
+
+        crate::write_atomically(&path, "max_context = 65536\nsystem_prompt = \"Use jq.\"\n")
+            .unwrap();
+        assert_eq!(live.get().system_prompt.as_deref(), Some("Use jq."));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_config_that_stops_parsing_keeps_the_last_good_one() {
+        // Someone half way through a hand edit should not take every request down
+        // with them.
+        let dir = std::env::temp_dir().join(format!("ailocal-live-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "system_prompt = \"one\"\n").unwrap();
+        let live = Live::follow(path.clone()).unwrap();
+
+        std::fs::write(&path, "system_prompt = \n").unwrap();
+        assert_eq!(live.get().system_prompt.as_deref(), Some("one"));
+
+        std::fs::write(&path, "system_prompt = \"two\"\n").unwrap();
+        assert_eq!(live.get().system_prompt.as_deref(), Some("two"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn os(s: &str) -> std::ffi::OsString {

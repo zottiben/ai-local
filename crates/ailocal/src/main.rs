@@ -1761,8 +1761,8 @@ fn gateway_run(host: &str, port: u16, log_requests: bool) -> anyhow::Result<()> 
         ),
     }
 
-    let config = Config::load()?;
-    let request_log = log_requests.then(|| config.data_dir.join("gateway-requests.jsonl"));
+    let config = ailocal::config::Live::follow(Config::path()?)?;
+    let request_log = log_requests.then(|| config.get().data_dir.join("gateway-requests.jsonl"));
     if let Some(path) = &request_log {
         println!("  recording requests to {}", path.display());
     }

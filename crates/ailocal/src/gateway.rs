@@ -19,14 +19,16 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use crate::anthropic;
-use crate::config::Config;
+use crate::config;
 use crate::registry::{self, Fit};
 use crate::serve;
 use crate::vram;
 
 pub struct AppState {
     pub key: String,
-    pub config: Config,
+    /// Asked on every request, so a setting saved while the gateway runs applies to
+    /// the next one.
+    pub config: config::Live,
     pub client: reqwest::Client,
     /// Where to record incoming conversations, if asked to.
     pub request_log: Option<std::path::PathBuf>,
@@ -383,13 +385,13 @@ async fn require_bearer(
 /// expects to choose later, so listing only the loaded one would make the others
 /// unreachable. Models that cannot fit are omitted rather than offered and then failed.
 async fn list_models(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    let cache: vram::CacheType = state
-        .config
+    let config = state.config.get();
+    let cache: vram::CacheType = config
         .cache_type
         .parse()
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
 
-    let models = registry::scan(&state.config.models_dir).map_err(|e| {
+    let models = registry::scan(&config.models_dir).map_err(|e| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("reading model directory: {e}"),
@@ -430,13 +432,13 @@ async fn list_models(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde
 /// figure reported is the one a launch would actually get, not the trained maximum:
 /// promising a context this machine cannot hold only moves the failure later.
 async fn router_list(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    let cache: vram::CacheType = state
-        .config
+    let config = state.config.get();
+    let cache: vram::CacheType = config
         .cache_type
         .parse()
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
 
-    let models = registry::scan(&state.config.models_dir).map_err(|e| {
+    let models = registry::scan(&config.models_dir).map_err(|e| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("reading model directory: {e}"),
@@ -522,7 +524,7 @@ async fn ensure_loaded(state: &Arc<AppState>, model: &str) -> ApiResult<serve::I
         return Ok(current);
     }
 
-    let config = state.config.clone();
+    let config = state.config.get();
     let wanted = model.to_owned();
     tokio::task::spawn_blocking(move || -> anyhow::Result<serve::Instance> {
         let models = registry::scan(&config.models_dir)?;
@@ -570,7 +572,7 @@ async fn messages(
     // Anthropic clients express thinking with a `thinking` block, which survives the
     // translation above as-is; both paths need the same treatment to reach llama.cpp.
     apply_thinking_request(&mut translated);
-    if let Some(extra) = &state.config.system_prompt {
+    if let Some(extra) = &state.config.get().system_prompt {
         inject_system_prompt(&mut translated, extra);
     }
 
@@ -699,7 +701,7 @@ fn apply_thinking_request(body: &mut serde_json::Value) {
     }
 }
 
-/// Prepend a configured instruction to the conversation's system message.
+/// Append a configured instruction to the conversation's system message.
 ///
 /// Harnesses build their own system prompt and have no notion of a per-machine one, so
 /// this is the only place a local instruction can be added once and apply to all of
@@ -754,7 +756,7 @@ async fn proxy(State(state): State<Arc<AppState>>, request: Request) -> ApiResul
             record_request(log, &path, &payload);
         }
         apply_thinking_request(&mut payload);
-        if let Some(extra) = &state.config.system_prompt {
+        if let Some(extra) = &state.config.get().system_prompt {
             inject_system_prompt(&mut payload, extra);
         }
         serde_json::to_vec(&payload)

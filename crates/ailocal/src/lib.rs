@@ -274,6 +274,26 @@ pub fn primary_device() -> anyhow::Result<device::Device> {
         .map_err(|e| anyhow::anyhow!(e))
 }
 
+/// Write via a temporary file and rename, so a reader never sees half a file.
+///
+/// An interrupted write would otherwise truncate somebody else's credential store, and
+/// a gateway that follows its config would read an empty one as all defaults.
+///
+/// # Errors
+/// If the temporary file cannot be written or moved into place.
+pub fn write_atomically(path: &std::path::Path, contents: &str) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
+    let temp = path.with_extension("ailocal-tmp");
+    std::fs::write(&temp, contents).with_context(|| format!("writing {}", temp.display()))?;
+
+    // Preserve the original's permissions, since some of these files hold credentials.
+    if let Ok(meta) = std::fs::metadata(path) {
+        std::fs::set_permissions(&temp, meta.permissions()).ok();
+    }
+    std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
