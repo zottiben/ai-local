@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "ailocal"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -38,7 +38,7 @@ dependencies = [
 
 [[package]]
 name = "ailocal-desktop"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "ailocal",
  "ailocal-ui",
@@ -52,7 +52,7 @@ dependencies = [
 
 [[package]]
 name = "ailocal-eval"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "ailocal",
  "anyhow",
@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "ailocal-ui"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "ailocal",
  "anyhow",
