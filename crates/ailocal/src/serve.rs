@@ -40,7 +40,14 @@ pub struct Instance {
     pub path: PathBuf,
     pub host: String,
     pub port: u16,
+    /// The window each conversation gets, and the one every harness is told about.
     pub context: u64,
+    /// Conversations it serves at once, each with the whole `context`.
+    ///
+    /// `None` for a state file written before slots were pinned, whose server left
+    /// llama.cpp to share one `context` between four.
+    #[serde(default)]
+    pub slots: Option<u64>,
     pub cache_type: String,
     /// VRAM held by everything else at the moment this model was loaded.
     ///
@@ -573,12 +580,21 @@ fn spawn(
     // guess as though it were measured is what makes the next launch budget wrongly.
     let desktop_mib = crate::vram_used_mib().ok();
 
+    // plan_context refuses a model it cannot measure, so there is always a layout here.
+    let slots = model.kv.map_or(1, |kv| {
+        budget.slots(&kv, opts.cache, model.size_mib, context)
+    });
+
     let exe = crate::llama_server()?;
     let mut cmd = std::process::Command::new(&exe);
+    // A cache per slot rather than one shared pool, so each conversation owns the
+    // window it was promised; see `vram::SLOTS`.
     cmd.arg("-m")
         .arg(&model.path)
         .args(["-ngl", "99"])
-        .args(["-c", &context.to_string()])
+        .args(["-np", &slots.to_string()])
+        .args(["-c", &(context * slots).to_string()])
+        .arg("--no-kv-unified")
         .args(["-ctk", opts.cache.as_llama_arg()])
         .args(["-ctv", opts.cache.as_llama_arg()])
         .args(["--host", &opts.host])
@@ -589,7 +605,7 @@ fn spawn(
     if should_lock_weights() {
         cmd.args(["--load-mode", "mlock"]);
     }
-    let cache_ram_mib = prompt_cache_mib(model, budget, opts.cache, context);
+    let cache_ram_mib = prompt_cache_mib(model, budget, opts.cache, context, slots);
     if let Some(mib) = cache_ram_mib {
         cmd.args(["--cache-ram", &mib.to_string()]);
     }
@@ -615,6 +631,7 @@ fn spawn(
         host: opts.host.clone(),
         port: opts.port,
         context,
+        slots: Some(slots),
         cache_type: opts.cache.as_llama_arg().to_owned(),
         desktop_mib,
         cache_ram_mib,
@@ -653,10 +670,10 @@ fn spawn(
 /// cache decompressed 1513 MB to do it.
 ///
 /// One conversation's worth by our own KV estimate, clamped to what is left after the
-/// weights and the live cache. That estimate carries a safety factor and runs about
-/// twice what llama.cpp actually stores - a 128k entry it reported as 4362 MiB prices
-/// here at roughly double - so one estimated conversation buys about two real ones,
-/// which is enough for a single user to return to recent work cheaply.
+/// weights and every slot's live cache. That estimate carries a safety factor and runs
+/// about twice what llama.cpp actually stores - a 128k entry it reported as 4362 MiB
+/// prices here at roughly double - so one estimated conversation buys about two real
+/// ones, which is enough for a single user to return to recent work cheaply.
 ///
 /// Deliberately not more. A prompt cache that pushes the machine into swap costs more
 /// than the prefill it saves, and doubling this produced 8160 MiB - within a rounding
@@ -664,13 +681,19 @@ fn spawn(
 ///
 /// `None` when the model's geometry is unknown, which is the only case where llama.cpp
 /// choosing for itself beats a number we would have to invent.
-fn prompt_cache_mib(model: &Model, budget: &Budget, cache: CacheType, context: u64) -> Option<u64> {
+fn prompt_cache_mib(
+    model: &Model,
+    budget: &Budget,
+    cache: CacheType,
+    context: u64,
+    slots: u64,
+) -> Option<u64> {
     let kv = model.kv?;
     let live = kv.cache_mib(cache, context);
     let spare = budget
         .available_mib()
         .saturating_sub(model.size_mib)
-        .saturating_sub(live);
+        .saturating_sub(live * slots);
     Some(live.min(spare))
 }
 
@@ -865,6 +888,7 @@ mod tests {
             host: "127.0.0.1".into(),
             port: 8080,
             context: 4096,
+            slots: Some(1),
             cache_type: "q8_0".into(),
             desktop_mib: Some(desktop_mib),
             cache_ram_mib: Some(512),
@@ -894,12 +918,12 @@ mod tests {
             context_cap: None,
         };
         let live = m.kv.unwrap().cache_mib(CacheType::Q8_0, 32_768);
-        let sized = prompt_cache_mib(&m, &budget, CacheType::Q8_0, 32_768).unwrap();
+        let sized = prompt_cache_mib(&m, &budget, CacheType::Q8_0, 32_768, 1).unwrap();
         assert_eq!(sized, live);
 
         // The whole point of sizing it: a smaller window must buy a smaller cache,
         // rather than every model inheriting the same 8 GB.
-        let half = prompt_cache_mib(&m, &budget, CacheType::Q8_0, 16_384).unwrap();
+        let half = prompt_cache_mib(&m, &budget, CacheType::Q8_0, 16_384, 1).unwrap();
         assert!(half < sized, "{half} should be under {sized}");
     }
 
@@ -917,9 +941,20 @@ mod tests {
             desktop_mib: 0,
             context_cap: None,
         };
-        let sized = prompt_cache_mib(&m, &tight, CacheType::Q8_0, 32_768).unwrap();
+        let sized = prompt_cache_mib(&m, &tight, CacheType::Q8_0, 32_768, 1).unwrap();
         assert_eq!(sized, 100, "should take only what is spare, got {sized}");
         assert!(sized < live);
+
+        // Every slot holds its own live cache, and each one is memory the prompt
+        // cache cannot also have.
+        let two = Budget {
+            ceiling_mib: tight.ceiling_mib + live,
+            ..tight
+        };
+        assert_eq!(
+            prompt_cache_mib(&m, &two, CacheType::Q8_0, 32_768, 2),
+            Some(100)
+        );
     }
 
     /// The guard that stops a doomed spawn being recorded as a healthy one.
@@ -945,7 +980,7 @@ mod tests {
     fn an_unmeasurable_model_leaves_the_prompt_cache_to_llama_cpp() {
         let m = model("mystery", 4000, None, None);
         assert_eq!(
-            prompt_cache_mib(&m, &Budget::new(900), CacheType::Q8_0, 4096),
+            prompt_cache_mib(&m, &Budget::new(900), CacheType::Q8_0, 4096, 1),
             None
         );
     }
@@ -959,6 +994,7 @@ mod tests {
                         "port":8080,"context":4096,"cache_type":"q8_0","desktop_mib":900}"#;
         let parsed: Instance = serde_json::from_str(older).unwrap();
         assert_eq!(parsed.reasoning, "?");
+        assert_eq!(parsed.slots, None, "its server chose its own slots");
     }
 
     #[test]
@@ -1040,6 +1076,7 @@ mod tests {
             host: "127.0.0.1".into(),
             port,
             context: 4096,
+            slots: None,
             cache_type: "q8_0".into(),
             desktop_mib: None,
             cache_ram_mib: None,

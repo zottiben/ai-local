@@ -1799,6 +1799,9 @@ fn ps() -> anyhow::Result<()> {
             println!("{:<12} {}", "model", i.model);
             println!("{:<12} {}", "url", i.base_url());
             println!("{:<12} {}", "context", format_count(i.context));
+            if let Some(slots) = i.slots {
+                println!("{:<12} {slots}, each with the whole context", "slots");
+            }
             println!("{:<12} {}", "kv cache", i.cache_type);
             // The one allocation that grows after the launch, so it is worth seeing
             // next to the context that sizes it.

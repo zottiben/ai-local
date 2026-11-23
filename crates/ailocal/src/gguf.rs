@@ -770,7 +770,8 @@ mod tests {
         let cache = kv.global.bytes_per_token(crate::vram::CacheType::Q8_0) * 8192.0 / MIB;
         assert!((cache - 51.0).abs() < 0.01, "KV {cache:.2} MiB");
 
-        let state = kv.fixed_bytes() / MIB;
+        // That run left `-np` unset, so llama-server held the state for 4 slots.
+        let state = kv.fixed_bytes() * 4.0 / MIB;
         assert!((state - 77.06).abs() < 0.01, "RS {state:.2} MiB");
     }
 
@@ -790,7 +791,7 @@ mod tests {
 
         // 48 recurrent blocks, each 3 MiB a slot - real memory the context costs.
         let state = kv.fixed_bytes() / MIB;
-        assert!((state - 598.5).abs() < 1.0, "RS {state:.1} MiB");
+        assert!((state - 149.6).abs() < 1.0, "RS {state:.1} MiB");
     }
 
     /// A block may only be called cache-free when what it keeps instead is priced.

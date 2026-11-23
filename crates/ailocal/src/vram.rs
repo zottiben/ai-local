@@ -18,16 +18,26 @@ pub const CEILING_MIB: u64 = 14_400;
 /// Slack for llama.cpp's compute buffers, which scale with batch rather than context.
 pub const COMPUTE_BUFFER_MIB: u64 = 500;
 
-/// Sequences llama-server keeps recurrent state for when `-np` is left unset.
+/// Most conversations a launch serves at once, each with the whole context.
 ///
-/// Measured on llama.cpp 1.0 (b12359): it picks 4 slots over one unified KV cache, so
-/// a single conversation still gets the whole context. Pinning `-np 4` is a different
-/// launch - it turns the unified cache off and splits the context four ways, 8192
-/// tokens a slot at `-c 32768` - so `serve` leaves the choice to llama-server and the
-/// estimate assumes what it picks.
+/// Left unset, llama.cpp 1.0 (b12359) picks 4 slots over one unified KV cache and
+/// tells each of them it has the whole context - which it does, until two use it at
+/// once. The four share one pool of `-c` cells, so two conversations that together
+/// pass it both fail mid-decode with "Context size has been exceeded.", a 500 that
+/// pi does not treat as an overflow. Measured on 2026-11-23: two pi sessions at 71k
+/// and 56k against a 128k server failed in the same second, and pi had been told 128k.
+/// The same pool is why they kept losing each other's prompt cache - every new task
+/// clears the idle slots of a unified cache.
 ///
-/// Only recurrent state is held per slot. The KV cache is shared between them.
-pub const SLOTS: u64 = 4;
+/// So `serve` pins `-np` with the unified cache off, and each slot owns exactly the
+/// window every harness is told about. Two because that is what the sessions here
+/// actually overlap at: of a fortnight's local requests, 29% had one other session
+/// active and 7% had two or more. A further conversation waits for a slot rather than
+/// failing.
+///
+/// A ceiling, not a target: a slot is only added when its whole window fits, so a
+/// card that can hold one window never trades it for two smaller ones.
+pub const SLOTS: u64 = 2;
 
 /// Multiplier applied to computed cache size.
 ///
@@ -117,8 +127,8 @@ pub struct KvLayout {
     ///
     /// Hybrid models such as qwen3.5 run most blocks as linear attention, which keeps
     /// a constant-size state in place of a cache. It does not grow with context, but
-    /// it is allocated for every slot - ~600 MiB on qwen3.6-27b, too much to leave to
-    /// the compute-buffer slack on a 16 GB card.
+    /// it is allocated for every slot - ~150 MiB a slot on qwen3.6-27b, too much to
+    /// leave to the compute-buffer slack on a 16 GB card.
     pub recurrent_state: u64,
 }
 
@@ -147,7 +157,7 @@ impl KvLayout {
         self.global.bytes_per_token(cache) * SAFETY_FACTOR
     }
 
-    /// Total cache bytes for `context` tokens.
+    /// Cache bytes one slot needs for `context` tokens.
     #[must_use]
     pub fn cache_bytes(&self, cache: CacheType, context: u64) -> f64 {
         let mut bytes = self.global.bytes_per_token(cache) * context as f64;
@@ -158,13 +168,13 @@ impl KvLayout {
         (bytes + self.fixed_bytes()) * SAFETY_FACTOR
     }
 
-    /// What the context holds before it holds a single token.
+    /// What a slot holds before it holds a single token.
     #[must_use]
     pub fn fixed_bytes(&self) -> f64 {
-        (self.recurrent_state * SLOTS) as f64
+        self.recurrent_state as f64
     }
 
-    /// Total cache for `context` tokens, in MiB, rounded up.
+    /// Cache one slot needs for `context` tokens, in MiB, rounded up.
     #[must_use]
     pub fn cache_mib(&self, cache: CacheType, context: u64) -> u64 {
         (self.cache_bytes(cache, context) / (1024.0 * 1024.0)).ceil() as u64
@@ -275,7 +285,7 @@ impl Budget {
             .saturating_sub(COMPUTE_BUFFER_MIB)
     }
 
-    /// Largest context this budget allows alongside `weights_mib`, or `None` if the
+    /// Largest context one slot may have alongside `weights_mib`, or `None` if the
     /// weights alone do not fit.
     #[must_use]
     pub fn max_context(&self, kv: &KvLayout, cache: CacheType, weights_mib: u64) -> Option<u64> {
@@ -315,6 +325,16 @@ impl Budget {
     pub fn fits(&self, kv: &KvLayout, cache: CacheType, weights_mib: u64, context: u64) -> bool {
         weights_mib + kv.cache_mib(cache, context) <= self.available_mib()
     }
+
+    /// How many slots of `context` tokens each to launch with, up to [`SLOTS`].
+    ///
+    /// Never fewer than one: the context was already planned to fit a single slot, and
+    /// that is the caller's check to make.
+    #[must_use]
+    pub fn slots(&self, kv: &KvLayout, cache: CacheType, weights_mib: u64, context: u64) -> u64 {
+        let for_cache = self.available_mib().saturating_sub(weights_mib);
+        (for_cache / kv.cache_mib(cache, context).max(1)).clamp(1, SLOTS)
+    }
 }
 
 #[cfg(test)]
@@ -333,6 +353,15 @@ mod tests {
         KvLayout {
             recurrent_state: 48 * 3_268_608,
             ..KvLayout::dense(16, 4, 256, 256)
+        }
+    }
+
+    /// qwen3.6-35b-a3b (arch `qwen35moe`): 40 trunk blocks attending one in four, with
+    /// 2 KV heads at 256/256. The other 30 keep 2 MiB of recurrent state a slot.
+    fn qwen36_35b_a3b() -> KvLayout {
+        KvLayout {
+            recurrent_state: 30 * 2_195_456,
+            ..KvLayout::dense(10, 2, 256, 256)
         }
     }
 
@@ -396,7 +425,7 @@ mod tests {
         let ctx = budget
             .max_context(&qwen36_27b(), CacheType::Q8_0, 10428)
             .expect("IQ3_XXS weights fit");
-        assert!((40_000..48_000).contains(&ctx), "expected ~44k, got {ctx}");
+        assert!((52_000..62_000).contains(&ctx), "expected ~57k, got {ctx}");
         assert!(!budget.fits(&qwen36_27b(), CacheType::Q8_0, 10428, 200_000));
     }
 
@@ -514,6 +543,36 @@ mod tests {
         assert_eq!(
             generous.max_context(&kv, CacheType::Q8_0, 17_697),
             Some(uncapped)
+        );
+    }
+
+    /// The launch that failed: qwen3.6-35b-a3b at 128k on the 64 GB Mac. Two sessions
+    /// at once must each own the whole window they were told about.
+    #[test]
+    fn a_big_machine_gives_every_slot_the_whole_window() {
+        use crate::device::Backend;
+        let mac =
+            Budget::for_device(&device(Backend::Metal, 53_084, 53_000)).capped_at(Some(131_072));
+        let kv = qwen36_35b_a3b();
+        let ctx = mac.max_context(&kv, CacheType::Q8_0, 20_712).unwrap();
+        assert_eq!(ctx, 131_072);
+        assert_eq!(mac.slots(&kv, CacheType::Q8_0, 20_712, ctx), SLOTS);
+    }
+
+    /// A card that holds one window keeps it, rather than splitting it into two that
+    /// are each too small for a harness's opening prompt.
+    #[test]
+    fn a_small_card_keeps_one_whole_window_rather_than_two_halves() {
+        let budget = Budget::new(900);
+        let ctx = budget
+            .max_context(&qwen3_14b(), CacheType::Q8_0, 8836)
+            .unwrap();
+        assert_eq!(budget.slots(&qwen3_14b(), CacheType::Q8_0, 8836, ctx), 1);
+
+        // A quarter of the window leaves room for four, and still only gets SLOTS.
+        assert_eq!(
+            budget.slots(&qwen3_14b(), CacheType::Q8_0, 8836, ctx / 4),
+            SLOTS
         );
     }
 

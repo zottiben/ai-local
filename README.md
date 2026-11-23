@@ -160,11 +160,16 @@ memory, and processing the harness prompt. All three are avoidable or reducible.
   otherwise macOS may compress an idle model and the next prompt has to fault it all
   back. Measured on an M4 Max/64 GB: 13.4 tok/s after idle versus 97.3 tok/s once warm.
 - **Do not advertise a window a cold turn cannot return from.** `max_context` defaults
-  to 64k, and `ailocal config max-context 32768` is the setting for a machine that
+  to 128k, and `ailocal config max-context 32768` is the setting for a machine that
   should feel instant. This is the one that bites hardest: a harness fills whatever
   window it is told about, and at 96k this hardware prefills at 52 tok/s against the
   518 tok/s it manages at 18k. A smaller window also shrinks every prompt-cache entry
   made from it.
+- **Concurrent sessions each own their window.** llama.cpp's default is four slots
+  sharing one context, where two sessions evict each other's cache and can both fail
+  with "Context size has been exceeded". ailocal launches up to two slots that each
+  hold the whole window it advertises; a third session waits for one. `ailocal ps`
+  shows the count.
 - **The prompt cache is sized, not inherited.** llama.cpp would keep up to 8 GB of
   evicted session caches in ordinary memory, which grows on its own and is the first
   thing to page once the weights are locked. `ailocal ps` reports what the running

@@ -99,6 +99,20 @@ rather than a guess: on the PR11 suite gemma4-12b scored 95% off against 45% on,
 4.6x the wall clock, with 7 of 14 answers empty. Re-measure per model with
 `ailocal eval run --reasoning off --reasoning on` before changing it.
 
+### 3c. The advertised window is per slot, so every slot must own it
+With `-np` unset llama-server runs 4 slots over **one** KV pool of `-c` cells, and
+`/props` reports the whole `-c` for each. Two pi sessions at 71k and 56k on a 128k
+server both died in the same second with `Context size has been exceeded.` - a 500
+that pi does not treat as an overflow, so it stops rather than compacts. That pool
+also clears idle slots on every new task, so concurrent sessions re-prefill each
+other from zero.
+
+`serve` therefore pins `-np N --no-kv-unified -c N*context`, where N is
+`vram::SLOTS` or fewer when a whole window per slot does not fit. Never advertise
+more than one slot owns, and never split one window to make room for a second slot.
+An over-window request then gets the 400 `exceeds the available context size`,
+which pi does compact on.
+
 ### 4. ROCm never touches the inference path
 Inference is Vulkan. gfx1102 ROCm is flaky (upstream segfaults, hipBLASLt reports the
 arch unsupported). ROCm is for training only, so a training-side breakage can never take

@@ -312,7 +312,7 @@ mod tests {
         );
     }
 
-    /// A 27B at IQ3_XXS loads and holds ~44k, which is worth downloading.
+    /// A 27B at IQ3_XXS loads and holds ~57k, which is worth downloading.
     #[test]
     fn a_model_that_loads_with_usable_context_fits() {
         match assess(
@@ -322,7 +322,7 @@ mod tests {
             CacheType::Q8_0,
             10_428,
         ) {
-            Fit::Fits(ctx) => assert!((40_000..48_000).contains(&ctx), "got {ctx}"),
+            Fit::Fits(ctx) => assert!((52_000..62_000).contains(&ctx), "got {ctx}"),
             other => panic!("expected Fits, got {other:?}"),
         }
     }
