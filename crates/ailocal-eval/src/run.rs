@@ -118,7 +118,7 @@ impl Drop for ModelServiceGuard {
 /// two, and a record can be live while the port behind it is already dead. Without this
 /// the run reuses a corpse and every single task fails with a connection error, which
 /// reads as a broken harness rather than as one server that needed reloading.
-fn is_answering(instance: &serve::Instance) -> bool {
+pub fn is_answering(instance: &serve::Instance) -> bool {
     reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
@@ -126,7 +126,7 @@ fn is_answering(instance: &serve::Instance) -> bool {
         .is_ok_and(|r| r.status().is_success())
 }
 
-/// Make `model` the resident server, in `reasoning` mode.
+/// Make `model` the resident server, in `reasoning` mode with an optional thinking cap.
 ///
 /// Reuses what is already loaded when it is already right *and* still answering. A
 /// reload costs tens of seconds and evicts the model the gateway is serving, so it is
@@ -135,43 +135,37 @@ fn is_answering(instance: &serve::Instance) -> bool {
 ///
 /// # Errors
 /// If the model is not installed, or cannot be loaded within the VRAM budget.
-pub fn ensure_loaded(config: &Config, plan: &Plan) -> anyhow::Result<serve::Instance> {
+pub fn ensure_loaded(
+    config: &Config,
+    name: &str,
+    reasoning: &str,
+    reasoning_budget: Option<i64>,
+) -> anyhow::Result<serve::Instance> {
     if let Some(current) = serve::running()?
-        && current.model == plan.model
-        && current.reasoning == plan.reasoning
-        && plan.reasoning_budget.is_none()
+        && current.model == name
+        && current.reasoning == reasoning
+        && reasoning_budget.is_none()
         && is_answering(&current)
     {
         return Ok(current);
     }
 
     let models = registry::scan(&config.models_dir)?;
-    let model = models
-        .iter()
-        .find(|m| m.name == plan.model)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no model named {:?}; `ailocal model ls` shows what is installed",
-                plan.model
-            )
-        })?;
+    let model = models.iter().find(|m| m.name == name).ok_or_else(|| {
+        anyhow::anyhow!("no model named {name:?}; `ailocal model ls` shows what is installed")
+    })?;
 
     let from_config = serve::Options::from_config(config)?;
     let options = serve::Options {
-        reasoning: plan.reasoning.clone(),
-        reasoning_budget: plan
-            .reasoning_budget
-            .unwrap_or(from_config.reasoning_budget),
+        reasoning: reasoning.to_owned(),
+        reasoning_budget: reasoning_budget.unwrap_or(from_config.reasoning_budget),
         ..from_config
     };
     let budget = serve::budget_for_next_launch()?;
 
     eprintln!(
-        "loading {} with reasoning {}{} ...",
-        plan.model,
-        plan.reasoning,
-        plan.reasoning_budget
-            .map_or_else(String::new, |cap| format!(" capped at {cap} tokens"))
+        "loading {name} with reasoning {reasoning}{} ...",
+        reasoning_budget.map_or_else(String::new, |cap| format!(" capped at {cap} tokens"))
     );
     serve::start(model, &budget, &options)
 }
@@ -187,7 +181,7 @@ pub fn arm(
     corpus: &Loaded,
     tasks: &[&Task],
 ) -> anyhow::Result<Report> {
-    let instance = ensure_loaded(config, plan)?;
+    let instance = ensure_loaded(config, &plan.model, &plan.reasoning, plan.reasoning_budget)?;
 
     let client = reqwest::blocking::Client::builder()
         .timeout(REQUEST_TIMEOUT)

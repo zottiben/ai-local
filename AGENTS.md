@@ -27,6 +27,7 @@ Inference is llama.cpp's `llama-server`, Vulkan backend. Models are GGUF from Hu
 - Add a house rule to every harness: `system_prompt` in the config
 - Run it 24/7: `ailocal service install`, then `ailocal service status`
 - Score a model: `ailocal extras install eval`, then `ailocal eval run`
+- Score its habits as a coding agent in Pi: `ailocal eval agent`
 - Open the console: `ailocal extras install ui`, then `ailocal ui`
 - Build the desktop app: `cd crates/ailocal-desktop && npx @tauri-apps/cli@^2 build`
   (`--no-bundle` for just the binary). It is a workspace member but **not** a default

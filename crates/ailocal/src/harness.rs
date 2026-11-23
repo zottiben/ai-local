@@ -390,17 +390,11 @@ pub fn configure_pi(base_url: &str, api_key: &str, models: &[PiModel]) -> anyhow
         pi_credential(base_url, api_key),
     )?;
 
-    let catalogue = serde_json::json!({
-        "models": models
-            .iter()
-            .map(|m| pi_model_entry(m, base_url))
-            .collect::<Vec<_>>(),
-        "checkedAt": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0),
-    });
-    let catalogue = merge_json(&pi_models_store_path()?, PI_PROVIDER_ID, catalogue)?;
+    let catalogue = merge_json(
+        &pi_models_store_path()?,
+        PI_PROVIDER_ID,
+        pi_catalogue(models, base_url),
+    )?;
 
     let overrides = set_pi_overrides(pi_model_overrides(models))?;
 
@@ -413,6 +407,21 @@ pub fn configure_pi(base_url: &str, api_key: &str, models: &[PiModel]) -> anyhow
             }),
         }),
     }
+}
+
+/// Our provider's entry in Pi's cached catalogue.
+#[must_use]
+pub fn pi_catalogue(models: &[PiModel], base_url: &str) -> serde_json::Value {
+    serde_json::json!({
+        "models": models
+            .iter()
+            .map(|m| pi_model_entry(m, base_url))
+            .collect::<Vec<_>>(),
+        "checkedAt": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0),
+    })
 }
 
 /// Replace our `modelOverrides` block in Pi's `models.json`.

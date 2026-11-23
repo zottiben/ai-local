@@ -7,12 +7,15 @@
 //! because no adapter should be trained until there is something for it to beat.
 //!
 //! An arm is one model in one reasoning mode. `run` measures one or several, saves a
-//! report each, and prints them side by side.
+//! report each, and prints them side by side. `agent` does the same for a whole coding
+//! session rather than a single answer.
 
+mod agent;
 mod check;
 mod report;
 mod run;
 mod task;
+mod transcript;
 
 use std::path::{Path, PathBuf};
 
@@ -54,6 +57,43 @@ enum Command {
         #[arg(long)]
         tasks: Option<PathBuf>,
     },
+    /// Run Pi on coding tasks in a fixture repository, and score what it pushed.
+    ///
+    /// Scores what CI would see on origin - tests, formatting, lints, whether the task
+    /// was done - and whether the agent ran the tests before pushing and used jq
+    /// rather than Python on JSON.
+    Agent(AgentArgs),
+}
+
+#[derive(Args)]
+struct AgentArgs {
+    /// Model to run, as named by `ailocal model ls`. Repeat to compare several.
+    ///
+    /// Defaults to whichever model is loaded, then to the configured default.
+    #[arg(long)]
+    model: Vec<String>,
+
+    /// Pi's thinking level, `off` to `max`. Repeat to compare several.
+    ///
+    /// Sent per request, so comparing levels needs no reload.
+    #[arg(long, default_value = "off")]
+    thinking: Vec<String>,
+
+    /// Attempts at each task. The model samples, so one attempt is an anecdote.
+    #[arg(long, default_value_t = 3)]
+    reps: u32,
+
+    /// Only these task ids. Repeatable.
+    #[arg(long = "task")]
+    only: Vec<String>,
+
+    /// Stop an attempt after this many seconds.
+    #[arg(long, default_value_t = 900)]
+    timeout: u64,
+
+    /// Print the reports as JSON instead of tables.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -128,7 +168,72 @@ fn main() -> anyhow::Result<()> {
         Command::Show { run, only } => show_run(&run, only.as_deref()),
         Command::Compare { a, b } => compare_runs(&a, &b),
         Command::Tasks { tasks } => show_tasks(tasks.as_deref()),
+        Command::Agent(args) => run_agent(&args),
     }
+}
+
+fn run_agent(args: &AgentArgs) -> anyhow::Result<()> {
+    let config = Config::load()?;
+
+    for level in &args.thinking {
+        anyhow::ensure!(
+            agent::THINKING.contains(&level.as_str()),
+            "unknown thinking level {level:?}; expected one of {}",
+            agent::THINKING.join(", ")
+        );
+    }
+    anyhow::ensure!(args.reps > 0, "--reps must be at least 1");
+
+    let all = agent::tasks()?;
+    for wanted in &args.only {
+        anyhow::ensure!(
+            all.iter().any(|t| &t.id == wanted),
+            "no agent task with id {wanted:?}; there are: {}",
+            all.iter()
+                .map(|t| t.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let tasks = all
+        .into_iter()
+        .filter(|t| args.only.is_empty() || args.only.contains(&t.id))
+        .collect();
+
+    let plan = agent::Plan {
+        models: resolve_models(&config, &args.model)?,
+        thinking: args.thinking.clone(),
+        tasks,
+        reps: args.reps,
+        timeout: std::time::Duration::from_secs(args.timeout),
+    };
+    let reports = agent::run(&config, &plan)?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&reports)?);
+        return Ok(());
+    }
+    print!(
+        "{}",
+        agent::summary_table(&reports.iter().collect::<Vec<_>>())
+    );
+    for report in &reports {
+        println!(
+            "\n{}, sampling {}",
+            report.arm.label(),
+            report
+                .arm
+                .sampling
+                .as_deref()
+                .unwrap_or("llama.cpp defaults")
+        );
+        print!("{}", agent::detail_table(report));
+    }
+    println!(
+        "\nTranscripts are in {}, one directory per arm.",
+        agent::runs_dir(&config.eval_dir).display()
+    );
+    Ok(())
 }
 
 /// Where compiled answers go while they are being judged.
@@ -145,7 +250,7 @@ fn run_arms(args: &RunArgs) -> anyhow::Result<()> {
     let corpus = task::load(args.tasks.as_deref())?;
     let selected = select(&corpus.tasks, args)?;
 
-    let models = resolve_models(&config, args)?;
+    let models = resolve_models(&config, &args.model)?;
     let reasonings = if args.reasoning.is_empty() {
         vec![config.reasoning.clone()]
     } else {
@@ -221,9 +326,9 @@ fn run_arms(args: &RunArgs) -> anyhow::Result<()> {
 }
 
 /// Which models to measure, and a useful error when there is no obvious one.
-fn resolve_models(config: &Config, args: &RunArgs) -> anyhow::Result<Vec<String>> {
-    if !args.model.is_empty() {
-        return Ok(args.model.clone());
+fn resolve_models(config: &Config, named: &[String]) -> anyhow::Result<Vec<String>> {
+    if !named.is_empty() {
+        return Ok(named.to_vec());
     }
 
     // Whatever is loaded is almost always what you meant, and measuring it costs no

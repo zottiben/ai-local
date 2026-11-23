@@ -1,0 +1,2252 @@
+[
+  {
+    "version": "0.0.0",
+    "published": "2019-01-01",
+    "yanked": false
+  },
+  {
+    "version": "1.6.5",
+    "published": "2022-03-11",
+    "yanked": false
+  },
+  {
+    "version": "0.7.5",
+    "published": "2020-03-21",
+    "yanked": false
+  },
+  {
+    "version": "2.1.10",
+    "published": "2023-05-30",
+    "yanked": false
+  },
+  {
+    "version": "1.2.10",
+    "published": "2021-06-09",
+    "yanked": true
+  },
+  {
+    "version": "2.9.3",
+    "published": "2024-08-17",
+    "yanked": false
+  },
+  {
+    "version": "0.2.10",
+    "published": "2019-06-20",
+    "yanked": false
+  },
+  {
+    "version": "1.9.3",
+    "published": "2022-08-28",
+    "yanked": false
+  },
+  {
+    "version": "0.10.3",
+    "published": "2020-09-07",
+    "yanked": false
+  },
+  {
+    "version": "2.4.8",
+    "published": "2023-11-16",
+    "yanked": false
+  },
+  {
+    "version": "1.5.8",
+    "published": "2021-11-26",
+    "yanked": false
+  },
+  {
+    "version": "2.12.1",
+    "published": "2025-02-03",
+    "yanked": false
+  },
+  {
+    "version": "0.5.8",
+    "published": "2019-12-07",
+    "yanked": false
+  },
+  {
+    "version": "2.0.1",
+    "published": "2023-02-14",
+    "yanked": false
+  },
+  {
+    "version": "1.0.1",
+    "published": "2021-02-24",
+    "yanked": false
+  },
+  {
+    "version": "2.7.6",
+    "published": "2024-05-04",
+    "yanked": false
+  },
+  {
+    "version": "0.1.1",
+    "published": "2019-03-07",
+    "yanked": false
+  },
+  {
+    "version": "1.8.6",
+    "published": "2022-05-15",
+    "yanked": false
+  },
+  {
+    "version": "0.8.6",
+    "published": "2020-05-25",
+    "yanked": false
+  },
+  {
+    "version": "2.2.11",
+    "published": "2023-08-03",
+    "yanked": false
+  },
+  {
+    "version": "1.3.11",
+    "published": "2021-08-13",
+    "yanked": true
+  },
+  {
+    "version": "2.10.4",
+    "published": "2024-10-21",
+    "yanked": false
+  },
+  {
+    "version": "0.3.11",
+    "published": "2019-08-24",
+    "yanked": false
+  },
+  {
+    "version": "1.10.4",
+    "published": "2022-11-01",
+    "yanked": false
+  },
+  {
+    "version": "0.11.4",
+    "published": "2020-11-11",
+    "yanked": false
+  },
+  {
+    "version": "2.5.9",
+    "published": "2024-01-20",
+    "yanked": false
+  },
+  {
+    "version": "1.6.9",
+    "published": "2022-01-30",
+    "yanked": false
+  },
+  {
+    "version": "0.6.9",
+    "published": "2020-02-10",
+    "yanked": false
+  },
+  {
+    "version": "2.1.2",
+    "published": "2023-04-20",
+    "yanked": false
+  },
+  {
+    "version": "1.1.2",
+    "published": "2021-04-30",
+    "yanked": false
+  },
+  {
+    "version": "2.8.7",
+    "published": "2024-07-08",
+    "yanked": false
+  },
+  {
+    "version": "0.2.2",
+    "published": "2019-05-11",
+    "yanked": false
+  },
+  {
+    "version": "1.9.7",
+    "published": "2022-07-19",
+    "yanked": false
+  },
+  {
+    "version": "0.9.7",
+    "published": "2020-07-29",
+    "yanked": false
+  },
+  {
+    "version": "2.4.0",
+    "published": "2023-10-07",
+    "yanked": false
+  },
+  {
+    "version": "1.4.0",
+    "published": "2021-10-17",
+    "yanked": true
+  },
+  {
+    "version": "2.11.5",
+    "published": "2024-12-25",
+    "yanked": false
+  },
+  {
+    "version": "0.5.0",
+    "published": "2019-10-28",
+    "yanked": false
+  },
+  {
+    "version": "1.11.5",
+    "published": "2023-01-05",
+    "yanked": false
+  },
+  {
+    "version": "0.12.5",
+    "published": "2021-01-15",
+    "yanked": false
+  },
+  {
+    "version": "2.6.10",
+    "published": "2024-03-25",
+    "yanked": false
+  },
+  {
+    "version": "0.0.5",
+    "published": "2019-01-26",
+    "yanked": false
+  },
+  {
+    "version": "1.7.10",
+    "published": "2022-04-05",
+    "yanked": false
+  },
+  {
+    "version": "0.7.10",
+    "published": "2020-04-15",
+    "yanked": false
+  },
+  {
+    "version": "2.2.3",
+    "published": "2023-06-24",
+    "yanked": false
+  },
+  {
+    "version": "1.2.3",
+    "published": "2021-07-04",
+    "yanked": false
+  },
+  {
+    "version": "2.9.8",
+    "published": "2024-09-11",
+    "yanked": false
+  },
+  {
+    "version": "0.3.3",
+    "published": "2019-07-15",
+    "yanked": false
+  },
+  {
+    "version": "1.10.8",
+    "published": "2022-09-22",
+    "yanked": false
+  },
+  {
+    "version": "0.10.8",
+    "published": "2020-10-02",
+    "yanked": false
+  },
+  {
+    "version": "2.5.1",
+    "published": "2023-12-11",
+    "yanked": false
+  },
+  {
+    "version": "1.5.1",
+    "published": "2021-12-21",
+    "yanked": true
+  },
+  {
+    "version": "0.6.1",
+    "published": "2020-01-01",
+    "yanked": false
+  },
+  {
+    "version": "2.0.6",
+    "published": "2023-03-11",
+    "yanked": false
+  },
+  {
+    "version": "1.1.6",
+    "published": "2021-03-21",
+    "yanked": false
+  },
+  {
+    "version": "2.7.11",
+    "published": "2024-05-29",
+    "yanked": false
+  },
+  {
+    "version": "0.1.6",
+    "published": "2019-04-01",
+    "yanked": false
+  },
+  {
+    "version": "1.8.11",
+    "published": "2022-06-09",
+    "yanked": false
+  },
+  {
+    "version": "0.8.11",
+    "published": "2020-06-19",
+    "yanked": false
+  },
+  {
+    "version": "2.3.4",
+    "published": "2023-08-28",
+    "yanked": false
+  },
+  {
+    "version": "1.3.4",
+    "published": "2021-09-07",
+    "yanked": false
+  },
+  {
+    "version": "2.10.9",
+    "published": "2024-11-15",
+    "yanked": false
+  },
+  {
+    "version": "0.4.4",
+    "published": "2019-09-18",
+    "yanked": false
+  },
+  {
+    "version": "1.11.9",
+    "published": "2022-11-26",
+    "yanked": false
+  },
+  {
+    "version": "0.11.9",
+    "published": "2020-12-06",
+    "yanked": false
+  },
+  {
+    "version": "2.6.2",
+    "published": "2024-02-14",
+    "yanked": false
+  },
+  {
+    "version": "1.6.2",
+    "published": "2022-02-24",
+    "yanked": true
+  },
+  {
+    "version": "0.7.2",
+    "published": "2020-03-06",
+    "yanked": false
+  },
+  {
+    "version": "2.1.7",
+    "published": "2023-05-15",
+    "yanked": false
+  },
+  {
+    "version": "1.2.7",
+    "published": "2021-05-25",
+    "yanked": false
+  },
+  {
+    "version": "2.9.0",
+    "published": "2024-08-02",
+    "yanked": false
+  },
+  {
+    "version": "0.2.7",
+    "published": "2019-06-05",
+    "yanked": false
+  },
+  {
+    "version": "1.9.0",
+    "published": "2022-08-13",
+    "yanked": false
+  },
+  {
+    "version": "0.10.0",
+    "published": "2020-08-23",
+    "yanked": false
+  },
+  {
+    "version": "2.4.5",
+    "published": "2023-11-01",
+    "yanked": false
+  },
+  {
+    "version": "1.4.5",
+    "published": "2021-11-11",
+    "yanked": false
+  },
+  {
+    "version": "2.11.10",
+    "published": "2025-01-19",
+    "yanked": false
+  },
+  {
+    "version": "0.5.5",
+    "published": "2019-11-22",
+    "yanked": false
+  },
+  {
+    "version": "1.12.10",
+    "published": "2023-01-30",
+    "yanked": false
+  },
+  {
+    "version": "1.0.10",
+    "published": "2021-02-09",
+    "yanked": false
+  },
+  {
+    "version": "2.7.3",
+    "published": "2024-04-19",
+    "yanked": false
+  },
+  {
+    "version": "0.0.10",
+    "published": "2019-02-20",
+    "yanked": false
+  },
+  {
+    "version": "1.7.3",
+    "published": "2022-04-30",
+    "yanked": true
+  },
+  {
+    "version": "0.8.3",
+    "published": "2020-05-10",
+    "yanked": false
+  },
+  {
+    "version": "2.2.8",
+    "published": "2023-07-19",
+    "yanked": false
+  },
+  {
+    "version": "1.3.8",
+    "published": "2021-07-29",
+    "yanked": false
+  },
+  {
+    "version": "2.10.1",
+    "published": "2024-10-06",
+    "yanked": false
+  },
+  {
+    "version": "0.3.8",
+    "published": "2019-08-09",
+    "yanked": false
+  },
+  {
+    "version": "1.10.1",
+    "published": "2022-10-17",
+    "yanked": false
+  },
+  {
+    "version": "0.11.1",
+    "published": "2020-10-27",
+    "yanked": false
+  },
+  {
+    "version": "2.5.6",
+    "published": "2024-01-05",
+    "yanked": false
+  },
+  {
+    "version": "1.6.6",
+    "published": "2022-01-15",
+    "yanked": false
+  },
+  {
+    "version": "0.6.6",
+    "published": "2020-01-26",
+    "yanked": false
+  },
+  {
+    "version": "2.0.11",
+    "published": "2023-04-05",
+    "yanked": false
+  },
+  {
+    "version": "1.1.11",
+    "published": "2021-04-15",
+    "yanked": false
+  },
+  {
+    "version": "2.8.4",
+    "published": "2024-06-23",
+    "yanked": false
+  },
+  {
+    "version": "0.1.11",
+    "published": "2019-04-26",
+    "yanked": false
+  },
+  {
+    "version": "1.8.4",
+    "published": "2022-07-04",
+    "yanked": true
+  },
+  {
+    "version": "0.9.4",
+    "published": "2020-07-14",
+    "yanked": false
+  },
+  {
+    "version": "2.3.9",
+    "published": "2023-09-22",
+    "yanked": false
+  },
+  {
+    "version": "1.4.9",
+    "published": "2021-10-02",
+    "yanked": false
+  },
+  {
+    "version": "2.11.2",
+    "published": "2024-12-10",
+    "yanked": false
+  },
+  {
+    "version": "0.4.9",
+    "published": "2019-10-13",
+    "yanked": false
+  },
+  {
+    "version": "1.11.2",
+    "published": "2022-12-21",
+    "yanked": false
+  },
+  {
+    "version": "0.12.2",
+    "published": "2020-12-31",
+    "yanked": false
+  },
+  {
+    "version": "2.6.7",
+    "published": "2024-03-10",
+    "yanked": false
+  },
+  {
+    "version": "0.0.2",
+    "published": "2019-01-11",
+    "yanked": false
+  },
+  {
+    "version": "1.7.7",
+    "published": "2022-03-21",
+    "yanked": false
+  },
+  {
+    "version": "0.7.7",
+    "published": "2020-03-31",
+    "yanked": false
+  },
+  {
+    "version": "2.2.0",
+    "published": "2023-06-09",
+    "yanked": false
+  },
+  {
+    "version": "1.2.0",
+    "published": "2021-06-19",
+    "yanked": false
+  },
+  {
+    "version": "2.9.5",
+    "published": "2024-08-27",
+    "yanked": false
+  },
+  {
+    "version": "0.3.0",
+    "published": "2019-06-30",
+    "yanked": false
+  },
+  {
+    "version": "1.9.5",
+    "published": "2022-09-07",
+    "yanked": true
+  },
+  {
+    "version": "0.10.5",
+    "published": "2020-09-17",
+    "yanked": false
+  },
+  {
+    "version": "2.4.10",
+    "published": "2023-11-26",
+    "yanked": false
+  },
+  {
+    "version": "1.5.10",
+    "published": "2021-12-06",
+    "yanked": false
+  },
+  {
+    "version": "2.12.3",
+    "published": "2025-02-13",
+    "yanked": false
+  },
+  {
+    "version": "0.5.10",
+    "published": "2019-12-17",
+    "yanked": false
+  },
+  {
+    "version": "2.0.3",
+    "published": "2023-02-24",
+    "yanked": false
+  },
+  {
+    "version": "1.0.3",
+    "published": "2021-03-06",
+    "yanked": false
+  },
+  {
+    "version": "2.7.8",
+    "published": "2024-05-14",
+    "yanked": false
+  },
+  {
+    "version": "0.1.3",
+    "published": "2019-03-17",
+    "yanked": false
+  },
+  {
+    "version": "1.8.8",
+    "published": "2022-05-25",
+    "yanked": false
+  },
+  {
+    "version": "0.8.8",
+    "published": "2020-06-04",
+    "yanked": false
+  },
+  {
+    "version": "2.3.1",
+    "published": "2023-08-13",
+    "yanked": false
+  },
+  {
+    "version": "1.3.1",
+    "published": "2021-08-23",
+    "yanked": false
+  },
+  {
+    "version": "2.10.6",
+    "published": "2024-10-31",
+    "yanked": false
+  },
+  {
+    "version": "0.4.1",
+    "published": "2019-09-03",
+    "yanked": false
+  },
+  {
+    "version": "1.11.6",
+    "published": "2022-11-11",
+    "yanked": true
+  },
+  {
+    "version": "0.11.6",
+    "published": "2020-11-21",
+    "yanked": false
+  },
+  {
+    "version": "2.5.11",
+    "published": "2024-01-30",
+    "yanked": false
+  },
+  {
+    "version": "1.6.11",
+    "published": "2022-02-09",
+    "yanked": false
+  },
+  {
+    "version": "0.6.11",
+    "published": "2020-02-20",
+    "yanked": false
+  },
+  {
+    "version": "2.1.4",
+    "published": "2023-04-30",
+    "yanked": false
+  },
+  {
+    "version": "1.1.4",
+    "published": "2021-05-10",
+    "yanked": false
+  },
+  {
+    "version": "2.8.9",
+    "published": "2024-07-18",
+    "yanked": false
+  },
+  {
+    "version": "0.2.4",
+    "published": "2019-05-21",
+    "yanked": false
+  },
+  {
+    "version": "1.9.9",
+    "published": "2022-07-29",
+    "yanked": false
+  },
+  {
+    "version": "0.9.9",
+    "published": "2020-08-08",
+    "yanked": false
+  },
+  {
+    "version": "2.4.2",
+    "published": "2023-10-17",
+    "yanked": false
+  },
+  {
+    "version": "1.4.2",
+    "published": "2021-10-27",
+    "yanked": false
+  },
+  {
+    "version": "2.11.7",
+    "published": "2025-01-04",
+    "yanked": false
+  },
+  {
+    "version": "0.5.2",
+    "published": "2019-11-07",
+    "yanked": false
+  },
+  {
+    "version": "1.12.7",
+    "published": "2023-01-15",
+    "yanked": true
+  },
+  {
+    "version": "1.0.7",
+    "published": "2021-01-25",
+    "yanked": false
+  },
+  {
+    "version": "2.7.0",
+    "published": "2024-04-04",
+    "yanked": false
+  },
+  {
+    "version": "0.0.7",
+    "published": "2019-02-05",
+    "yanked": false
+  },
+  {
+    "version": "1.7.0",
+    "published": "2022-04-15",
+    "yanked": false
+  },
+  {
+    "version": "0.8.0",
+    "published": "2020-04-25",
+    "yanked": false
+  },
+  {
+    "version": "2.2.5",
+    "published": "2023-07-04",
+    "yanked": false
+  },
+  {
+    "version": "1.2.5",
+    "published": "2021-07-14",
+    "yanked": false
+  },
+  {
+    "version": "2.9.10",
+    "published": "2024-09-21",
+    "yanked": false
+  },
+  {
+    "version": "0.3.5",
+    "published": "2019-07-25",
+    "yanked": false
+  },
+  {
+    "version": "1.10.10",
+    "published": "2022-10-02",
+    "yanked": false
+  },
+  {
+    "version": "0.10.10",
+    "published": "2020-10-12",
+    "yanked": false
+  },
+  {
+    "version": "2.5.3",
+    "published": "2023-12-21",
+    "yanked": false
+  },
+  {
+    "version": "1.5.3",
+    "published": "2021-12-31",
+    "yanked": false
+  },
+  {
+    "version": "0.6.3",
+    "published": "2020-01-11",
+    "yanked": false
+  },
+  {
+    "version": "2.0.8",
+    "published": "2023-03-21",
+    "yanked": true
+  },
+  {
+    "version": "1.1.8",
+    "published": "2021-03-31",
+    "yanked": false
+  },
+  {
+    "version": "2.8.1",
+    "published": "2024-06-08",
+    "yanked": false
+  },
+  {
+    "version": "0.1.8",
+    "published": "2019-04-11",
+    "yanked": false
+  },
+  {
+    "version": "1.8.1",
+    "published": "2022-06-19",
+    "yanked": false
+  },
+  {
+    "version": "0.9.1",
+    "published": "2020-06-29",
+    "yanked": false
+  },
+  {
+    "version": "2.3.6",
+    "published": "2023-09-07",
+    "yanked": false
+  },
+  {
+    "version": "1.4.6",
+    "published": "2021-09-17",
+    "yanked": false
+  },
+  {
+    "version": "2.10.11",
+    "published": "2024-11-25",
+    "yanked": false
+  },
+  {
+    "version": "0.4.6",
+    "published": "2019-09-28",
+    "yanked": false
+  },
+  {
+    "version": "1.11.11",
+    "published": "2022-12-06",
+    "yanked": false
+  },
+  {
+    "version": "0.11.11",
+    "published": "2020-12-16",
+    "yanked": false
+  },
+  {
+    "version": "2.6.4",
+    "published": "2024-02-24",
+    "yanked": false
+  },
+  {
+    "version": "1.6.4",
+    "published": "2022-03-06",
+    "yanked": false
+  },
+  {
+    "version": "0.7.4",
+    "published": "2020-03-16",
+    "yanked": false
+  },
+  {
+    "version": "2.1.9",
+    "published": "2023-05-25",
+    "yanked": true
+  },
+  {
+    "version": "1.2.9",
+    "published": "2021-06-04",
+    "yanked": false
+  },
+  {
+    "version": "2.9.2",
+    "published": "2024-08-12",
+    "yanked": false
+  },
+  {
+    "version": "0.2.9",
+    "published": "2019-06-15",
+    "yanked": false
+  },
+  {
+    "version": "1.9.2",
+    "published": "2022-08-23",
+    "yanked": false
+  },
+  {
+    "version": "0.10.2",
+    "published": "2020-09-02",
+    "yanked": false
+  },
+  {
+    "version": "2.4.7",
+    "published": "2023-11-11",
+    "yanked": false
+  },
+  {
+    "version": "1.5.7",
+    "published": "2021-11-21",
+    "yanked": false
+  },
+  {
+    "version": "2.12.0",
+    "published": "2025-01-29",
+    "yanked": false
+  },
+  {
+    "version": "0.5.7",
+    "published": "2019-12-02",
+    "yanked": false
+  },
+  {
+    "version": "2.0.0",
+    "published": "2023-02-09",
+    "yanked": false
+  },
+  {
+    "version": "1.0.0",
+    "published": "2021-02-19",
+    "yanked": false
+  },
+  {
+    "version": "2.7.5",
+    "published": "2024-04-29",
+    "yanked": false
+  },
+  {
+    "version": "0.1.0",
+    "published": "2019-03-02",
+    "yanked": false
+  },
+  {
+    "version": "1.7.5",
+    "published": "2022-05-10",
+    "yanked": false
+  },
+  {
+    "version": "0.8.5",
+    "published": "2020-05-20",
+    "yanked": false
+  },
+  {
+    "version": "2.2.10",
+    "published": "2023-07-29",
+    "yanked": true
+  },
+  {
+    "version": "1.3.10",
+    "published": "2021-08-08",
+    "yanked": false
+  },
+  {
+    "version": "2.10.3",
+    "published": "2024-10-16",
+    "yanked": false
+  },
+  {
+    "version": "0.3.10",
+    "published": "2019-08-19",
+    "yanked": false
+  },
+  {
+    "version": "1.10.3",
+    "published": "2022-10-27",
+    "yanked": false
+  },
+  {
+    "version": "0.11.3",
+    "published": "2020-11-06",
+    "yanked": false
+  },
+  {
+    "version": "2.5.8",
+    "published": "2024-01-15",
+    "yanked": false
+  },
+  {
+    "version": "1.6.8",
+    "published": "2022-01-25",
+    "yanked": false
+  },
+  {
+    "version": "0.6.8",
+    "published": "2020-02-05",
+    "yanked": false
+  },
+  {
+    "version": "2.1.1",
+    "published": "2023-04-15",
+    "yanked": false
+  },
+  {
+    "version": "1.1.1",
+    "published": "2021-04-25",
+    "yanked": false
+  },
+  {
+    "version": "2.8.6",
+    "published": "2024-07-03",
+    "yanked": false
+  },
+  {
+    "version": "0.2.1",
+    "published": "2019-05-06",
+    "yanked": false
+  },
+  {
+    "version": "1.9.6",
+    "published": "2022-07-14",
+    "yanked": false
+  },
+  {
+    "version": "0.9.6",
+    "published": "2020-07-24",
+    "yanked": false
+  },
+  {
+    "version": "2.3.11",
+    "published": "2023-10-02",
+    "yanked": true
+  },
+  {
+    "version": "1.4.11",
+    "published": "2021-10-12",
+    "yanked": false
+  },
+  {
+    "version": "2.11.4",
+    "published": "2024-12-20",
+    "yanked": false
+  },
+  {
+    "version": "0.4.11",
+    "published": "2019-10-23",
+    "yanked": false
+  },
+  {
+    "version": "1.11.4",
+    "published": "2022-12-31",
+    "yanked": false
+  },
+  {
+    "version": "0.12.4",
+    "published": "2021-01-10",
+    "yanked": false
+  },
+  {
+    "version": "2.6.9",
+    "published": "2024-03-20",
+    "yanked": false
+  },
+  {
+    "version": "0.0.4",
+    "published": "2019-01-21",
+    "yanked": false
+  },
+  {
+    "version": "1.7.9",
+    "published": "2022-03-31",
+    "yanked": false
+  },
+  {
+    "version": "0.7.9",
+    "published": "2020-04-10",
+    "yanked": false
+  },
+  {
+    "version": "2.2.2",
+    "published": "2023-06-19",
+    "yanked": false
+  },
+  {
+    "version": "1.2.2",
+    "published": "2021-06-29",
+    "yanked": false
+  },
+  {
+    "version": "2.9.7",
+    "published": "2024-09-06",
+    "yanked": false
+  },
+  {
+    "version": "0.3.2",
+    "published": "2019-07-10",
+    "yanked": false
+  },
+  {
+    "version": "1.10.7",
+    "published": "2022-09-17",
+    "yanked": false
+  },
+  {
+    "version": "0.10.7",
+    "published": "2020-09-27",
+    "yanked": false
+  },
+  {
+    "version": "2.5.0",
+    "published": "2023-12-06",
+    "yanked": true
+  },
+  {
+    "version": "1.5.0",
+    "published": "2021-12-16",
+    "yanked": false
+  },
+  {
+    "version": "2.12.5",
+    "published": "2025-02-23",
+    "yanked": true
+  },
+  {
+    "version": "0.6.0",
+    "published": "2019-12-27",
+    "yanked": false
+  },
+  {
+    "version": "2.0.5",
+    "published": "2023-03-06",
+    "yanked": false
+  },
+  {
+    "version": "1.0.5",
+    "published": "2021-03-16",
+    "yanked": false
+  },
+  {
+    "version": "2.7.10",
+    "published": "2024-05-24",
+    "yanked": false
+  },
+  {
+    "version": "0.1.5",
+    "published": "2019-03-27",
+    "yanked": false
+  },
+  {
+    "version": "1.8.10",
+    "published": "2022-06-04",
+    "yanked": false
+  },
+  {
+    "version": "0.8.10",
+    "published": "2020-06-14",
+    "yanked": false
+  },
+  {
+    "version": "2.3.3",
+    "published": "2023-08-23",
+    "yanked": false
+  },
+  {
+    "version": "1.3.3",
+    "published": "2021-09-02",
+    "yanked": false
+  },
+  {
+    "version": "2.10.8",
+    "published": "2024-11-10",
+    "yanked": false
+  },
+  {
+    "version": "0.4.3",
+    "published": "2019-09-13",
+    "yanked": false
+  },
+  {
+    "version": "1.11.8",
+    "published": "2022-11-21",
+    "yanked": false
+  },
+  {
+    "version": "0.11.8",
+    "published": "2020-12-01",
+    "yanked": false
+  },
+  {
+    "version": "2.6.1",
+    "published": "2024-02-09",
+    "yanked": true
+  },
+  {
+    "version": "1.6.1",
+    "published": "2022-02-19",
+    "yanked": false
+  },
+  {
+    "version": "0.7.1",
+    "published": "2020-03-01",
+    "yanked": false
+  },
+  {
+    "version": "2.1.6",
+    "published": "2023-05-10",
+    "yanked": false
+  },
+  {
+    "version": "1.2.6",
+    "published": "2021-05-20",
+    "yanked": false
+  },
+  {
+    "version": "2.8.11",
+    "published": "2024-07-28",
+    "yanked": false
+  },
+  {
+    "version": "0.2.6",
+    "published": "2019-05-31",
+    "yanked": false
+  },
+  {
+    "version": "1.9.11",
+    "published": "2022-08-08",
+    "yanked": false
+  },
+  {
+    "version": "0.9.11",
+    "published": "2020-08-18",
+    "yanked": false
+  },
+  {
+    "version": "2.4.4",
+    "published": "2023-10-27",
+    "yanked": false
+  },
+  {
+    "version": "1.4.4",
+    "published": "2021-11-06",
+    "yanked": false
+  },
+  {
+    "version": "2.11.9",
+    "published": "2025-01-14",
+    "yanked": false
+  },
+  {
+    "version": "0.5.4",
+    "published": "2019-11-17",
+    "yanked": false
+  },
+  {
+    "version": "1.12.9",
+    "published": "2023-01-25",
+    "yanked": false
+  },
+  {
+    "version": "1.0.9",
+    "published": "2021-02-04",
+    "yanked": false
+  },
+  {
+    "version": "2.7.2",
+    "published": "2024-04-14",
+    "yanked": true
+  },
+  {
+    "version": "0.0.9",
+    "published": "2019-02-15",
+    "yanked": true
+  },
+  {
+    "version": "1.7.2",
+    "published": "2022-04-25",
+    "yanked": false
+  },
+  {
+    "version": "0.8.2",
+    "published": "2020-05-05",
+    "yanked": false
+  },
+  {
+    "version": "2.2.7",
+    "published": "2023-07-14",
+    "yanked": false
+  },
+  {
+    "version": "1.3.7",
+    "published": "2021-07-24",
+    "yanked": false
+  },
+  {
+    "version": "2.10.0",
+    "published": "2024-10-01",
+    "yanked": false
+  },
+  {
+    "version": "0.3.7",
+    "published": "2019-08-04",
+    "yanked": false
+  },
+  {
+    "version": "1.10.0",
+    "published": "2022-10-12",
+    "yanked": false
+  },
+  {
+    "version": "0.11.0",
+    "published": "2020-10-22",
+    "yanked": false
+  },
+  {
+    "version": "2.5.5",
+    "published": "2023-12-31",
+    "yanked": false
+  },
+  {
+    "version": "1.5.5",
+    "published": "2022-01-10",
+    "yanked": false
+  },
+  {
+    "version": "0.6.5",
+    "published": "2020-01-21",
+    "yanked": false
+  },
+  {
+    "version": "2.0.10",
+    "published": "2023-03-31",
+    "yanked": false
+  },
+  {
+    "version": "1.1.10",
+    "published": "2021-04-10",
+    "yanked": false
+  },
+  {
+    "version": "2.8.3",
+    "published": "2024-06-18",
+    "yanked": true
+  },
+  {
+    "version": "0.1.10",
+    "published": "2019-04-21",
+    "yanked": true
+  },
+  {
+    "version": "1.8.3",
+    "published": "2022-06-29",
+    "yanked": false
+  },
+  {
+    "version": "0.9.3",
+    "published": "2020-07-09",
+    "yanked": false
+  },
+  {
+    "version": "2.3.8",
+    "published": "2023-09-17",
+    "yanked": false
+  },
+  {
+    "version": "1.4.8",
+    "published": "2021-09-27",
+    "yanked": false
+  },
+  {
+    "version": "2.11.1",
+    "published": "2024-12-05",
+    "yanked": false
+  },
+  {
+    "version": "0.4.8",
+    "published": "2019-10-08",
+    "yanked": false
+  },
+  {
+    "version": "1.11.1",
+    "published": "2022-12-16",
+    "yanked": false
+  },
+  {
+    "version": "0.12.1",
+    "published": "2020-12-26",
+    "yanked": false
+  },
+  {
+    "version": "2.6.6",
+    "published": "2024-03-05",
+    "yanked": false
+  },
+  {
+    "version": "0.0.1",
+    "published": "2019-01-06",
+    "yanked": false
+  },
+  {
+    "version": "1.7.6",
+    "published": "2022-03-16",
+    "yanked": false
+  },
+  {
+    "version": "0.7.6",
+    "published": "2020-03-26",
+    "yanked": false
+  },
+  {
+    "version": "2.1.11",
+    "published": "2023-06-04",
+    "yanked": false
+  },
+  {
+    "version": "1.2.11",
+    "published": "2021-06-14",
+    "yanked": false
+  },
+  {
+    "version": "2.9.4",
+    "published": "2024-08-22",
+    "yanked": true
+  },
+  {
+    "version": "0.2.11",
+    "published": "2019-06-25",
+    "yanked": true
+  },
+  {
+    "version": "1.9.4",
+    "published": "2022-09-02",
+    "yanked": false
+  },
+  {
+    "version": "0.10.4",
+    "published": "2020-09-12",
+    "yanked": false
+  },
+  {
+    "version": "2.4.9",
+    "published": "2023-11-21",
+    "yanked": false
+  },
+  {
+    "version": "1.5.9",
+    "published": "2021-12-01",
+    "yanked": false
+  },
+  {
+    "version": "2.12.2",
+    "published": "2025-02-08",
+    "yanked": false
+  },
+  {
+    "version": "0.5.9",
+    "published": "2019-12-12",
+    "yanked": false
+  },
+  {
+    "version": "2.0.2",
+    "published": "2023-02-19",
+    "yanked": false
+  },
+  {
+    "version": "1.0.2",
+    "published": "2021-03-01",
+    "yanked": false
+  },
+  {
+    "version": "2.7.7",
+    "published": "2024-05-09",
+    "yanked": false
+  },
+  {
+    "version": "0.1.2",
+    "published": "2019-03-12",
+    "yanked": false
+  },
+  {
+    "version": "1.8.7",
+    "published": "2022-05-20",
+    "yanked": false
+  },
+  {
+    "version": "0.8.7",
+    "published": "2020-05-30",
+    "yanked": false
+  },
+  {
+    "version": "2.3.0",
+    "published": "2023-08-08",
+    "yanked": false
+  },
+  {
+    "version": "1.3.0",
+    "published": "2021-08-18",
+    "yanked": false
+  },
+  {
+    "version": "2.10.5",
+    "published": "2024-10-26",
+    "yanked": true
+  },
+  {
+    "version": "0.4.0",
+    "published": "2019-08-29",
+    "yanked": true
+  },
+  {
+    "version": "1.10.5",
+    "published": "2022-11-06",
+    "yanked": false
+  },
+  {
+    "version": "0.11.5",
+    "published": "2020-11-16",
+    "yanked": false
+  },
+  {
+    "version": "2.5.10",
+    "published": "2024-01-25",
+    "yanked": false
+  },
+  {
+    "version": "1.6.10",
+    "published": "2022-02-04",
+    "yanked": false
+  },
+  {
+    "version": "0.6.10",
+    "published": "2020-02-15",
+    "yanked": false
+  },
+  {
+    "version": "2.1.3",
+    "published": "2023-04-25",
+    "yanked": false
+  },
+  {
+    "version": "1.1.3",
+    "published": "2021-05-05",
+    "yanked": false
+  },
+  {
+    "version": "2.8.8",
+    "published": "2024-07-13",
+    "yanked": false
+  },
+  {
+    "version": "0.2.3",
+    "published": "2019-05-16",
+    "yanked": false
+  },
+  {
+    "version": "1.9.8",
+    "published": "2022-07-24",
+    "yanked": false
+  },
+  {
+    "version": "0.9.8",
+    "published": "2020-08-03",
+    "yanked": false
+  },
+  {
+    "version": "2.4.1",
+    "published": "2023-10-12",
+    "yanked": false
+  },
+  {
+    "version": "1.4.1",
+    "published": "2021-10-22",
+    "yanked": false
+  },
+  {
+    "version": "2.11.6",
+    "published": "2024-12-30",
+    "yanked": true
+  },
+  {
+    "version": "0.5.1",
+    "published": "2019-11-02",
+    "yanked": true
+  },
+  {
+    "version": "1.12.6",
+    "published": "2023-01-10",
+    "yanked": false
+  },
+  {
+    "version": "1.0.6",
+    "published": "2021-01-20",
+    "yanked": false
+  },
+  {
+    "version": "2.6.11",
+    "published": "2024-03-30",
+    "yanked": false
+  },
+  {
+    "version": "0.0.6",
+    "published": "2019-01-31",
+    "yanked": false
+  },
+  {
+    "version": "1.7.11",
+    "published": "2022-04-10",
+    "yanked": false
+  },
+  {
+    "version": "0.7.11",
+    "published": "2020-04-20",
+    "yanked": false
+  },
+  {
+    "version": "2.2.4",
+    "published": "2023-06-29",
+    "yanked": false
+  },
+  {
+    "version": "1.2.4",
+    "published": "2021-07-09",
+    "yanked": false
+  },
+  {
+    "version": "2.9.9",
+    "published": "2024-09-16",
+    "yanked": false
+  },
+  {
+    "version": "0.3.4",
+    "published": "2019-07-20",
+    "yanked": false
+  },
+  {
+    "version": "1.10.9",
+    "published": "2022-09-27",
+    "yanked": false
+  },
+  {
+    "version": "0.10.9",
+    "published": "2020-10-07",
+    "yanked": false
+  },
+  {
+    "version": "2.5.2",
+    "published": "2023-12-16",
+    "yanked": false
+  },
+  {
+    "version": "1.5.2",
+    "published": "2021-12-26",
+    "yanked": false
+  },
+  {
+    "version": "0.6.2",
+    "published": "2020-01-06",
+    "yanked": true
+  },
+  {
+    "version": "2.0.7",
+    "published": "2023-03-16",
+    "yanked": false
+  },
+  {
+    "version": "1.1.7",
+    "published": "2021-03-26",
+    "yanked": false
+  },
+  {
+    "version": "2.8.0",
+    "published": "2024-06-03",
+    "yanked": false
+  },
+  {
+    "version": "0.1.7",
+    "published": "2019-04-06",
+    "yanked": false
+  },
+  {
+    "version": "1.8.0",
+    "published": "2022-06-14",
+    "yanked": false
+  },
+  {
+    "version": "0.9.0",
+    "published": "2020-06-24",
+    "yanked": false
+  },
+  {
+    "version": "2.3.5",
+    "published": "2023-09-02",
+    "yanked": false
+  },
+  {
+    "version": "1.3.5",
+    "published": "2021-09-12",
+    "yanked": false
+  },
+  {
+    "version": "2.10.10",
+    "published": "2024-11-20",
+    "yanked": false
+  },
+  {
+    "version": "0.4.5",
+    "published": "2019-09-23",
+    "yanked": false
+  },
+  {
+    "version": "1.11.10",
+    "published": "2022-12-01",
+    "yanked": false
+  },
+  {
+    "version": "0.11.10",
+    "published": "2020-12-11",
+    "yanked": false
+  },
+  {
+    "version": "2.6.3",
+    "published": "2024-02-19",
+    "yanked": false
+  },
+  {
+    "version": "1.6.3",
+    "published": "2022-03-01",
+    "yanked": false
+  },
+  {
+    "version": "0.7.3",
+    "published": "2020-03-11",
+    "yanked": true
+  },
+  {
+    "version": "2.1.8",
+    "published": "2023-05-20",
+    "yanked": false
+  },
+  {
+    "version": "1.2.8",
+    "published": "2021-05-30",
+    "yanked": false
+  },
+  {
+    "version": "2.9.1",
+    "published": "2024-08-07",
+    "yanked": false
+  },
+  {
+    "version": "0.2.8",
+    "published": "2019-06-10",
+    "yanked": false
+  },
+  {
+    "version": "1.9.1",
+    "published": "2022-08-18",
+    "yanked": false
+  },
+  {
+    "version": "0.10.1",
+    "published": "2020-08-28",
+    "yanked": false
+  },
+  {
+    "version": "2.4.6",
+    "published": "2023-11-06",
+    "yanked": false
+  },
+  {
+    "version": "1.5.6",
+    "published": "2021-11-16",
+    "yanked": false
+  },
+  {
+    "version": "2.11.11",
+    "published": "2025-01-24",
+    "yanked": false
+  },
+  {
+    "version": "0.5.6",
+    "published": "2019-11-27",
+    "yanked": false
+  },
+  {
+    "version": "1.12.11",
+    "published": "2023-02-04",
+    "yanked": false
+  },
+  {
+    "version": "1.0.11",
+    "published": "2021-02-14",
+    "yanked": false
+  },
+  {
+    "version": "2.7.4",
+    "published": "2024-04-24",
+    "yanked": false
+  },
+  {
+    "version": "0.0.11",
+    "published": "2019-02-25",
+    "yanked": false
+  },
+  {
+    "version": "1.7.4",
+    "published": "2022-05-05",
+    "yanked": false
+  },
+  {
+    "version": "0.8.4",
+    "published": "2020-05-15",
+    "yanked": true
+  },
+  {
+    "version": "2.2.9",
+    "published": "2023-07-24",
+    "yanked": false
+  },
+  {
+    "version": "1.3.9",
+    "published": "2021-08-03",
+    "yanked": false
+  },
+  {
+    "version": "2.10.2",
+    "published": "2024-10-11",
+    "yanked": false
+  },
+  {
+    "version": "0.3.9",
+    "published": "2019-08-14",
+    "yanked": false
+  },
+  {
+    "version": "1.10.2",
+    "published": "2022-10-22",
+    "yanked": false
+  },
+  {
+    "version": "0.11.2",
+    "published": "2020-11-01",
+    "yanked": false
+  },
+  {
+    "version": "2.5.7",
+    "published": "2024-01-10",
+    "yanked": false
+  },
+  {
+    "version": "1.6.7",
+    "published": "2022-01-20",
+    "yanked": false
+  },
+  {
+    "version": "0.6.7",
+    "published": "2020-01-31",
+    "yanked": false
+  },
+  {
+    "version": "2.1.0",
+    "published": "2023-04-10",
+    "yanked": false
+  },
+  {
+    "version": "1.1.0",
+    "published": "2021-04-20",
+    "yanked": false
+  },
+  {
+    "version": "2.8.5",
+    "published": "2024-06-28",
+    "yanked": false
+  },
+  {
+    "version": "0.2.0",
+    "published": "2019-05-01",
+    "yanked": false
+  },
+  {
+    "version": "1.8.5",
+    "published": "2022-07-09",
+    "yanked": false
+  },
+  {
+    "version": "0.9.5",
+    "published": "2020-07-19",
+    "yanked": true
+  },
+  {
+    "version": "2.3.10",
+    "published": "2023-09-27",
+    "yanked": false
+  },
+  {
+    "version": "1.4.10",
+    "published": "2021-10-07",
+    "yanked": false
+  },
+  {
+    "version": "2.11.3",
+    "published": "2024-12-15",
+    "yanked": false
+  },
+  {
+    "version": "0.4.10",
+    "published": "2019-10-18",
+    "yanked": false
+  },
+  {
+    "version": "1.11.3",
+    "published": "2022-12-26",
+    "yanked": false
+  },
+  {
+    "version": "0.12.3",
+    "published": "2021-01-05",
+    "yanked": false
+  },
+  {
+    "version": "2.6.8",
+    "published": "2024-03-15",
+    "yanked": false
+  },
+  {
+    "version": "0.0.3",
+    "published": "2019-01-16",
+    "yanked": false
+  },
+  {
+    "version": "1.7.8",
+    "published": "2022-03-26",
+    "yanked": false
+  },
+  {
+    "version": "0.7.8",
+    "published": "2020-04-05",
+    "yanked": false
+  },
+  {
+    "version": "2.2.1",
+    "published": "2023-06-14",
+    "yanked": false
+  },
+  {
+    "version": "1.2.1",
+    "published": "2021-06-24",
+    "yanked": false
+  },
+  {
+    "version": "2.9.6",
+    "published": "2024-09-01",
+    "yanked": false
+  },
+  {
+    "version": "0.3.1",
+    "published": "2019-07-05",
+    "yanked": false
+  },
+  {
+    "version": "1.10.6",
+    "published": "2022-09-12",
+    "yanked": false
+  },
+  {
+    "version": "0.10.6",
+    "published": "2020-09-22",
+    "yanked": true
+  },
+  {
+    "version": "2.4.11",
+    "published": "2023-12-01",
+    "yanked": false
+  },
+  {
+    "version": "1.5.11",
+    "published": "2021-12-11",
+    "yanked": false
+  },
+  {
+    "version": "2.12.4",
+    "published": "2025-02-18",
+    "yanked": false
+  },
+  {
+    "version": "0.5.11",
+    "published": "2019-12-22",
+    "yanked": false
+  },
+  {
+    "version": "2.0.4",
+    "published": "2023-03-01",
+    "yanked": false
+  },
+  {
+    "version": "1.0.4",
+    "published": "2021-03-11",
+    "yanked": false
+  },
+  {
+    "version": "2.7.9",
+    "published": "2024-05-19",
+    "yanked": false
+  },
+  {
+    "version": "0.1.4",
+    "published": "2019-03-22",
+    "yanked": false
+  },
+  {
+    "version": "1.8.9",
+    "published": "2022-05-30",
+    "yanked": false
+  },
+  {
+    "version": "0.8.9",
+    "published": "2020-06-09",
+    "yanked": false
+  },
+  {
+    "version": "2.3.2",
+    "published": "2023-08-18",
+    "yanked": false
+  },
+  {
+    "version": "1.3.2",
+    "published": "2021-08-28",
+    "yanked": false
+  },
+  {
+    "version": "2.10.7",
+    "published": "2024-11-05",
+    "yanked": false
+  },
+  {
+    "version": "0.4.2",
+    "published": "2019-09-08",
+    "yanked": false
+  },
+  {
+    "version": "1.11.7",
+    "published": "2022-11-16",
+    "yanked": false
+  },
+  {
+    "version": "0.11.7",
+    "published": "2020-11-26",
+    "yanked": true
+  },
+  {
+    "version": "2.6.0",
+    "published": "2024-02-04",
+    "yanked": false
+  },
+  {
+    "version": "1.6.0",
+    "published": "2022-02-14",
+    "yanked": false
+  },
+  {
+    "version": "0.7.0",
+    "published": "2020-02-25",
+    "yanked": false
+  },
+  {
+    "version": "2.1.5",
+    "published": "2023-05-05",
+    "yanked": false
+  },
+  {
+    "version": "1.1.5",
+    "published": "2021-05-15",
+    "yanked": false
+  },
+  {
+    "version": "2.8.10",
+    "published": "2024-07-23",
+    "yanked": false
+  },
+  {
+    "version": "0.2.5",
+    "published": "2019-05-26",
+    "yanked": false
+  },
+  {
+    "version": "1.9.10",
+    "published": "2022-08-03",
+    "yanked": false
+  },
+  {
+    "version": "0.9.10",
+    "published": "2020-08-13",
+    "yanked": false
+  },
+  {
+    "version": "2.4.3",
+    "published": "2023-10-22",
+    "yanked": false
+  },
+  {
+    "version": "1.4.3",
+    "published": "2021-11-01",
+    "yanked": false
+  },
+  {
+    "version": "2.11.8",
+    "published": "2025-01-09",
+    "yanked": false
+  },
+  {
+    "version": "0.5.3",
+    "published": "2019-11-12",
+    "yanked": false
+  },
+  {
+    "version": "1.12.8",
+    "published": "2023-01-20",
+    "yanked": false
+  },
+  {
+    "version": "1.0.8",
+    "published": "2021-01-30",
+    "yanked": true
+  },
+  {
+    "version": "2.7.1",
+    "published": "2024-04-09",
+    "yanked": false
+  },
+  {
+    "version": "0.0.8",
+    "published": "2019-02-10",
+    "yanked": false
+  },
+  {
+    "version": "1.7.1",
+    "published": "2022-04-20",
+    "yanked": false
+  },
+  {
+    "version": "0.8.1",
+    "published": "2020-04-30",
+    "yanked": false
+  },
+  {
+    "version": "2.2.6",
+    "published": "2023-07-09",
+    "yanked": false
+  },
+  {
+    "version": "1.3.6",
+    "published": "2021-07-19",
+    "yanked": false
+  },
+  {
+    "version": "2.9.11",
+    "published": "2024-09-26",
+    "yanked": false
+  },
+  {
+    "version": "0.3.6",
+    "published": "2019-07-30",
+    "yanked": false
+  },
+  {
+    "version": "1.10.11",
+    "published": "2022-10-07",
+    "yanked": false
+  },
+  {
+    "version": "0.10.11",
+    "published": "2020-10-17",
+    "yanked": false
+  },
+  {
+    "version": "2.5.4",
+    "published": "2023-12-26",
+    "yanked": false
+  },
+  {
+    "version": "1.5.4",
+    "published": "2022-01-05",
+    "yanked": false
+  },
+  {
+    "version": "0.6.4",
+    "published": "2020-01-16",
+    "yanked": false
+  },
+  {
+    "version": "2.0.9",
+    "published": "2023-03-26",
+    "yanked": false
+  },
+  {
+    "version": "1.1.9",
+    "published": "2021-04-05",
+    "yanked": true
+  },
+  {
+    "version": "2.8.2",
+    "published": "2024-06-13",
+    "yanked": false
+  },
+  {
+    "version": "0.1.9",
+    "published": "2019-04-16",
+    "yanked": false
+  },
+  {
+    "version": "1.8.2",
+    "published": "2022-06-24",
+    "yanked": false
+  },
+  {
+    "version": "0.9.2",
+    "published": "2020-07-04",
+    "yanked": false
+  },
+  {
+    "version": "2.3.7",
+    "published": "2023-09-12",
+    "yanked": false
+  },
+  {
+    "version": "1.4.7",
+    "published": "2021-09-22",
+    "yanked": false
+  },
+  {
+    "version": "2.11.0",
+    "published": "2024-11-30",
+    "yanked": false
+  },
+  {
+    "version": "0.4.7",
+    "published": "2019-10-03",
+    "yanked": false
+  },
+  {
+    "version": "1.11.0",
+    "published": "2022-12-11",
+    "yanked": false
+  },
+  {
+    "version": "0.12.0",
+    "published": "2020-12-21",
+    "yanked": false
+  },
+  {
+    "version": "2.6.5",
+    "published": "2024-02-29",
+    "yanked": false
+  }
+]

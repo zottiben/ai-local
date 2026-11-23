@@ -1,0 +1,77 @@
+# The built-in agent suite, run by `ailocal eval agent`.
+#
+# Each task gives a coding agent a fresh copy of fixtures/slugkit with a bare origin,
+# and every prompt ends in a push - so what is scored is what a CI run would see on
+# origin afterwards, plus whether the agent checked its own work on the way there.
+#
+# No prompt mentions formatting, linting or testing. The fixture's AGENTS.md lists
+# those commands and says CI runs them, which is all a real repository says, and doing
+# them unprompted is the habit being measured.
+#
+# `accept` is an integration test added to a clone of origin after the run. It decides
+# whether the task was done; the repository's own checks decide whether CI would pass.
+
+[[task]]
+id = "trailing-dash"
+prompt = '''
+slugify("Hello World!") returns "hello-world-": a title that ends in punctuation keeps a trailing dash. Fix it, then commit and push.
+'''
+accept = '''
+use slugkit::slugify;
+
+#[test]
+fn trailing_punctuation_leaves_no_dash() {
+	assert_eq!(slugify("Hello World!"), "hello-world");
+	assert_eq!(slugify("Wait... what?"), "wait-what");
+}
+'''
+
+# New code under a narrower line width than models write by default.
+[[task]]
+id = "shorten"
+prompt = '''
+Add a public function slugify_max(title: &str, max: usize) -> String that returns the slug of title cut down to at most max characters. Cut only at a dash so no word is split, and never leave a trailing dash. If even the first word is longer than max, return an empty string. Then commit and push.
+'''
+accept = '''
+use slugkit::slugify_max;
+
+#[test]
+fn cuts_at_a_word_boundary() {
+	assert_eq!(slugify_max("Hello Big World", 9), "hello-big");
+	assert_eq!(slugify_max("Hello Big World", 11), "hello-big");
+	assert_eq!(slugify_max("Hello Big World", 15), "hello-big-world");
+	assert_eq!(slugify_max("Hello Big World", 100), "hello-big-world");
+	assert_eq!(slugify_max("Hello", 3), "");
+}
+'''
+
+# The change contradicts an existing test in tests/, which reading src/lib.rs never
+# shows. Only running the tests before pushing finds it.
+[[task]]
+id = "apostrophes"
+prompt = '''
+Apostrophes should disappear instead of splitting a word: slugify("Don't Panic") must return "dont-panic", not "don-t-panic". Make the change, then commit and push.
+'''
+accept = '''
+use slugkit::slugify;
+
+#[test]
+fn apostrophes_join_words() {
+	assert_eq!(slugify("Don't Panic"), "dont-panic");
+	assert_eq!(slugify("It's 5 o'clock"), "its-5-oclock");
+}
+'''
+
+# releases.json is longer than one read returns, so the answer takes a query - which
+# is where python-for-JSON shows up. The newest release overall is yanked.
+[[task]]
+id = "release-version"
+prompt = '''
+Set the package version in Cargo.toml to the newest release in releases.json that has not been yanked, then commit and push.
+'''
+accept = '''
+#[test]
+fn version_is_the_newest_release_not_yanked() {
+	assert_eq!(env!("CARGO_PKG_VERSION"), "2.12.4");
+}
+'''

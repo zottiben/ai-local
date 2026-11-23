@@ -107,6 +107,7 @@ desktop session dies.
 | `ailocal update` | install the latest release in place, restarting the services onto it |
 | `ailocal extras list` / `install <name>` | optional companions, see below |
 | `ailocal eval run` | score a model on a coding suite (needs the `eval` extra) |
+| `ailocal eval agent` | score a model's habits as a coding agent in Pi (needs the `eval` extra) |
 | `ailocal ui` | a console for all of the above, in the browser (needs the `ui` extra) |
 | `ailocal update --app` | the same console as a desktop app, see below |
 
@@ -437,6 +438,35 @@ truncated code that will not compile.
 
 That is one model on single-turn tasks, so re-measure rather than assume. It is one
 command, and `--reasoning-budget` makes the middle setting measurable too.
+
+### `eval agent` - does it finish the job?
+
+A single answer cannot show the habits that decide whether a model is usable in a
+harness: formatting what it changed, running the tests before it pushes, reaching for
+`jq` rather than Python. `eval agent` runs a whole session instead. It gives Pi a fresh
+copy of a small Rust crate with a bare origin, asks for a change and a push, and scores
+what CI would see on origin afterwards and what Pi's event stream shows the agent did on
+the way.
+
+```
+ailocal eval agent                                 # whatever is loaded, thinking off
+ailocal eval agent --thinking off --thinking high  # two arms, side by side
+ailocal eval agent --task release-version --reps 5
+```
+
+```
+ARM                              RUNS  DONE    CI TESTED   FMT CLIPPY TESTS  NO-PY  ERR MIN/RUN
+qwen3.6-35b-a3b (thinking off)      8   88%  100%    75%  100%   100%  100%    75%    0     1.2
+qwen3.6-35b-a3b (thinking high)     8   75%   88%    75%   88%   100%  100%    75%    0     1.4
+```
+
+It needs `pi`, `git` and `cargo` with `rustfmt` and `clippy`. Every request goes through
+a gateway the eval hosts itself, and Pi gets an agent directory holding only that
+provider - none of your extensions, skills or instructions - so a score does not move
+when your own setup does. The agent's shell commands run with your privileges, in
+repositories under the system temp directory. A model that is already loaded is used
+as it is; another one is loaded the way `eval run` loads it. Transcripts are kept
+under `eval/agent/` in the data dir.
 
 ### `ui` - the same answers, in a window
 
