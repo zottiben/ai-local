@@ -125,14 +125,14 @@ pub fn parse(events: &str) -> Transcript {
                 if !text.trim().is_empty() {
                     t.answer = text;
                 }
-                if message["stopReason"] == "error" {
-                    t.error = Some(
-                        message["errorMessage"]
-                            .as_str()
-                            .unwrap_or("the provider returned an error")
-                            .to_owned(),
-                    );
-                }
+                // The last message decides: Pi retries a provider error itself, and a
+                // run it recovered did not stop on it.
+                t.error = (message["stopReason"] == "error").then(|| {
+                    message["errorMessage"]
+                        .as_str()
+                        .unwrap_or("the provider returned an error")
+                        .to_owned()
+                });
             }
             _ => {}
         }
@@ -467,6 +467,23 @@ mod tests {
             "a message with no text must not erase it"
         );
         assert_eq!(t.error.as_deref(), Some("Context size has been exceeded."));
+    }
+
+    /// Pi retries a provider error on its own. A run it recovered finished, and must
+    /// not be scored as one that stopped on the error - measured: one 502 in a run
+    /// that then pushed and passed every check was reported as the run's failure.
+    #[test]
+    fn an_error_pi_recovered_from_is_not_the_run_s() {
+        let error = r#"{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"502: upstream"}}"#;
+        let answer = r#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Pushed."}],"stopReason":"stop"}}"#;
+        let retry = r#"{"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":2000}"#;
+
+        let recovered = parse(&[error, retry, answer].join("\n"));
+        assert_eq!(recovered.error, None);
+        assert_eq!(recovered.answer, "Pushed.");
+
+        let gave_up = parse(&[answer, error, retry, error].join("\n"));
+        assert_eq!(gave_up.error.as_deref(), Some("502: upstream"));
     }
 
     /// A held call never ran, so it must not count as Python on JSON that did - while a
