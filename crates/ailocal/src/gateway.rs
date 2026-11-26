@@ -34,6 +34,30 @@ pub struct AppState {
     pub request_log: Option<std::path::PathBuf>,
 }
 
+/// The client the gateway reaches llama-server with.
+///
+/// It keeps no connection between requests. llama-server closes one about five
+/// seconds after its last request, which is how long a tool call often takes, and a
+/// request sent down a connection as it closes fails: Pi got a 502 for it in the
+/// middle of a session. A new connection to a local process costs nothing worth
+/// that.
+///
+/// No timeout: a cold model load can take tens of seconds and a streamed completion
+/// runs for minutes. The upstream is a local process, so a hung request is a bug to
+/// see rather than something to paper over with a deadline.
+///
+/// # Errors
+/// If the TLS backend cannot be initialised.
+pub fn upstream_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder().pool_max_idle_per_host(0).build()
+}
+
+/// A request error with what caused it. reqwest's own message names only the URL; the
+/// reason, such as a refused or a closed connection, is in its sources.
+fn cause(e: reqwest::Error) -> String {
+    format!("{:#}", anyhow::Error::new(e))
+}
+
 /// Append a conversation to the request log, exactly as the harness sent it.
 ///
 /// Recorded *before* this gateway changes anything, so the log answers "what is my
@@ -591,13 +615,16 @@ async fn messages(
         .map_err(|e| {
             ApiError::new(
                 StatusCode::BAD_GATEWAY,
-                format!("upstream llama-server did not answer: {e}"),
+                format!("upstream llama-server did not answer: {}", cause(e)),
             )
         })?;
 
     if !wants_stream {
         let openai: serde_json::Value = upstream.json().await.map_err(|e| {
-            ApiError::new(StatusCode::BAD_GATEWAY, format!("upstream returned: {e}"))
+            ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                format!("upstream returned: {}", cause(e)),
+            )
         })?;
         return Ok(Json(anthropic::response_to_anthropic(&openai, &model)).into_response());
     }
@@ -805,7 +832,7 @@ async fn proxy(State(state): State<Arc<AppState>>, request: Request) -> ApiResul
         .map_err(|e| {
             ApiError::new(
                 StatusCode::BAD_GATEWAY,
-                format!("upstream llama-server did not answer: {e}"),
+                format!("upstream llama-server did not answer: {}", cause(e)),
             )
         })?;
 
@@ -834,6 +861,45 @@ async fn proxy(State(state): State<Arc<AppState>>, request: Request) -> ApiResul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// llama-server closes a connection a few seconds after its last request, and a
+    /// client that keeps connections can send its next request down one just as it
+    /// closes. Pi gets a 502 for that and retries, so all anyone sees is a stall. This
+    /// upstream answers once per connection and closes it when the next request
+    /// arrives, which is that race every time.
+    #[test]
+    fn a_connection_the_upstream_closes_is_never_sent_another_request() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                std::thread::spawn(move || {
+                    let mut request = [0; 4096];
+                    if stream.read(&mut request).unwrap_or(0) > 0 {
+                        stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                            .unwrap();
+                        let _ = stream.read(&mut request);
+                    }
+                });
+            }
+        });
+
+        let client = upstream_client().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for _ in 0..3 {
+                let sent = client.get(format!("http://{address}/health")).send().await;
+                assert!(sent.is_ok(), "{}", cause(sent.unwrap_err()));
+            }
+        });
+    }
 
     fn chat(extra: serde_json::Value) -> serde_json::Value {
         let mut body = serde_json::json!({

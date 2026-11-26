@@ -698,7 +698,7 @@ impl Gateway {
         let state = Arc::new(gateway::AppState {
             key: key.clone(),
             config: ailocal::config::Live::fixed(config),
-            client: reqwest::Client::builder().build()?,
+            client: gateway::upstream_client()?,
             request_log: None,
         });
         runtime.spawn(async move { axum::serve(listener, gateway::router(state)).await });

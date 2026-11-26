@@ -1994,10 +1994,7 @@ fn gateway_run(host: &str, port: u16, log_requests: bool) -> anyhow::Result<()> 
         key: auth::load_or_create()?,
         request_log,
         config,
-        // No timeout: a cold model load can take tens of seconds and a streamed
-        // completion runs for minutes. The upstream is a local process, so a hung
-        // request is a bug to see rather than something to paper over with a deadline.
-        client: reqwest::Client::builder().build()?,
+        client: gateway::upstream_client()?,
     });
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
