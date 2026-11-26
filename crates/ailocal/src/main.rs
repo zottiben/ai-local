@@ -512,7 +512,8 @@ fn config_agent_rules(state: Option<&str>) -> anyhow::Result<()> {
         println!(
             "\nIn Pi they come with an extension that holds a local model's push once when\n\
              no test has passed since its last edit, holds Python over JSON once when jq is\n\
-             installed, and asks for the checks once before the model stops:\n\n  {}",
+             installed, asks for the checks once before the model stops, and sets git's\n\
+             editors so that a rebase or a commit never waits on one:\n\n  {}",
             harness::pi_extension_path()?.display()
         );
         return Ok(());
