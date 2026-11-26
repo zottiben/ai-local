@@ -1,0 +1,14 @@
+[
+  ["git@github.com:positivegroup/nodifi-data.git", "github.com/positivegroup/nodifi-data"],
+  ["https://github.com/positivegroup/nodifi-data.git", "github.com/positivegroup/nodifi-data"],
+  ["https://github.com/positivegroup/nodifi-data", "github.com/positivegroup/nodifi-data"],
+  ["https://user:token@GitHub.com/positivegroup/nodifi-data/", "github.com/positivegroup/nodifi-data"],
+  ["ssh://git@github.com:22/positivegroup/nodifi-data.git", "github.com/positivegroup/nodifi-data"],
+  ["git+ssh://git@github.com/positivegroup/nodifi-data", "github.com/positivegroup/nodifi-data"],
+  ["  git@gitlab.example.com:group/sub/project.git\n", "gitlab.example.com/group/sub/project"],
+  ["https://github.com/owner/repo@v2", "github.com/owner/repo@v2"],
+  ["/tmp/eval/origin.git", null],
+  ["file:///tmp/eval/origin.git", null],
+  ["github.com", null],
+  ["", null]
+]

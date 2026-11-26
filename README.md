@@ -233,6 +233,36 @@ the provider first and does nothing in a Claude or GPT session. It is on and off
 the rules, and the gateway brings it up to date when it starts, so `ailocal update`
 carries a new version to Pi with no step of your own.
 
+### Lessons from your corrections
+
+A local model makes the same mistake twice where a frontier model does not: it
+ignores the pull request template it was told about yesterday, or silences the same
+lint rule forty times in one session. A lesson is one short rule that the extension
+gives a local model at the moment it applies, rather than once at the top of a long
+context:
+
+```sh
+ailocal lessons add "Before writing a PR body, read the template in .github/ and use its headings" \
+  --command "gh pr create" --command "gh pr edit"
+ailocal lessons add --here --adds eslint-disable \
+  "Fix a lint error at its cause. Never add eslint-disable; if the rule looks wrong, stop and ask."
+ailocal lessons ls
+ailocal lessons rm <id>
+```
+
+- With each prompt, the extension adds the three lessons that share the most words with
+  it, and none when nothing does - "hello?" gets no lessons.
+- A trigger holds the first matching call of each prompt and shows the lesson:
+  `--command` for a command, as its first words; `--adds` for text an edit or a write
+  adds; `--file` for a file, directory or extension it changes. Sent again, the call
+  goes through.
+- `--here` (or `--repo`) keeps a lesson to one repository, named by its origin, so
+  every clone and worktree of it shares the lesson.
+
+Lessons are kept beside the config in `lessons.json`, and the extension reads them on
+every prompt, so a new one applies from the next. Like everything else in the
+extension, they reach local models only.
+
 ### A house rule for every harness
 
 Harnesses build their own system prompt and have no notion of a per-machine one, so the

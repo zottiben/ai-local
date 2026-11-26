@@ -14,6 +14,7 @@ pub mod gateway;
 pub mod gguf;
 pub mod harness;
 pub mod install;
+pub mod lessons;
 pub mod models;
 pub mod prompt;
 pub mod registry;

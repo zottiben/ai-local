@@ -13,6 +13,14 @@
 //
 // Its commands also run with git's editors set, so git never waits for a person to
 // type into one.
+//
+// It also gives the model the lessons in `ailocal lessons`, learned from the user's
+// corrections: the few most like each prompt go along with it, and a lesson's trigger
+// holds the first matching call of each prompt with the lesson's text.
+
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, relative, resolve } from "node:path";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -74,6 +82,32 @@ export const GIT_ENV =
   `export GIT_EDITOR=true AILOCAL_TODO=${shellQuote(REBASE_TODO_MESSAGE)} ` +
   `GIT_SEQUENCE_EDITOR='printf "%s\\n" "$AILOCAL_TODO" >&2; false'\n`;
 
+/** A lesson as `ailocal lessons` keeps it. */
+export interface Lesson {
+  id: string;
+  text: string;
+  /** Only in this repository, as {@link repoId} names it. */
+  repo?: string;
+  /** Commands, as their first words, that it holds. */
+  commands?: string[];
+  /** Text that it holds an edit or a write for adding. */
+  adds?: string[];
+  /** Files, directories or extensions that it holds an edit or a write to. */
+  files?: string[];
+}
+
+/** The newest store this reads, as `lessons::VERSION`. */
+export const LESSONS_VERSION = 1;
+
+/** How many lessons go along with a prompt at most. */
+export const PROMPT_LESSONS = 3;
+
+/**
+ * How many telling words a lesson must share with a prompt to go along with it. One is
+ * chance: "says whether" brought in a lesson that ends "say why".
+ */
+export const SHARED_WORDS = 2;
+
 export default function ailocal(pi: ExtensionAPI): void {
   const session = new Session();
   let jq: Promise<boolean> | undefined;
@@ -83,9 +117,57 @@ export default function ailocal(pi: ExtensionAPI): void {
       () => false,
     ));
 
+  // A directory outside any repository, or one with no origin, has no repository
+  // lessons. That is an answer, not a failure.
+  const repos = new Map<string, Promise<string | undefined>>();
+  const repoOf = (cwd: string) => {
+    let repo = repos.get(cwd);
+    if (repo === undefined) {
+      repo = pi.exec("git", ["config", "--get", "remote.origin.url"], { cwd, timeout: 5000 }).then(
+        (result) => (result.code === 0 ? repoId(result.stdout) : undefined),
+        () => undefined,
+      );
+      repos.set(cwd, repo);
+    }
+    return repo;
+  };
+
+  let lessons: Lesson[] = [];
+  let unreadable: string | undefined;
+  const record = (given: Lesson[], how: "prompt" | "held") => {
+    for (const lesson of given) pi.appendEntry("ailocal-lesson", { id: lesson.id, how });
+  };
+
   pi.on("session_start", () => session.reset());
-  pi.on("before_agent_start", (event) => {
-    if (event.messageType === "user") session.newPrompt();
+  pi.on("before_agent_start", async (event, ctx) => {
+    if (event.messageType !== "user") return;
+    session.newPrompt();
+    if (!isLocal(ctx)) return;
+
+    // Read on every prompt, so a lesson added mid-session applies from the next one.
+    const path = lessonsPath();
+    try {
+      const repo = await repoOf(ctx.cwd);
+      lessons = readLessons(path).filter((lesson) => lesson.repo === undefined || lesson.repo === repo);
+      unreadable = undefined;
+    } catch (error) {
+      lessons = [];
+      const why = `ailocal: no lessons until ${path} can be read: ${(error as Error).message}`;
+      if (why !== unreadable) ctx.ui.notify(why, "warning");
+      unreadable = why;
+    }
+
+    const relevant = relevantLessons(lessons, event.prompt);
+    if (relevant.length === 0) return;
+    record(relevant, "prompt");
+    return {
+      message: {
+        customType: "ailocal-lessons",
+        content: lessonsMessage(relevant),
+        display: true,
+        details: { lessons: relevant.map((lesson) => lesson.id) },
+      },
+    };
   });
 
   // Tracked whatever the model, so switching to a local one mid-session starts from
@@ -98,7 +180,24 @@ export default function ailocal(pi: ExtensionAPI): void {
   });
 
   pi.on("tool_call", async (event, ctx) => {
-    if (!isLocal(ctx) || event.toolName !== "bash") return;
+    if (!isLocal(ctx)) return;
+    // A file that is not there yet has nothing in it. One that cannot be read throws,
+    // and Pi then refuses the call with the reason, as the tool would have.
+    const read = (path: string) => {
+      const file = resolve(ctx.cwd, path);
+      return existsSync(file) ? readFileSync(file, "utf8") : "";
+    };
+    const lessonsHeld = () => {
+      const held = session.holdLessons(tripped(lessons, event.toolName, event.input, ctx.cwd, read));
+      if (held.length === 0) return undefined;
+      record(held, "held");
+      return lessonReason(held);
+    };
+
+    if (event.toolName !== "bash") {
+      const reason = lessonsHeld();
+      return reason === undefined ? undefined : { block: true, reason };
+    }
     const input = event.input as { command?: unknown };
     const command = String(input.command ?? "");
 
@@ -106,6 +205,7 @@ export default function ailocal(pi: ExtensionAPI): void {
     if (reason === undefined && pythonOnJson(command) && (await hasJq())) {
       reason = session.holdJson(command);
     }
+    reason ??= lessonsHeld();
     if (reason !== undefined) return { block: true, reason };
     input.command = GIT_ENV + command;
   });
@@ -140,6 +240,8 @@ export class Session {
   /** Whether this prompt has had its nudge, so a model that only edits cannot loop. */
   private nudged = false;
   private heldJson = new Set<string>();
+  /** The lessons that have held a call during this prompt. */
+  private heldLessons = new Set<string>();
   private running = new Map<string, { tool: string; command: string }>();
 
   reset(): void {
@@ -149,12 +251,14 @@ export class Session {
     this.nudgedAt = -1;
     this.nudged = false;
     this.heldJson.clear();
+    this.heldLessons.clear();
     this.running.clear();
   }
 
   /** A new prompt from the person, which may earn one more settle nudge. */
   newPrompt(): void {
     this.nudged = false;
+    this.heldLessons.clear();
   }
 
   started(id: string, tool: string, args: unknown): void {
@@ -190,6 +294,18 @@ export class Session {
     if (this.heldJson.has(command)) return undefined;
     this.heldJson.add(command);
     return JSON_REASON;
+  }
+
+  /**
+   * Which of the lessons a call trips should hold it: each one the first time this
+   * prompt. Once per exact call would hold a corrected PR body again, since it still
+   * runs `gh pr create`; once per session would let the next forty `eslint-disable`s
+   * through with the lesson far back in the context.
+   */
+  holdLessons(tripped: Lesson[]): Lesson[] {
+    const fresh = tripped.filter((lesson) => !this.heldLessons.has(lesson.id));
+    for (const lesson of fresh) this.heldLessons.add(lesson.id);
+    return fresh;
   }
 
   /**
@@ -269,15 +385,20 @@ const WRAPPER_PAIRS = new Set([
 /** Options that take a value before a runner's subcommand: `npm --prefix ui test`. */
 const TAKES_VALUE = ["-C", "--cwd", "--prefix", "--filter", "--dir", "--manifest-path"];
 
-/** Whether one simple command runs the tests. */
-export function isTest(words: string[]): boolean {
+/** A simple command without the variables and wrappers in front of what it runs. */
+function unwrap(words: string[]): string[] {
   let rest = words.filter((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
   for (;;) {
     const skip = WRAPPER_PAIRS.has(rest.slice(0, 2).join(" ")) ? 2 : WRAPPERS.has(rest[0] ?? "") ? 1 : 0;
-    if (skip === 0) break;
+    if (skip === 0) return rest;
     rest = rest.slice(skip);
     while (rest[0]?.startsWith("-")) rest = rest.slice(1);
   }
+}
+
+/** Whether one simple command runs the tests. */
+export function isTest(words: string[]): boolean {
+  let rest = unwrap(words);
   if (isPython(rest[0] ?? "") && rest[1] === "-m") rest = rest.slice(2);
 
   // A bare `test` is the shell's own builtin, so a script counts as a path or when a
@@ -335,6 +456,190 @@ function subcommand(words: string[], program: string, takesValue: string[]): str
 /** `word` as one shell word, whatever it holds. */
 function shellQuote(word: string): string {
   return `'${word.replaceAll("'", "'\\''")}'`;
+}
+
+// --- lessons ------------------------------------------------------------------------
+
+/** Where `ailocal lessons` keeps them: beside its config, as `lessons::path` says. */
+export function lessonsPath(env: NodeJS.ProcessEnv = process.env): string {
+  if (env.AILOCAL_LESSONS) return env.AILOCAL_LESSONS;
+  const config = env.XDG_CONFIG_HOME ?? join(env.HOME ?? homedir(), ".config");
+  return join(config, "ailocal", "lessons.json");
+}
+
+/** The active lessons in the store at `path`, and none when there is no store yet. */
+export function readLessons(path: string): Lesson[] {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const store = JSON.parse(text) as { version?: number; lessons?: (Lesson & { state?: string })[] };
+  if ((store.version ?? 0) > LESSONS_VERSION) {
+    throw new Error(`a newer ailocal wrote it (version ${store.version}); update this one`);
+  }
+  return (store.lessons ?? []).filter((lesson) => lesson.state === "active" && typeof lesson.text === "string");
+}
+
+/**
+ * A repository as lessons name it, `host/owner/repo`, from any form of its remote URL.
+ * The same as `lessons::repo_id`; both are tested against `remotes.json`.
+ */
+export function repoId(remote: string): string | undefined {
+  const url = remote.trim();
+  const scheme = url.indexOf("://");
+  const rest = scheme < 0 ? url : url.slice(scheme + 3);
+  // scp-like: `git@github.com:owner/repo.git`. A local path has no colon.
+  const cut = rest.indexOf(scheme < 0 ? ":" : "/");
+  if (cut < 0) return undefined;
+  const authority = rest.slice(0, cut);
+  const host = authority.slice(authority.lastIndexOf("@") + 1).split(":")[0].toLowerCase();
+  let path = rest.slice(cut + 1).replace(/^\/+|\/+$/g, "");
+  if (path.endsWith(".git")) path = path.slice(0, -".git".length);
+  return host === "" || path === "" ? undefined : `${host}/${path}`;
+}
+
+/**
+ * Words that say nothing about what a prompt or a lesson is about, including the verbs
+ * of nearly every request: "fix it" is no reason to recall a lesson about lint.
+ */
+const COMMON = new Set([
+  "a", "about", "add", "after", "again", "all", "also", "am", "an", "and", "any", "are",
+  "as", "at", "be", "because", "been", "before", "but", "by", "can", "change", "could",
+  "did", "do", "does", "done", "each", "every", "fix", "for", "from", "get", "go", "had",
+  "has", "have", "how", "if", "in", "instead", "into", "is", "it", "its", "just", "let",
+  "like", "make", "me", "more", "must", "my", "need", "never", "new", "no", "not", "now",
+  "of", "on", "one", "only", "or", "other", "our", "out", "over", "please", "run", "same",
+  "should", "so", "some", "than", "that", "the", "their", "them", "then", "there",
+  "these", "they", "this", "those", "to", "too", "try", "up", "us", "use", "very", "want",
+  "was", "we", "were", "what", "when", "where", "which", "while", "who", "why", "will",
+  "with", "work", "would", "you", "your",
+]);
+
+/** The telling words of `text`, lowercased, with a plural `s` dropped. */
+export function terms(text: string): Set<string> {
+  const found = new Set<string>();
+  for (const word of text.toLowerCase().split(/[^a-z0-9]+/)) {
+    if (word.length < 2 || COMMON.has(word)) continue;
+    found.add(word.length > 3 && word.endsWith("s") && !word.endsWith("ss") ? word.slice(0, -1) : word);
+  }
+  return found;
+}
+
+/**
+ * The lessons that share the most telling words with a prompt, at most `limit`, and
+ * the newest first among equals. One that shares too few stays out, so a prompt such
+ * as "hello?" gets nothing.
+ *
+ * Only a lesson's text counts. Its triggers act at the moment they name, which is
+ * where a lesson about `gh pr create` belongs anyway.
+ */
+export function relevantLessons(lessons: Lesson[], prompt: string, limit = PROMPT_LESSONS): Lesson[] {
+  const asked = terms(prompt);
+  return lessons
+    .map((lesson, index) => {
+      const shared = [...terms(lesson.text)].filter((t) => asked.has(t)).length;
+      return { lesson, index, shared };
+    })
+    .filter((scored) => scored.shared >= SHARED_WORDS)
+    .sort((a, b) => b.shared - a.shared || b.index - a.index)
+    .slice(0, limit)
+    .map((scored) => scored.lesson);
+}
+
+export function lessonsMessage(lessons: Lesson[]): string {
+  return (
+    "ailocal: lessons from the user's earlier corrections. Follow each one that applies " +
+    "to this request:\n" +
+    lessons.map((lesson) => `- ${lesson.text}`).join("\n")
+  );
+}
+
+export function lessonReason(lessons: Lesson[]): string {
+  const one = lessons.length === 1;
+  return (
+    HELD +
+    `this call was held once, because ${one ? "a lesson" : "lessons"} from the user's ` +
+    `earlier corrections ${one ? "applies" : "apply"} to it:\n` +
+    lessons.map((lesson) => `- ${lesson.text}`).join("\n") +
+    `\nIf the call already follows ${one ? "it" : "them"}, send it again unchanged and it ` +
+    "will run. Otherwise change it so that it does."
+  );
+}
+
+/**
+ * The lessons whose triggers a tool call matches. `read` gives a file's contents
+ * before a write, and is only asked when a lesson holds on added text, at most once.
+ */
+export function tripped(
+  lessons: Lesson[],
+  tool: string,
+  input: unknown,
+  cwd: string,
+  read: (path: string) => string,
+): Lesson[] {
+  if (tool === "bash") {
+    const commands = simpleCommands(String((input as { command?: unknown }).command ?? ""));
+    return lessons.filter((lesson) =>
+      (lesson.commands ?? []).some((trigger) => commands.some((words) => runs(words, trigger))),
+    );
+  }
+  if (tool !== "edit" && tool !== "write") return [];
+
+  const call = input as { path?: unknown; content?: unknown; edits?: { oldText?: unknown; newText?: unknown }[] };
+  const path = String(call.path ?? "");
+  const where = relative(cwd, resolve(cwd, path));
+  let changes: [string, string][] | undefined;
+  const adds = (text: string) => {
+    changes ??=
+      tool === "edit"
+        ? (call.edits ?? []).map((e) => [String(e.oldText ?? ""), String(e.newText ?? "")])
+        : [[read(path), String(call.content ?? "")]];
+    return changes.some(([before, after]) => count(after, text) > count(before, text));
+  };
+  return lessons.filter(
+    (lesson) =>
+      (lesson.files ?? []).some((trigger) => touches(where, trigger)) || (lesson.adds ?? []).some(adds),
+  );
+}
+
+/**
+ * Whether a simple command runs `trigger`, given as its first words: `gh pr create`
+ * for `gh pr create --fill`, `git push` for `git -C dir push`. Options are skipped,
+ * though not the values some of them take, so the rest need only be in a row.
+ */
+export function runs(words: string[], trigger: string): boolean {
+  const [program, ...rest] = trigger.split(/\s+/).filter(Boolean);
+  const [first, ...args] = unwrap(words);
+  if (program === undefined || first?.split("/").pop() !== program) return false;
+  const plain = args.filter((word) => !word.startsWith("-"));
+  for (let i = 0; i + rest.length <= plain.length; i++) {
+    if (rest.every((word, j) => plain[i + j] === word)) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether a path relative to the working directory is, or is in, `trigger`: a file
+ * name (`CHANGELOG.md`), a directory (`database/migrations`) or an extension (`.tsx`),
+ * matched at a path segment wherever it sits.
+ */
+export function touches(path: string, trigger: string): boolean {
+  const full = "/" + path.split("\\").join("/");
+  const want = trigger.replace(/^\.?\/+|\/+$/g, "");
+  if (want === "") return false;
+  for (let at = full.indexOf(want); at >= 0; at = full.indexOf(want, at + 1)) {
+    const starts = full[at - 1] === "/" || want.startsWith(".");
+    const ends = at + want.length === full.length || full[at + want.length] === "/";
+    if (starts && ends) return true;
+  }
+  return false;
+}
+
+function count(text: string, part: string): number {
+  return part === "" ? 0 : text.split(part).length - 1;
 }
 
 /**

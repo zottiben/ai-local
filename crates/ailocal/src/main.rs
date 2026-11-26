@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use ailocal::{
-    auth, config::Config, download, extras, gateway, harness, install, registry, registry::Fit,
-    serve, service, setup, source::Source, vram,
+    auth, config::Config, download, extras, gateway, harness, install, lessons, registry,
+    registry::Fit, serve, service, setup, source::Source, vram,
 };
 use clap::{Args, Parser, Subcommand};
 
@@ -37,6 +37,13 @@ enum Command {
     /// Point a coding harness at this machine's gateway.
     #[command(subcommand)]
     Harness(HarnessCmd),
+    /// Lessons that local models get from your corrections.
+    ///
+    /// Only local models get them, through the Pi extension: a lesson's trigger holds
+    /// the first matching call of each prompt and shows the lesson, and the lessons
+    /// most like a prompt go along with it.
+    #[command(subcommand)]
+    Lessons(LessonsCmd),
     /// systemd units, so this survives a reboot.
     #[command(subcommand)]
     Service(ServiceCmd),
@@ -148,6 +155,47 @@ enum HarnessCmd {
     },
     /// Remove our entry from a harness's configuration.
     Unconfigure { name: String },
+}
+
+#[derive(Subcommand)]
+enum LessonsCmd {
+    /// List the lessons, active ones first.
+    Ls,
+    /// Add a lesson of your own.
+    Add(LessonAddArgs),
+    /// Delete a lesson.
+    Rm { id: String },
+}
+
+#[derive(Args)]
+struct LessonAddArgs {
+    /// What to do, as you would tell a colleague, e.g. "Fix a lint error at its
+    /// cause instead of adding eslint-disable."
+    #[arg(required = true, num_args = 1..)]
+    text: Vec<String>,
+
+    /// Hold the first command of each prompt that starts with these words, and show
+    /// the lesson, e.g. `--command "gh pr create"`. Repeatable.
+    #[arg(long = "command", value_name = "WORDS")]
+    commands: Vec<String>,
+
+    /// Hold the first edit or write of each prompt that adds this text, and show the
+    /// lesson, e.g. `--adds eslint-disable`. Repeatable.
+    #[arg(long = "adds", value_name = "TEXT")]
+    adds: Vec<String>,
+
+    /// Hold the first edit or write of each prompt to this file, directory or
+    /// extension, and show the lesson, e.g. `--file CHANGELOG.md`. Repeatable.
+    #[arg(long = "file", value_name = "PATH")]
+    files: Vec<String>,
+
+    /// Only in this repository: its remote URL, or `host/owner/repo`.
+    #[arg(long, conflicts_with = "here")]
+    repo: Option<String>,
+
+    /// Only in the repository of the current directory.
+    #[arg(long)]
+    here: bool,
 }
 
 #[derive(Subcommand)]
@@ -335,6 +383,9 @@ fn main() -> anyhow::Result<()> {
         Command::Service(ServiceCmd::Status) => service_status(),
         Command::Setup(args) => setup(&args),
         Command::Status => status(),
+        Command::Lessons(LessonsCmd::Ls) => lessons_ls(),
+        Command::Lessons(LessonsCmd::Add(args)) => lessons_add(args),
+        Command::Lessons(LessonsCmd::Rm { id }) => lessons_rm(&id),
         Command::Extras(ExtrasCmd::List) => extras_list(),
         Command::Extras(ExtrasCmd::Install { name }) => extras_install(&name),
         Command::Extras(ExtrasCmd::Remove { name }) => extras_remove(&name),
@@ -512,8 +563,9 @@ fn config_agent_rules(state: Option<&str>) -> anyhow::Result<()> {
         println!(
             "\nIn Pi they come with an extension that holds a local model's push once when\n\
              no test has passed since its last edit, holds Python over JSON once when jq is\n\
-             installed, asks for the checks once before the model stops, and sets git's\n\
-             editors so that a rebase or a commit never waits on one:\n\n  {}",
+             installed, asks for the checks once before the model stops, sets git's\n\
+             editors so that a rebase or a commit never waits on one, and gives it your\n\
+             `ailocal lessons` where they apply:\n\n  {}",
             harness::pi_extension_path()?.display()
         );
         return Ok(());
@@ -1411,6 +1463,119 @@ fn harness_unconfigure(name: &str) -> anyhow::Result<()> {
         (_, true) => println!("removed the {} entry from pi", harness::PI_PROVIDER_ID),
         (_, false) => println!("pi was not configured"),
     }
+    Ok(())
+}
+
+fn lessons_ls() -> anyhow::Result<()> {
+    use lessons::State;
+
+    let path = lessons::path()?;
+    let store = lessons::Store::load(&path)?;
+    if store.lessons.is_empty() {
+        println!("no lessons yet, in {}", path.display());
+        println!(
+            "\nAdd one of your own with\n  \
+             ailocal lessons add \"<what to do>\" [--command \"gh pr create\"] [--adds eslint-disable]"
+        );
+        return Ok(());
+    }
+
+    let mut all: Vec<_> = store.lessons.iter().collect();
+    all.sort_by_key(|l| match l.state {
+        State::Active => 0,
+        State::Pending => 1,
+        State::Rejected => 2,
+    });
+    for lesson in &all {
+        let mut head = vec![
+            lesson.id.clone(),
+            lesson
+                .repo
+                .clone()
+                .unwrap_or_else(|| "everywhere".to_owned()),
+        ];
+        if lesson.state != State::Active {
+            head.push(lesson.state.as_str().to_owned());
+        }
+        let holds: Vec<String> = lesson
+            .commands
+            .iter()
+            .map(|c| format!("`{c}`"))
+            .chain(lesson.adds.iter().map(|a| format!("edits adding `{a}`")))
+            .chain(lesson.files.iter().map(|f| format!("edits to `{f}`")))
+            .collect();
+        if !holds.is_empty() {
+            head.push(format!("holds {}", holds.join(", ")));
+        }
+        println!("{}\n  {}\n", head.join("  "), lesson.text);
+    }
+    let active = all.iter().filter(|l| l.state == State::Active).count();
+    println!("{active} of {} active, in {}", all.len(), path.display());
+    Ok(())
+}
+
+fn lessons_add(args: LessonAddArgs) -> anyhow::Result<()> {
+    let repo = if args.here {
+        Some(repo_here()?)
+    } else {
+        args.repo
+            .map(|r| lessons::repo_id(&r).unwrap_or_else(|| r.trim().trim_matches('/').to_owned()))
+    };
+    let path = lessons::path()?;
+    let mut store = lessons::Store::load(&path)?;
+    let id = store.add(lessons::Lesson {
+        id: String::new(),
+        text: args.text.join(" "),
+        repo,
+        commands: args.commands,
+        adds: args.adds,
+        files: args.files,
+        state: lessons::State::Active,
+        source: "added by hand".to_owned(),
+        created: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+    })?;
+    store.save(&path)?;
+
+    println!("added {id}");
+    if harness::pi_extension_path().is_ok_and(|p| p.is_file()) {
+        println!("Local models in Pi get it from their next prompt.");
+    } else if !Config::load()?.agent_rules {
+        println!(
+            "No model gets it yet: Pi's ailocal extension is off with the agent rules.\n\
+             `ailocal config agent-rules on` turns both on."
+        );
+    } else {
+        println!(
+            "No model gets it yet: Pi's ailocal extension is not installed.\n\
+             `ailocal harness configure pi` installs it."
+        );
+    }
+    Ok(())
+}
+
+/// The repository of the current directory, as lessons name it.
+fn repo_here() -> anyhow::Result<String> {
+    let out = std::process::Command::new("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .output()
+        .map_err(|e| anyhow::anyhow!("running git: {e}"))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "the current directory is not in a repository with a remote named origin"
+    );
+    let remote = String::from_utf8_lossy(&out.stdout);
+    lessons::repo_id(&remote)
+        .ok_or_else(|| anyhow::anyhow!("origin is {}, which names no host", remote.trim()))
+}
+
+fn lessons_rm(id: &str) -> anyhow::Result<()> {
+    let path = lessons::path()?;
+    let mut store = lessons::Store::load(&path)?;
+    let lesson = store.remove(id)?;
+    store.save(&path)?;
+    println!("removed {}\n  {}", lesson.id, lesson.text);
     Ok(())
 }
 
