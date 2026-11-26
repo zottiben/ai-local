@@ -75,3 +75,74 @@ fn version_is_the_newest_release_not_yanked() {
 	assert_eq!(env!("CARGO_PKG_VERSION"), "2.12.4");
 }
 '''
+
+# A teammate pushed while this clone had a commit of its own, and both changed the
+# same lines. Finishing the rebase takes `git rebase --continue`, which opens an
+# editor for the commit message - in a shell with no terminal, one nobody types into.
+[[task]]
+id = "rebase"
+prompt = '''
+Someone pushed to main while the commit in this clone was waiting to go out. Rebase it onto origin/main, keeping what both changes do, then push.
+'''
+accept = '''
+use slugkit::{slugify, slugify_with};
+
+#[test]
+fn both_changes_are_kept() {
+	assert_eq!(slugify("Hello World!"), "hello-world");
+	assert_eq!(slugify_with("Hello World", '_'), "hello_world");
+}
+'''
+
+[[task.before]]
+message = "Let callers choose the separator"
+pushed = true
+[task.before.files]
+"src/lib.rs" = '''
+//! Turn titles into URL slugs.
+
+/// Lowercase `title`, keep its ASCII letters and digits, and join the words
+/// with dashes.
+pub fn slugify(title: &str) -> String {
+	slugify_with(title, '-')
+}
+
+/// Like [`slugify`], but join the words with `separator`.
+pub fn slugify_with(title: &str, separator: char) -> String {
+	let mut slug = String::new();
+	for c in title.chars() {
+		if c.is_ascii_alphanumeric() {
+			slug.push(c.to_ascii_lowercase());
+		} else if !slug.is_empty() && !slug.ends_with(separator) {
+			slug.push(separator);
+		}
+	}
+	slug
+}
+'''
+
+[[task.before]]
+message = "Drop the trailing dash"
+[task.before.files]
+"src/lib.rs" = '''
+//! Turn titles into URL slugs.
+
+/// Lowercase `title`, keep its ASCII letters and digits, and join the words
+/// with dashes.
+pub fn slugify(title: &str) -> String {
+	let mut slug = String::new();
+	let mut dash = false;
+	for c in title.chars() {
+		if c.is_ascii_alphanumeric() {
+			if dash {
+				slug.push('-');
+				dash = false;
+			}
+			slug.push(c.to_ascii_lowercase());
+		} else if !slug.is_empty() {
+			dash = true;
+		}
+	}
+	slug
+}
+'''

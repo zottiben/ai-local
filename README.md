@@ -222,7 +222,10 @@ a local model it:
 - holds a `git push` once when no test run has passed since the last file edit, and
   says why;
 - holds Python over JSON once per command when `jq` is installed;
-- asks once for the checks when the model is about to stop with edits no test has seen.
+- asks once for the checks when the model is about to stop with edits no test has seen;
+- runs its commands with git's editors set, because Pi's shell has no terminal and an
+  editor there waits for keys that never come: `rebase --continue` and `commit --amend`
+  keep the message git proposes, and `rebase -i` stops at once and says how to go on.
 
 It nudges and never walls: a held push goes through when it is sent again, so a project
 with no tests can still push. Pi loads every extension for every model, so it checks

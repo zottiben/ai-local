@@ -87,8 +87,9 @@ struct AgentArgs {
     #[arg(long, default_value = "on", value_parser = ["on", "off"])]
     rules: Vec<String>,
 
-    /// Whether Pi loads ailocal's extension, which holds an unchecked push and asks
-    /// for the checks before the agent stops. `on` or `off`; repeat to compare both.
+    /// Whether Pi loads ailocal's extension, which holds an unchecked push, asks for
+    /// the checks before the agent stops and keeps git from waiting on an editor. `on`
+    /// or `off`; repeat to compare both.
     ///
     /// On by default, as `harness configure pi` installs it.
     #[arg(long, default_value = "on", value_parser = ["on", "off"])]

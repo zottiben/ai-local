@@ -1,15 +1,21 @@
 // node --test crates/ailocal/pi/ailocal.test.ts
 
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, describe, it } from "node:test";
 
 import ailocal, {
+  GIT_ENV,
   HELD,
   isPush,
   isTest,
   JSON_REASON,
   PUSH_REASON,
   pythonOnJson,
+  REBASE_TODO_MESSAGE,
   Session,
   SETTLE_MESSAGE,
   simpleCommands,
@@ -224,6 +230,17 @@ describe("the extension", () => {
     assert.equal(await emit("agent_before_settle", settle, "anthropic"), undefined);
   });
 
+  it("runs a local model's commands with git's editors set, and a frontier model's as sent", async () => {
+    const emit = load(true);
+    const local = { toolName: "bash", toolCallId: "l", input: { command: "git rebase --continue" } };
+    assert.equal(await emit("tool_call", local), undefined);
+    assert.equal(local.input.command, GIT_ENV + "git rebase --continue");
+
+    const frontier = { toolName: "bash", toolCallId: "f", input: { command: "git rebase --continue" } };
+    assert.equal(await emit("tool_call", frontier, "anthropic"), undefined);
+    assert.equal(frontier.input.command, "git rebase --continue");
+  });
+
   it("holds a local model's unchecked push", async () => {
     const emit = load(true);
     editedFile(emit);
@@ -252,5 +269,100 @@ describe("the extension", () => {
     assert.equal(result.entries[0], kept);
     assert.equal(result.entries[1].content, SETTLE_MESSAGE);
     assert.equal(await emit("agent_before_settle", { entries: [], outcome: "completed" }), undefined);
+  });
+});
+
+// Real git through bash, started the way Pi starts a command: detached, with no
+// terminal and nothing on stdin. Without GIT_ENV the first of these sits in vim.
+describe("GIT_ENV", () => {
+  const root = mkdtempSync(join(tmpdir(), "ailocal-git-"));
+  after(() => rmSync(root, { recursive: true, force: true }));
+
+  const env = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_AUTHOR_NAME: "t",
+    GIT_AUTHOR_EMAIL: "t@example.invalid",
+    GIT_COMMITTER_NAME: "t",
+    GIT_COMMITTER_EMAIL: "t@example.invalid",
+  };
+  const git = (dir: string, ...args: string[]) =>
+    execFileSync("git", args, { cwd: dir, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+
+  /** A repository on `feature`, stopped by a conflict partway through a rebase onto `main`. */
+  function conflicted(name: string): string {
+    const dir = join(root, name);
+    git(root, "init", "-q", "-b", "main", dir);
+    writeFileSync(join(dir, "notes.txt"), "one\n");
+    git(dir, "add", ".");
+    git(dir, "commit", "-qm", "base");
+    git(dir, "checkout", "-qb", "feature");
+    writeFileSync(join(dir, "notes.txt"), "feature\n");
+    git(dir, "commit", "-qam", "feature change");
+    git(dir, "checkout", "-q", "main");
+    writeFileSync(join(dir, "notes.txt"), "main\n");
+    git(dir, "commit", "-qam", "main change");
+    git(dir, "checkout", "-q", "feature");
+    assert.throws(() => git(dir, "rebase", "main"));
+    return dir;
+  }
+
+  function run(dir: string, command: string): Promise<{ code: number | null; out: string }> {
+    return new Promise((resolve) => {
+      const child = spawn("bash", ["-c", GIT_ENV + command], {
+        cwd: dir,
+        detached: true,
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let out = "";
+      child.stdout.on("data", (data) => (out += data));
+      child.stderr.on("data", (data) => (out += data));
+      const timer = setTimeout(() => child.pid && process.kill(-child.pid, "SIGKILL"), 10_000);
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        resolve({ code, out });
+      });
+    });
+  }
+
+  it("lets a rebase continue with the message git proposes", async () => {
+    const dir = conflicted("continue");
+    writeFileSync(join(dir, "notes.txt"), "both\n");
+    const { code, out } = await run(dir, "git add -A && git rebase --continue");
+    assert.equal(code, 0, out);
+    assert.equal(git(dir, "log", "--format=%s"), "feature change\nmain change\nbase");
+  });
+
+  it("makes a commit with no message fail at once", async () => {
+    const dir = conflicted("commit");
+    git(dir, "rebase", "--abort");
+    const { code, out } = await run(dir, "git commit --allow-empty");
+    assert.equal(code, 1);
+    assert.match(out, /empty commit message/);
+  });
+
+  it("stops rebase -i before it begins and says how to go on", async () => {
+    const dir = conflicted("interactive");
+    git(dir, "rebase", "--abort");
+    const { code, out } = await run(dir, "git rebase -i HEAD~1");
+    assert.equal(code, 1);
+    assert.ok(out.startsWith(REBASE_TODO_MESSAGE), out);
+    assert.ok(!REBASE_TODO_MESSAGE.startsWith(HELD));
+    assert.equal(existsSync(join(dir, ".git", "rebase-merge")), false);
+  });
+
+  it("lets through both ways on that it names", async () => {
+    const dir = conflicted("ways-on");
+    git(dir, "rebase", "--abort");
+    assert.equal((await run(dir, "GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash HEAD~1")).code, 0);
+
+    const example = /(GIT_SEQUENCE_EDITOR="[^"]+") git rebase -i <base>/.exec(REBASE_TODO_MESSAGE)?.[1];
+    assert.ok(example);
+    git(dir, "commit", "-q", "--allow-empty", "-m", "second");
+    const { code, out } = await run(dir, `${example} git rebase -i HEAD~2`);
+    assert.equal(code, 0, out);
+    assert.equal(git(dir, "log", "--format=%s"), "feature change\nbase");
   });
 });

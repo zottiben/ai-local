@@ -253,6 +253,13 @@ Only a passing *test* run clears the push hold: counting any linter let a push a
 so the eval tells them apart by the extension's `HELD` prefix, which a test keeps in
 step with `transcript::HELD`.
 
+A local model's bash commands run with `GIT_ENV` in front, because Pi's shell has no
+terminal and a `git rebase --continue` sat in vim for 12 minutes. Pi runs a *copy* of
+the arguments (`validateToolArguments` clones them), so the transcript, the eval and
+the model all see only what the model typed. Text that a command which *ran* prints,
+such as the rebase-todo editor's message, must not start with `HELD`, or the eval
+scores the call as one that never ran.
+
 ### 8. Retrieval for facts, fine-tuning for behaviour
 Codebase knowledge is a retrieval problem, not a QLoRA problem. An adapter trained on a
 repo produces confident wrong API signatures and is stale on the next commit. No

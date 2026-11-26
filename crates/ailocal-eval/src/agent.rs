@@ -104,6 +104,22 @@ pub struct Task {
     pub prompt: String,
     /// An integration test that passes once the task is done.
     pub accept: String,
+    /// Commits made on top of the fixture before the agent starts, in order.
+    #[serde(default)]
+    pub before: Vec<Commit>,
+}
+
+/// A commit a task starts from.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Commit {
+    pub message: String,
+    /// Made in another clone and pushed, as a teammate's would be, so the agent's copy
+    /// does not have it until it fetches.
+    #[serde(default)]
+    pub pushed: bool,
+    /// Each file's path and its whole new contents.
+    pub files: std::collections::BTreeMap<String, String>,
 }
 
 /// The built-in tasks.
@@ -795,36 +811,21 @@ fn run_arm(
 struct Repo {
     work: PathBuf,
     origin: PathBuf,
+    /// Origin's `main` as the agent found it.
     initial: String,
 }
 
 impl Repo {
-    fn create(dir: &Path) -> anyhow::Result<Self> {
+    fn create(dir: &Path, before: &[Commit]) -> anyhow::Result<Self> {
         let work = dir.join("work");
         let origin = dir.join("origin.git");
         // Hooks from the user's global config would run on the agent's commits.
         let no_hooks = dir.join("no-hooks");
         std::fs::create_dir_all(&no_hooks)?;
 
-        for (path, text) in FIXTURE {
-            let file = work.join(path);
-            if let Some(parent) = file.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&file, text)?;
-        }
-
+        write_files(&work, FIXTURE)?;
         git(&work, &["init", "-q", "-b", "main"])?;
-        for (key, value) in [
-            ("user.name", "slugkit"),
-            ("user.email", "dev@slugkit.invalid"),
-            // A signing prompt would hang the agent's commit until the timeout.
-            ("commit.gpgsign", "false"),
-            ("tag.gpgsign", "false"),
-            ("core.hooksPath", &no_hooks.to_string_lossy()),
-        ] {
-            git(&work, &["config", key, value])?;
-        }
+        configure(&work, "slugkit", &no_hooks)?;
         git(&work, &["add", "-A"])?;
         git(&work, &["commit", "-q", "-m", "Initial commit"])?;
 
@@ -834,7 +835,29 @@ impl Repo {
             &["remote", "add", "origin", &origin.to_string_lossy()],
         )?;
         git(&work, &["push", "-q", "-u", "origin", "main"])?;
-        let initial = git(&work, &["rev-parse", "HEAD"])?;
+
+        let teammate = dir.join("teammate");
+        for commit in before {
+            let at = if commit.pushed {
+                if !teammate.exists() {
+                    git(dir, &["clone", "-q", &origin.to_string_lossy(), "teammate"])?;
+                    configure(&teammate, "teammate", &no_hooks)?;
+                }
+                &teammate
+            } else {
+                &work
+            };
+            write_files(
+                at,
+                commit.files.iter().map(|(p, t)| (p.as_str(), t.as_str())),
+            )?;
+            git(at, &["add", "-A"])?;
+            git(at, &["commit", "-q", "-m", &commit.message])?;
+            if commit.pushed {
+                git(at, &["push", "-q", "origin", "main"])?;
+            }
+        }
+        let initial = git(&origin, &["rev-parse", "main"])?;
 
         Ok(Self {
             work,
@@ -842,6 +865,36 @@ impl Repo {
             initial,
         })
     }
+}
+
+fn write_files<'a>(
+    dir: &Path,
+    files: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> anyhow::Result<()> {
+    for (path, text) in files {
+        let file = dir.join(path);
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&file, text)?;
+    }
+    Ok(())
+}
+
+/// Who commits in `dir`, and nothing from the user's global config that would get in
+/// the way.
+fn configure(dir: &Path, name: &str, no_hooks: &Path) -> anyhow::Result<()> {
+    for (key, value) in [
+        ("user.name", name),
+        ("user.email", &format!("{name}@slugkit.invalid")),
+        // A signing prompt would hang the agent's commit until the timeout.
+        ("commit.gpgsign", "false"),
+        ("tag.gpgsign", "false"),
+        ("core.hooksPath", &no_hooks.to_string_lossy()),
+    ] {
+        git(dir, &["config", key, value])?;
+    }
+    Ok(())
 }
 
 fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
@@ -864,7 +917,7 @@ fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
 
 /// Give the agent one task in a fresh repository, then score what it left.
 fn one(bench: &Bench<'_>, arm: &Arm, task: &Task, rep: u32, dir: &Path) -> anyhow::Result<Run> {
-    let repo = Repo::create(dir)?;
+    let repo = Repo::create(dir, &task.before)?;
     let events_path = dir.join("events.jsonl");
 
     let mut pi = Command::new(&bench.tools.pi);
@@ -1242,28 +1295,48 @@ mod tests {
         assert!(text.lines().count() > 2000);
     }
 
-    /// The fixture has to start green, or every run inherits a failure it did not
-    /// cause - and no acceptance test may pass before its task is done, or `done`
-    /// scores nothing. Runs cargo, so it takes a few seconds.
+    /// Every task has to start green, both in the agent's copy and on origin, or every
+    /// run inherits a failure it did not cause - and no acceptance test may pass before
+    /// its task is done, or `done` scores nothing. Runs cargo, so it takes a while.
     #[test]
-    fn the_fixture_starts_green_and_no_task_starts_done() {
+    fn every_task_starts_green_and_none_starts_done() {
         let root =
             std::env::temp_dir().join(format!("ailocal-eval-fixture-{}", std::process::id()));
-        let repo = Repo::create(&root).unwrap();
         let target = root.join("target");
 
-        for args in [
-            &["test"][..],
-            &["fmt", "--check"],
-            &["clippy", "--all-targets", "--", "-D", "warnings"],
-        ] {
-            assert_eq!(
-                cargo(&repo.work, &target, args).unwrap(),
-                Outcome::Pass,
-                "cargo {args:?}"
-            );
-        }
+        let mut fixture_checked = false;
         for task in tasks().unwrap() {
+            let dir = root.join(&task.id);
+            let repo = Repo::create(&dir, &task.before).unwrap();
+            let mut copies = Vec::new();
+            // Every task with no commits of its own starts from the same fixture.
+            if !task.before.is_empty() || !std::mem::replace(&mut fixture_checked, true) {
+                copies.push(repo.work.clone());
+            }
+            if task.before.iter().any(|c| c.pushed) {
+                git(
+                    &dir,
+                    &["clone", "-q", &repo.origin.to_string_lossy(), "origin"],
+                )
+                .unwrap();
+                copies.push(dir.join("origin"));
+            }
+            for copy in &copies {
+                for args in [
+                    &["test"][..],
+                    &["fmt", "--check"],
+                    &["clippy", "--all-targets", "--", "-D", "warnings"],
+                ] {
+                    assert_eq!(
+                        cargo(copy, &target, args).unwrap(),
+                        Outcome::Pass,
+                        "{}: cargo {args:?} in {}",
+                        task.id,
+                        copy.display()
+                    );
+                }
+            }
+
             let accept = repo.work.join("tests").join(format!("{ACCEPT_TEST}.rs"));
             std::fs::write(accept, &task.accept).unwrap();
             let before = cargo(&repo.work, &target, &["test", "--test", ACCEPT_TEST]).unwrap();
@@ -1273,6 +1346,29 @@ mod tests {
                 task.id
             );
         }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The rebase task measures what happens at `git rebase --continue`, which is only
+    /// reached if the two commits really conflict.
+    #[test]
+    fn the_rebase_task_starts_with_a_conflict() {
+        let root = std::env::temp_dir().join(format!("ailocal-eval-rebase-{}", std::process::id()));
+        let task = tasks()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "rebase")
+            .unwrap();
+        let repo = Repo::create(&root, &task.before).unwrap();
+
+        assert_ne!(
+            git(&repo.work, &["rev-parse", "origin/main"]).unwrap(),
+            repo.initial,
+            "the agent's copy already has the teammate's commit"
+        );
+        git(&repo.work, &["fetch", "-q"]).unwrap();
+        let rebase = git(&repo.work, &["rebase", "origin/main"]);
+        assert!(rebase.is_err_and(|e| e.to_string().contains("could not apply")));
         std::fs::remove_dir_all(&root).ok();
     }
 

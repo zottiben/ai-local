@@ -10,6 +10,9 @@
 // - a push with files changed since the tests last passed is held once per change;
 // - Python over JSON is held once per command while jq is installed;
 // - a prompt that ends with changes no test has seen gets one more turn to run them.
+//
+// Its commands also run with git's editors set, so git never waits for a person to
+// type into one.
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -43,6 +46,34 @@ export const SETTLE_MESSAGE =
   "report. If you already committed or pushed, commit and push the fixes too. If the " +
   "project has no tests, say so and stop.";
 
+/**
+ * What the editor of a rebase's todo list prints. It does not start with `HELD`: the
+ * command ran, and failed.
+ */
+export const REBASE_TODO_MESSAGE =
+  "There is no editor here for the rebase todo list, so ailocal stopped the rebase " +
+  "before it began. To keep the list as it is, as with --autosquash, run the same " +
+  "command with GIT_SEQUENCE_EDITOR=true in front. To change it, pass a command that " +
+  "edits the file: GIT_SEQUENCE_EDITOR=\"sed -i.bak '2,$ s/^pick/fixup/'\" git rebase " +
+  "-i <base> folds every commit after the first into it.";
+
+/**
+ * Run ahead of each of a local model's shell commands.
+ *
+ * Pi's shell has no terminal, so an editor that git opens waits for keys that never
+ * come: a `git rebase --continue` sat in vim for nearly 12 minutes until the person
+ * stopped it. `GIT_EDITOR=true` keeps the message git proposes, which is what
+ * `--continue` and `--amend` want, and a bare `git commit` fails at once. The todo list
+ * of `rebase -i` gets an editor that fails and says how to go on instead, because
+ * keeping the list would report a squash that never happened.
+ *
+ * Pi runs a copy of the call's arguments, so the model never sees this line and cannot
+ * learn to type it.
+ */
+export const GIT_ENV =
+  `export GIT_EDITOR=true AILOCAL_TODO=${shellQuote(REBASE_TODO_MESSAGE)} ` +
+  `GIT_SEQUENCE_EDITOR='printf "%s\\n" "$AILOCAL_TODO" >&2; false'\n`;
+
 export default function ailocal(pi: ExtensionAPI): void {
   const session = new Session();
   let jq: Promise<boolean> | undefined;
@@ -68,13 +99,15 @@ export default function ailocal(pi: ExtensionAPI): void {
 
   pi.on("tool_call", async (event, ctx) => {
     if (!isLocal(ctx) || event.toolName !== "bash") return;
-    const command = String((event.input as { command?: unknown }).command ?? "");
+    const input = event.input as { command?: unknown };
+    const command = String(input.command ?? "");
 
     let reason = session.holdPush(command);
     if (reason === undefined && pythonOnJson(command) && (await hasJq())) {
       reason = session.holdJson(command);
     }
-    return reason === undefined ? undefined : { block: true, reason };
+    if (reason !== undefined) return { block: true, reason };
+    input.command = GIT_ENV + command;
   });
 
   pi.on("agent_before_settle", (event, ctx) => {
@@ -297,6 +330,11 @@ function subcommand(words: string[], program: string, takesValue: string[]): str
     else if (!word.startsWith("-") && !word.startsWith("+")) return word;
   }
   return undefined;
+}
+
+/** `word` as one shell word, whatever it holds. */
+function shellQuote(word: string): string {
+  return `'${word.replaceAll("'", "'\\''")}'`;
 }
 
 /**
