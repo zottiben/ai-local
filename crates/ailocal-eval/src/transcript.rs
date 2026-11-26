@@ -16,6 +16,12 @@ use serde::{Deserialize, Serialize};
 /// command never ran.
 const HELD: &str = "ailocal: ";
 
+/// How the result of a call held for a lesson begins, after [`HELD`].
+const LESSON_HELD: &str = "this call was held once, because ";
+
+/// The custom message the extension gives lessons with, alongside a prompt.
+const LESSONS_MESSAGE: &str = "ailocal-lessons";
+
 /// One tool call, as Pi reported it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Call {
@@ -26,6 +32,9 @@ pub struct Call {
     /// Held by ailocal's Pi extension, so it never ran.
     #[serde(default)]
     pub held: bool,
+    /// What the extension said when it held the call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Everything a run's score needs from its event stream.
@@ -40,6 +49,9 @@ pub struct Transcript {
     pub peak_context: u64,
     /// Set when Pi stopped on an error rather than because the agent finished.
     pub error: Option<String>,
+    /// The lessons the extension gave alongside a prompt, by id.
+    #[serde(default)]
+    pub lessons_given: Vec<String>,
 }
 
 /// Read a `--mode json` stream. Lines that are not JSON are skipped, since Pi's own
@@ -69,6 +81,7 @@ pub fn parse(events: &str) -> Transcript {
                     target: target.to_owned(),
                     is_error: false,
                     held: false,
+                    reason: None,
                 });
             }
             "tool_execution_end" => {
@@ -76,9 +89,21 @@ pub fn parse(events: &str) -> Transcript {
                 if let Some(&(_, index)) = pending.iter().find(|(p, _)| p == id) {
                     let is_error = event["isError"].as_bool().unwrap_or(false);
                     let text = event["result"]["content"][0]["text"].as_str();
-                    t.calls[index].is_error = is_error;
-                    t.calls[index].held = is_error && text.is_some_and(|t| t.starts_with(HELD));
+                    let call = &mut t.calls[index];
+                    call.is_error = is_error;
+                    call.held = is_error && text.is_some_and(|t| t.starts_with(HELD));
+                    if call.held {
+                        call.reason = text.map(str::to_owned);
+                    }
                 }
+            }
+            "message_end" if event["message"]["customType"] == LESSONS_MESSAGE => {
+                let ids = event["message"]["details"]["lessons"].as_array();
+                t.lessons_given.extend(
+                    ids.into_iter()
+                        .flatten()
+                        .filter_map(|id| id.as_str().map(str::to_owned)),
+                );
             }
             "turn_start" => t.turns += 1,
             "message_end" if event["message"]["role"] == "assistant" => {
@@ -122,6 +147,15 @@ impl Call {
         } else {
             Vec::new()
         }
+    }
+
+    /// Whether the extension held this call for a lesson, rather than for a check.
+    #[must_use]
+    pub fn held_for_lesson(&self) -> bool {
+        self.reason
+            .as_deref()
+            .and_then(|r| r.strip_prefix(HELD))
+            .is_some_and(|r| r.starts_with(LESSON_HELD))
     }
 
     /// Whether this call changed a file through a file tool.
@@ -261,6 +295,7 @@ mod tests {
             target: command.to_owned(),
             is_error: false,
             held: false,
+            reason: None,
         }
     }
 
@@ -270,6 +305,7 @@ mod tests {
             target: "src/lib.rs".to_owned(),
             is_error: false,
             held: false,
+            reason: None,
         }
     }
 
@@ -310,6 +346,7 @@ mod tests {
             target: "cargo test && git push".to_owned(),
             is_error: false,
             held: false,
+            reason: None,
         };
         assert!(!read.runs_tests() && !read.pushes());
     }
@@ -463,5 +500,45 @@ mod tests {
             ailocal::harness::PI_EXTENSION.contains(&declared),
             "the extension no longer declares {declared}"
         );
+        for said in [
+            format!("`{LESSON_HELD}${{one ? \"a lesson\" : \"lessons\"}}"),
+            format!("customType: \"{LESSONS_MESSAGE}\""),
+            "details: { lessons: relevant.map((lesson) => lesson.id) }".to_owned(),
+        ] {
+            assert!(
+                ailocal::harness::PI_EXTENSION.contains(&said),
+                "the extension no longer says {said}"
+            );
+        }
+    }
+
+    /// What the lesson arms are scored on: which lessons went along with the prompt,
+    /// and which calls were held for one rather than for a check.
+    #[test]
+    fn lessons_given_and_held_are_read_from_the_stream() {
+        let events = [
+            serde_json::json!({
+                "type": "message_end",
+                "message": {"role": "custom", "customType": "ailocal-lessons",
+                            "content": "...", "details": {"lessons": ["pr-template", "x"]}},
+            }),
+            serde_json::json!({"type": "tool_execution_start", "toolCallId": "a",
+                               "toolName": "bash", "args": {"command": "gh pr create"}}),
+            serde_json::json!({"type": "tool_execution_end", "toolCallId": "a", "isError": true,
+                               "result": {"content": [{"type": "text",
+                                          "text": format!("{HELD}{LESSON_HELD}a lesson ...")}]}}),
+            serde_json::json!({"type": "tool_execution_start", "toolCallId": "b",
+                               "toolName": "bash", "args": {"command": "git push"}}),
+            serde_json::json!({"type": "tool_execution_end", "toolCallId": "b", "isError": true,
+                               "result": {"content": [{"type": "text",
+                                          "text": format!("{HELD}this push was held once")}]}}),
+        ]
+        .map(|e| e.to_string())
+        .join("\n");
+
+        let t = parse(&events);
+        assert_eq!(t.lessons_given, ["pr-template", "x"]);
+        assert!(t.calls[0].held_for_lesson());
+        assert!(t.calls[1].held && !t.calls[1].held_for_lesson());
     }
 }

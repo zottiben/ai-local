@@ -260,6 +260,14 @@ the model all see only what the model typed. Text that a command which *ran* pri
 such as the rebase-todo editor's message, must not start with `HELD`, or the eval
 scores the call as one that never ran.
 
+The extension reads `ailocal lessons` itself, from the path `lessons::path` computes,
+so the eval always sets `AILOCAL_LESSONS`, to an empty store if need be - unset, a
+score moves with the user's own lessons. A repository is named by origin *as
+configured* (`git config --get remote.origin.url`), never `git remote get-url`, which
+expands `insteadOf`: the eval's clone has a GitHub URL mapped onto a bare repository,
+and only the configured form keeps a repository's lessons applying there.
+`lessons::repo_id` and the extension's `repoId` are both tested on `pi/remotes.json`.
+
 ### 8. Retrieval for facts, fine-tuning for behaviour
 Codebase knowledge is a retrieval problem, not a QLoRA problem. An adapter trained on a
 repo produces confident wrong API signatures and is stale on the next commit. No

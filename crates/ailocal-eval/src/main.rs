@@ -95,6 +95,15 @@ struct AgentArgs {
     #[arg(long, default_value = "on", value_parser = ["on", "off"])]
     extension: Vec<String>,
 
+    /// How the suite's own lessons reach the agent: `off`, `prompt` (with the prompts
+    /// they share words with) or `on` (with the prompts, and by holding the calls that
+    /// trip them). Repeat to compare several.
+    ///
+    /// Your own lessons are never used. These stand for a user who has corrected the
+    /// model before, and arrive through the extension, so an arm without it has none.
+    #[arg(long, default_value = "on", value_parser = ["off", "prompt", "on"])]
+    lessons: Vec<String>,
+
     /// Attempts at each task. The model samples, so one attempt is an anecdote.
     #[arg(long, default_value_t = 3)]
     reps: u32,
@@ -220,6 +229,15 @@ fn run_agent(args: &AgentArgs) -> anyhow::Result<()> {
         models: resolve_models(&config, &args.model)?,
         rules: args.rules.iter().map(|r| r == "on").collect(),
         extension: args.extension.iter().map(|e| e == "on").collect(),
+        lessons: args
+            .lessons
+            .iter()
+            .map(|l| match l.as_str() {
+                "prompt" => agent::Lessons::Prompt,
+                "on" => agent::Lessons::On,
+                _ => agent::Lessons::Off,
+            })
+            .collect(),
         thinking: args.thinking.clone(),
         tasks,
         reps: args.reps,
@@ -246,6 +264,9 @@ fn run_agent(args: &AgentArgs) -> anyhow::Result<()> {
                 .unwrap_or("llama.cpp defaults")
         );
         print!("{}", agent::detail_table(report));
+        if report.arm.lessons != agent::Lessons::Off {
+            print!("\n{}", agent::lessons_table(report, &agent::seeds()?));
+        }
     }
     println!(
         "\nTranscripts are in {}, one directory per arm.",

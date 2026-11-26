@@ -41,9 +41,13 @@ pub const SCHEMA: u32 = 1;
 /// The built-in agent suite.
 pub const TASKS: &str = include_str!("../tasks/agent.toml");
 
+/// The repository's pull request template, which a pull request body is scored against.
+const TEMPLATE: &str = include_str!("../fixtures/slugkit/.github/pull_request_template.md");
+
 /// The repository every task starts from, compiled in so a run needs no checkout.
-const FIXTURE: [(&str, &str); 8] = [
+const FIXTURE: [(&str, &str); 9] = [
     (".gitignore", include_str!("../fixtures/slugkit/.gitignore")),
+    (".github/pull_request_template.md", TEMPLATE),
     ("AGENTS.md", include_str!("../fixtures/slugkit/AGENTS.md")),
     ("Cargo.lock", include_str!("../fixtures/slugkit/Cargo.lock")),
     ("Cargo.toml", include_str!("../fixtures/slugkit/Cargo.toml")),
@@ -64,6 +68,14 @@ const FIXTURE: [(&str, &str); 8] = [
 
 /// Where a task's acceptance test is put in the clone that is scored.
 const ACCEPT_TEST: &str = "eval_acceptance";
+
+/// The `gh` the agent finds first on `PATH`, which opens pull requests by writing them
+/// down. Part of the suite, so [`digest`] covers it.
+const GH: &str = include_str!("../fixtures/gh");
+
+/// What the agent's clone calls origin. A URL rather than the path of the bare
+/// repository, which `insteadOf` maps it to, so lessons for this repository apply.
+const ORIGIN_URL: &str = "https://github.com/slugkit/slugkit.git";
 
 /// The levels Pi's `--thinking` takes. Pi clamps each to what the model can do.
 pub const THINKING: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -89,12 +101,31 @@ const FMT: &str = "fmt";
 const CLIPPY: &str = "clippy";
 const TESTED_FIRST: &str = "tested-first";
 const NO_PYTHON_JSON: &str = "no-python-json";
+const LESSON: &str = "lesson";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TaskFile {
+    #[serde(rename = "lesson", default)]
+    lessons: Vec<Seed>,
     #[serde(rename = "task")]
     tasks: Vec<Task>,
+}
+
+/// A lesson every run under `--lessons` starts with.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Seed {
+    pub id: String,
+    pub text: String,
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub commands: Vec<String>,
+    #[serde(default)]
+    pub adds: Vec<String>,
+    #[serde(default)]
+    pub files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -107,6 +138,19 @@ pub struct Task {
     /// Commits made on top of the fixture before the agent starts, in order.
     #[serde(default)]
     pub before: Vec<Commit>,
+    /// The branch the agent is asked to push, when it is not `main`.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Whether the agent is asked to open a pull request, whose body is then scored
+    /// against the repository's template.
+    #[serde(default)]
+    pub pull_request: bool,
+}
+
+impl Task {
+    fn branch(&self) -> &str {
+        self.branch.as_deref().unwrap_or("main")
+    }
 }
 
 /// A commit a task starts from.
@@ -128,7 +172,7 @@ pub struct Commit {
 /// If the task file does not parse or two tasks share an id - both mistakes in this
 /// crate, caught by its tests.
 pub fn tasks() -> anyhow::Result<Vec<Task>> {
-    let file: TaskFile = toml::from_str(TASKS).context("parsing the agent task file")?;
+    let file = task_file()?;
     anyhow::ensure!(
         !file.tasks.is_empty(),
         "the agent task file defines no tasks"
@@ -144,6 +188,53 @@ pub fn tasks() -> anyhow::Result<Vec<Task>> {
     Ok(file.tasks)
 }
 
+/// The lessons the suite seeds.
+///
+/// # Errors
+/// If the task file does not parse.
+pub fn seeds() -> anyhow::Result<Vec<Seed>> {
+    Ok(task_file()?.lessons)
+}
+
+fn task_file() -> anyhow::Result<TaskFile> {
+    toml::from_str(TASKS).context("parsing the agent task file")
+}
+
+/// The lesson store a run starts with, as `ailocal lessons` would write it.
+fn lesson_store(seeds: &[Seed], lessons: Lessons) -> ailocal::lessons::Store {
+    let lessons = match lessons {
+        Lessons::Off => Vec::new(),
+        Lessons::Prompt | Lessons::On => seeds
+            .iter()
+            .map(|seed| {
+                // Without triggers a lesson only goes along with a prompt.
+                let triggers = |list: &Vec<String>| {
+                    if lessons == Lessons::On {
+                        list.clone()
+                    } else {
+                        Vec::new()
+                    }
+                };
+                ailocal::lessons::Lesson {
+                    id: seed.id.clone(),
+                    text: seed.text.clone(),
+                    repo: seed.repo.clone(),
+                    commands: triggers(&seed.commands),
+                    adds: triggers(&seed.adds),
+                    files: triggers(&seed.files),
+                    state: ailocal::lessons::State::Active,
+                    source: "ailocal eval agent".to_owned(),
+                    created: 0,
+                }
+            })
+            .collect(),
+    };
+    ailocal::lessons::Store {
+        version: ailocal::lessons::VERSION,
+        lessons,
+    }
+}
+
 /// Short hex digest of the tasks and the fixture together.
 ///
 /// Either one changing changes what a score means, so both are in it.
@@ -153,6 +244,7 @@ pub fn digest() -> String {
 
     let mut hash = sha2::Sha256::new();
     hash.update(TASKS.as_bytes());
+    hash.update(GH.as_bytes());
     for (path, text) in FIXTURE {
         hash.update(path.as_bytes());
         hash.update([0]);
@@ -219,17 +311,45 @@ pub struct Arm {
     /// none - as for every report written before there was one.
     #[serde(default)]
     pub extension: Option<String>,
+    /// How the suite's lessons reached the agent.
+    #[serde(default)]
+    pub lessons: Lessons,
+}
+
+/// How the suite's lessons reach the agent, through the extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Lessons {
+    /// Not at all, as for every report written before there were any.
+    #[default]
+    Off,
+    /// With the prompts they share words with, and without their triggers.
+    Prompt,
+    /// With the prompts, and by holding the calls that trip them.
+    On,
+}
+
+impl Lessons {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Prompt => "prompt",
+            Self::On => "on",
+        }
+    }
 }
 
 impl Arm {
     #[must_use]
     pub fn label(&self) -> String {
         format!(
-            "{} (thinking {}, rules {}, extension {})",
+            "{} (thinking {}, rules {}, extension {}, lessons {})",
             self.model,
             self.thinking,
             on_off(self.rules.is_some()),
-            on_off(self.extension.is_some())
+            on_off(self.extension.is_some()),
+            self.lessons.as_str()
         )
     }
 }
@@ -334,8 +454,19 @@ pub fn summary_table(reports: &[&Report]) -> String {
     };
 
     let mut out = format!(
-        "{:<width$}  {:>4} {:>5} {:>5} {:>6} {:>5} {:>6} {:>5} {:>6} {:>4} {:>7}\n",
-        "ARM", "RUNS", "DONE", "CI", "TESTED", "FMT", "CLIPPY", "TESTS", "NO-PY", "ERR", "MIN/RUN"
+        "{:<width$}  {:>4} {:>5} {:>5} {:>6} {:>5} {:>6} {:>5} {:>6} {:>6} {:>4} {:>7}\n",
+        "ARM",
+        "RUNS",
+        "DONE",
+        "CI",
+        "TESTED",
+        "FMT",
+        "CLIPPY",
+        "TESTS",
+        "NO-PY",
+        "LESSON",
+        "ERR",
+        "MIN/RUN"
     );
     for r in reports {
         let runs = r.runs.len();
@@ -347,7 +478,7 @@ pub fn summary_table(reports: &[&Report]) -> String {
             .count();
         let minutes = r.runs.iter().map(|run| run.seconds).sum::<f64>() / 60.0;
         out.push_str(&format!(
-            "{:<width$}  {:>4} {:>5} {:>5} {:>6} {:>5} {:>6} {:>5} {:>6} {:>4} {:>7.1}\n",
+            "{:<width$}  {:>4} {:>5} {:>5} {:>6} {:>5} {:>6} {:>5} {:>6} {:>6} {:>4} {:>7.1}\n",
             r.arm.label(),
             runs,
             pct(r.rate(DONE)),
@@ -357,6 +488,7 @@ pub fn summary_table(reports: &[&Report]) -> String {
             pct(r.rate(CLIPPY)),
             pct(r.rate(TESTS)),
             pct(r.rate(NO_PYTHON_JSON)),
+            pct(r.rate(LESSON)),
             errors,
             if runs > 0 { minutes / runs as f64 } else { 0.0 },
         ));
@@ -364,8 +496,44 @@ pub fn summary_table(reports: &[&Report]) -> String {
     out.push_str(
         "\nDONE and CI are over every run; a run that pushed nothing is neither. TESTED, \
          FMT, CLIPPY\nand TESTS are over the runs that pushed. TESTED is a test run after \
-         the last edit and\nbefore the push.\n",
+         the last edit and\nbefore the push. LESSON is over the tasks that measure one, \
+         whatever the arm gave.\n",
     );
+    out
+}
+
+/// One line per seeded lesson: in how many runs it went along with the prompt, in how
+/// many it held a call, and in which tasks. A lesson that turns up where it does not
+/// belong costs every run it turns up in.
+#[must_use]
+pub fn lessons_table(report: &Report, seeds: &[Seed]) -> String {
+    let width = seeds.iter().map(|s| s.id.len()).max().unwrap_or(6).max(6);
+    let mut out = format!("{:<width$}  {:>5} {:>4}  IN\n", "LESSON", "GIVEN", "HELD");
+    for seed in seeds {
+        let mut given = 0;
+        let mut held = 0;
+        let mut tasks: Vec<(&str, u32)> = Vec::new();
+        for run in &report.runs {
+            let was_given = run.transcript.lessons_given.contains(&seed.id);
+            let was_held = run.transcript.calls.iter().any(|c| {
+                c.held_for_lesson() && c.reason.as_deref().is_some_and(|r| r.contains(&seed.text))
+            });
+            given += u32::from(was_given);
+            held += u32::from(was_held);
+            if was_given || was_held {
+                match tasks.iter_mut().find(|(t, _)| *t == run.task) {
+                    Some((_, n)) => *n += 1,
+                    None => tasks.push((&run.task, 1)),
+                }
+            }
+        }
+        let tasks: Vec<String> = tasks.iter().map(|(t, n)| format!("{t} x{n}")).collect();
+        out.push_str(&format!(
+            "{:<width$}  {given:>5} {held:>4}  {}\n",
+            seed.id,
+            tasks.join(", ")
+        ));
+    }
     out
 }
 
@@ -386,12 +554,12 @@ pub fn detail_table(report: &Report) -> String {
     };
 
     let mut out = format!(
-        "{:<width$}  {:>4} {:>3} {:>6} {:>3} {:>6} {:>5} {:>5} {:>6} {:>5}  WHY\n",
-        "RUN", "DONE", "CI", "TESTED", "FMT", "CLIPPY", "TESTS", "NO-PY", "CALLS", "SECS"
+        "{:<width$}  {:>4} {:>3} {:>6} {:>3} {:>6} {:>5} {:>5} {:>6} {:>6} {:>5}  WHY\n",
+        "RUN", "DONE", "CI", "TESTED", "FMT", "CLIPPY", "TESTS", "NO-PY", "LESSON", "CALLS", "SECS"
     );
     for run in &report.runs {
         out.push_str(&format!(
-            "{:<width$}  {:>4} {:>3} {:>6} {:>3} {:>6} {:>5} {:>5} {:>6} {:>5.0}  {}\n",
+            "{:<width$}  {:>4} {:>3} {:>6} {:>3} {:>6} {:>5} {:>5} {:>6} {:>6} {:>5.0}  {}\n",
             format!("{} #{}", run.task, run.rep),
             mark(run, DONE),
             if run.ci_green() { "ok" } else { "x" },
@@ -400,6 +568,7 @@ pub fn detail_table(report: &Report) -> String {
             mark(run, CLIPPY),
             mark(run, TESTS),
             mark(run, NO_PYTHON_JSON),
+            mark(run, LESSON),
             run.transcript.calls.len(),
             run.seconds,
             run.why(),
@@ -417,6 +586,8 @@ pub struct Plan {
     pub rules: Vec<bool>,
     /// Whether Pi loads our extension, per arm.
     pub extension: Vec<bool>,
+    /// How the suite's lessons reach the agent, per arm with the extension.
+    pub lessons: Vec<Lessons>,
     pub thinking: Vec<String>,
     pub tasks: Vec<Task>,
     pub reps: u32,
@@ -571,12 +742,14 @@ fn pi_files(
     ]
 }
 
-/// Give Pi an agent directory holding only our provider, and our extension if asked.
+/// Give Pi an agent directory holding only our provider, our extension if asked, and
+/// the lessons the arm starts with.
 fn write_pi_dir(
     dir: &Path,
     gateway: &Gateway,
     model: &harness::PiModel,
     extension: bool,
+    lessons: &ailocal::lessons::Store,
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
     for (name, value) in pi_files(&gateway.base_url, &gateway.key, model) {
@@ -587,6 +760,23 @@ fn write_pi_dir(
         std::fs::create_dir_all(&extensions)?;
         std::fs::write(extensions.join("ailocal.ts"), harness::PI_EXTENSION)?;
     }
+    // Always written, even empty, since the extension otherwise reads the user's own.
+    lessons.save(&lessons_path(dir))
+}
+
+/// The lessons a run's extension reads, through `AILOCAL_LESSONS`.
+fn lessons_path(pi_dir: &Path) -> PathBuf {
+    pi_dir.join("lessons.json")
+}
+
+/// Put the stub `gh` in a directory of its own, for the front of the agent's `PATH`.
+fn write_gh(bin: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::create_dir_all(bin)?;
+    let gh = bin.join("gh");
+    std::fs::write(&gh, GH)?;
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))?;
     Ok(())
 }
 
@@ -628,6 +818,25 @@ pub fn run(config: &Config, plan: &Plan) -> anyhow::Result<Vec<Report>> {
 
     let target_dir = runs_dir(&config.eval_dir).join("target");
     std::fs::create_dir_all(&target_dir)?;
+    let bin = scratch.0.join("bin");
+    write_gh(&bin)?;
+    let seeds = seeds()?;
+
+    // Lessons reach the model through the extension, so an arm without it has none.
+    let lessons_with = |extension: bool| {
+        if extension {
+            plan.lessons.clone()
+        } else {
+            vec![Lessons::Off]
+        }
+    };
+    let arms_per_model: usize = plan
+        .extension
+        .iter()
+        .map(|&e| lessons_with(e).len())
+        .sum::<usize>()
+        * plan.rules.len()
+        * plan.thinking.len();
 
     eprintln!(
         "This runs pi {} with your privileges in throwaway repositories under {}.\n\
@@ -639,7 +848,7 @@ pub fn run(config: &Config, plan: &Plan) -> anyhow::Result<Vec<Report>> {
         "{} task(s) x {} rep(s), {} arm(s), suite {}{}\n",
         plan.tasks.len(),
         plan.reps,
-        plan.models.len() * plan.rules.len() * plan.extension.len() * plan.thinking.len(),
+        plan.models.len() * arms_per_model,
         digest(),
         if tools.jq {
             ""
@@ -703,29 +912,39 @@ pub fn run(config: &Config, plan: &Plan) -> anyhow::Result<Vec<Report>> {
 
         for (rules, gateway) in &gateways {
             for &extension in &plan.extension {
-                let pi_dir = scratch.0.join(format!(
-                    "pi-{}-rules-{}-extension-{}",
-                    slug(model),
-                    on_off(*rules),
-                    on_off(extension)
-                ));
-                write_pi_dir(&pi_dir, gateway, offered, extension)?;
+                for lessons in lessons_with(extension) {
+                    let pi_dir = scratch.0.join(format!(
+                        "pi-{}-rules-{}-extension-{}-lessons-{}",
+                        slug(model),
+                        on_off(*rules),
+                        on_off(extension),
+                        lessons.as_str()
+                    ));
+                    let store = lesson_store(&seeds, lessons);
+                    write_pi_dir(&pi_dir, gateway, offered, extension, &store)?;
 
-                for thinking in &plan.thinking {
-                    let arm = Arm {
-                        model: model.clone(),
-                        thinking: thinking.clone(),
-                        context: offered.context_window,
-                        sampling: instance.sampling.as_ref().map(ToString::to_string),
-                        rules: rules.then(rules_digest),
-                        extension: extension.then(extension_digest),
-                    };
-                    eprintln!("== {}", arm.label());
-                    let report =
-                        run_arm(config, plan, &tools, &scratch.0, &pi_dir, &target_dir, arm)?;
-                    let path = report.save(&config.eval_dir)?;
-                    eprintln!("   saved {}\n", path.display());
-                    reports.push(report);
+                    for thinking in &plan.thinking {
+                        let arm = Arm {
+                            model: model.clone(),
+                            thinking: thinking.clone(),
+                            context: offered.context_window,
+                            sampling: instance.sampling.as_ref().map(ToString::to_string),
+                            rules: rules.then(rules_digest),
+                            extension: extension.then(extension_digest),
+                            lessons,
+                        };
+                        eprintln!("== {}", arm.label());
+                        let dirs = Dirs {
+                            scratch: &scratch.0,
+                            pi: &pi_dir,
+                            bin: &bin,
+                            target: &target_dir,
+                        };
+                        let report = run_arm(config, plan, &tools, &dirs, arm)?;
+                        let path = report.save(&config.eval_dir)?;
+                        eprintln!("   saved {}\n", path.display());
+                        reports.push(report);
+                    }
                 }
             }
         }
@@ -733,11 +952,22 @@ pub fn run(config: &Config, plan: &Plan) -> anyhow::Result<Vec<Report>> {
     Ok(reports)
 }
 
+/// The directories an arm runs in.
+struct Dirs<'a> {
+    /// Where each run's repositories go.
+    scratch: &'a Path,
+    /// Pi's agent directory for the arm.
+    pi: &'a Path,
+    /// The stub `gh`.
+    bin: &'a Path,
+    /// Cargo's build output.
+    target: &'a Path,
+}
+
 /// Directories and tools shared by every run in an arm.
 struct Bench<'a> {
     tools: &'a Tools,
-    pi_dir: &'a Path,
-    target_dir: &'a Path,
+    dirs: &'a Dirs<'a>,
     transcripts: PathBuf,
     timeout: Duration,
 }
@@ -746,24 +976,22 @@ fn run_arm(
     config: &Config,
     plan: &Plan,
     tools: &Tools,
-    scratch: &Path,
-    pi_dir: &Path,
-    target_dir: &Path,
+    dirs: &Dirs<'_>,
     arm: Arm,
 ) -> anyhow::Result<Report> {
     let started = crate::report::now_epoch();
     let id = format!(
-        "{}-{}-thinking-{}-rules-{}-extension-{}",
+        "{}-{}-thinking-{}-rules-{}-extension-{}-lessons-{}",
         crate::report::utc_compact(started),
         slug(&arm.model),
         arm.thinking,
         on_off(arm.rules.is_some()),
-        on_off(arm.extension.is_some())
+        on_off(arm.extension.is_some()),
+        arm.lessons.as_str()
     );
     let bench = Bench {
         tools,
-        pi_dir,
-        target_dir,
+        dirs,
         transcripts: runs_dir(&config.eval_dir).join(&id),
         timeout: plan.timeout,
     };
@@ -778,7 +1006,7 @@ fn run_arm(
                 runs.len() + 1,
                 format!("{} #{rep}", task.id)
             );
-            let dir = scratch.join(format!("{}-{rep}", task.id));
+            let dir = dirs.scratch.join(format!("{}-{rep}", task.id));
             let run = one(&bench, &arm, task, rep, &dir)?;
             std::fs::remove_dir_all(&dir).ok();
             let why = run.why();
@@ -830,9 +1058,14 @@ impl Repo {
         git(&work, &["commit", "-q", "-m", "Initial commit"])?;
 
         git(dir, &["init", "-q", "--bare", "-b", "main", "origin.git"])?;
+        git(&work, &["remote", "add", "origin", ORIGIN_URL])?;
         git(
             &work,
-            &["remote", "add", "origin", &origin.to_string_lossy()],
+            &[
+                "config",
+                &format!("url.{}.insteadOf", origin.display()),
+                ORIGIN_URL,
+            ],
         )?;
         git(&work, &["push", "-q", "-u", "origin", "main"])?;
 
@@ -929,10 +1162,14 @@ fn one(bench: &Bench<'_>, arm: &Arm, task: &Task, rep: u32, dir: &Path) -> anyho
         .args(["--provider", harness::PI_PROVIDER_ID, "--model", &arm.model])
         .args(["--thinking", &arm.thinking])
         .arg(task.prompt.trim())
-        .env("PI_CODING_AGENT_DIR", bench.pi_dir)
+        .env("PI_CODING_AGENT_DIR", bench.dirs.pi)
         .env("PI_OFFLINE", "1")
         .env("PI_SKIP_VERSION_CHECK", "1")
-        .env("CARGO_TARGET_DIR", bench.target_dir)
+        .env("AILOCAL_LESSONS", lessons_path(bench.dirs.pi))
+        .env("PATH", path_with(bench.dirs.bin)?)
+        // Outside the clone, so nothing the stub writes can be committed.
+        .env("GH_STUB_LOG", dir.join("gh"))
+        .env("CARGO_TARGET_DIR", bench.dirs.target)
         .stdin(Stdio::null())
         .stdout(std::fs::File::create(&events_path)?)
         .stderr(std::fs::File::create(dir.join("pi-stderr.txt"))?);
@@ -971,6 +1208,14 @@ fn one(bench: &Bench<'_>, arm: &Arm, task: &Task, rep: u32, dir: &Path) -> anyho
     })
 }
 
+/// This process's `PATH` with `bin` in front of it.
+fn path_with(bin: &Path) -> anyhow::Result<std::ffi::OsString> {
+    let rest = std::env::var_os("PATH").unwrap_or_default();
+    Ok(std::env::join_paths(
+        std::iter::once(bin.to_path_buf()).chain(std::env::split_paths(&rest)),
+    )?)
+}
+
 /// Keep the events a reader needs. The streaming deltas are a line per token, most of
 /// the file, and `message_end` carries the whole message they add up to.
 fn save_transcript(events: &str, path: &Path) -> anyhow::Result<()> {
@@ -1000,16 +1245,34 @@ fn score(
     transcript: &Transcript,
     dir: &Path,
 ) -> anyhow::Result<Vec<CheckResult>> {
-    let head = git(&repo.origin, &["rev-parse", "main"])?;
-    let pushed = head != repo.initial;
+    let branch = task.branch();
+    // A branch the agent never pushed is not there at all.
+    let head = git(
+        &repo.origin,
+        &[
+            "rev-parse",
+            "--verify",
+            "-q",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .ok();
+    let pushed = head.is_some_and(|head| head != repo.initial);
 
     let (done, tests, fmt, clippy) = if pushed {
         let clone = dir.join("check");
         git(
             dir,
-            &["clone", "-q", &repo.origin.to_string_lossy(), "check"],
+            &[
+                "clone",
+                "-q",
+                "-b",
+                branch,
+                &repo.origin.to_string_lossy(),
+                "check",
+            ],
         )?;
-        let cargo = |args: &[&str]| cargo(&clone, bench.target_dir, args);
+        let cargo = |args: &[&str]| cargo(&clone, bench.dirs.target, args);
 
         let tests = cargo(&["test"])?;
         let fmt = cargo(&["fmt", "--check"])?;
@@ -1061,6 +1324,14 @@ fn score(
         }
     };
 
+    let lesson = if task.pull_request {
+        follows_template(&dir.join("gh"))
+    } else {
+        Outcome::Skip {
+            why: "the task measures no lesson".to_owned(),
+        }
+    };
+
     Ok([
         (DONE, done),
         (
@@ -1069,7 +1340,7 @@ fn score(
                 Outcome::Pass
             } else {
                 Outcome::Fail {
-                    why: "origin/main never moved".to_owned(),
+                    why: format!("origin/{branch} never moved"),
                 }
             },
         ),
@@ -1078,6 +1349,7 @@ fn score(
         (CLIPPY, clippy),
         (TESTED_FIRST, tested_first),
         (NO_PYTHON_JSON, no_python_json),
+        (LESSON, lesson),
     ]
     .into_iter()
     .map(|(label, outcome)| CheckResult {
@@ -1086,6 +1358,48 @@ fn score(
         outcome,
     })
     .collect())
+}
+
+/// Whether the last pull request the stub `gh` opened has every heading of the
+/// template, in order. A heading counts by its words, so one at another level or
+/// without its emoji still does - a reviewer would take either.
+fn follows_template(log: &Path) -> Outcome {
+    let words = |line: &str| -> Vec<String> {
+        line.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_lowercase)
+            .collect()
+    };
+    let headings: Vec<&str> = TEMPLATE.lines().filter(|l| l.starts_with('#')).collect();
+
+    let opened = (1..)
+        .map(|n| log.join(format!("{n}.body")))
+        .take_while(|path| path.is_file())
+        .last();
+    let Some(body) = opened.and_then(|path| std::fs::read_to_string(path).ok()) else {
+        return Outcome::Fail {
+            why: "no pull request was opened".to_owned(),
+        };
+    };
+    let found: Vec<Vec<String>> = body
+        .lines()
+        .filter(|l| l.trim_start().starts_with('#'))
+        .map(words)
+        .collect();
+
+    let mut from = 0;
+    for heading in headings {
+        let wanted = words(heading);
+        match found[from..].iter().position(|f| *f == wanted) {
+            Some(at) => from += at + 1,
+            None => {
+                return Outcome::Fail {
+                    why: format!("the body has no `{heading}` where the template has it"),
+                };
+            }
+        }
+    }
+    Outcome::Pass
 }
 
 /// Run a cargo command in `dir` and judge it by its exit status.
@@ -1431,14 +1745,200 @@ mod tests {
             thinking: ailocal::gguf::Thinking::Toggle,
         };
 
-        write_pi_dir(&root.join("on"), &gateway, &model, true).unwrap();
+        let none = lesson_store(&[], Lessons::Off);
+        write_pi_dir(&root.join("on"), &gateway, &model, true, &none).unwrap();
         let installed = std::fs::read_to_string(root.join("on/extensions/ailocal.ts")).unwrap();
         assert_eq!(installed, harness::PI_EXTENSION);
 
-        write_pi_dir(&root.join("off"), &gateway, &model, false).unwrap();
+        write_pi_dir(&root.join("off"), &gateway, &model, false, &none).unwrap();
         assert!(root.join("off/auth.json").is_file());
         assert!(!root.join("off/extensions").exists());
+        // Written even when empty, or the extension would read the user's own.
+        let read = ailocal::lessons::Store::load(&lessons_path(&root.join("off"))).unwrap();
+        assert_eq!(read, none);
+        assert!(lessons_path(&root.join("off")).is_file());
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A seed that names a repository is only a test of scoping if it names this one
+    /// or plainly another, and a trigger that is blank would trip on everything.
+    #[test]
+    fn the_seeded_lessons_are_well_formed() {
+        let seeds = seeds().unwrap();
+        let here = ailocal::lessons::repo_id(ORIGIN_URL).unwrap();
+        assert_eq!(here, "github.com/slugkit/slugkit");
+
+        let mut ids = std::collections::HashSet::new();
+        for seed in &seeds {
+            assert!(ids.insert(seed.id.as_str()), "two lessons are {}", seed.id);
+            assert!(!seed.text.trim().is_empty());
+            for trigger in seed.commands.iter().chain(&seed.adds).chain(&seed.files) {
+                assert!(
+                    !trigger.trim().is_empty(),
+                    "{} has a blank trigger",
+                    seed.id
+                );
+            }
+        }
+        let repo = |id: &str| seeds.iter().find(|s| s.id == id).unwrap().repo.clone();
+        assert_eq!(repo("no-suppression").as_deref(), Some(here.as_str()));
+        assert!(repo("push-to-fork").is_some_and(|r| r != here));
+        assert!(
+            tasks()
+                .unwrap()
+                .iter()
+                .all(|t| !t.prompt.contains("template"))
+        );
+    }
+
+    #[test]
+    fn an_arm_starts_with_the_lessons_it_measures() {
+        let seeds = seeds().unwrap();
+        assert!(lesson_store(&seeds, Lessons::Off).lessons.is_empty());
+
+        let on = lesson_store(&seeds, Lessons::On);
+        assert_eq!(on.lessons.len(), seeds.len());
+        let template = on.lessons.iter().find(|l| l.id == "pr-template").unwrap();
+        assert_eq!(template.commands, ["gh pr create", "gh pr edit"]);
+        assert_eq!(template.state, ailocal::lessons::State::Active);
+
+        let prompt = lesson_store(&seeds, Lessons::Prompt);
+        assert_eq!(prompt.lessons.len(), seeds.len());
+        assert!(
+            prompt
+                .lessons
+                .iter()
+                .all(|l| l.commands.is_empty() && l.adds.is_empty() && l.files.is_empty())
+        );
+        assert!(prompt.lessons.iter().any(|l| l.repo.is_some()));
+    }
+
+    /// The clone pushes to origin through a URL that names a hosted repository, which
+    /// is what both `ailocal lessons add --here` and the extension read.
+    #[test]
+    fn the_agent_sees_a_hosted_origin_and_reaches_the_bare_one() {
+        let root = std::env::temp_dir().join(format!("ailocal-eval-origin-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let repo = Repo::create(&root, &[]).unwrap();
+        assert_eq!(
+            git(&repo.work, &["config", "--get", "remote.origin.url"]).unwrap(),
+            ORIGIN_URL
+        );
+        assert_eq!(
+            git(&repo.work, &["ls-remote", "origin", "main"]).unwrap(),
+            format!("{}\trefs/heads/main", repo.initial)
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The stub has to refuse what the real `gh` refuses with no terminal, or a run
+    /// is scored on a pull request that could never have been opened.
+    #[test]
+    fn the_stub_gh_opens_and_edits_pull_requests_as_gh_would() {
+        let root = std::env::temp_dir().join(format!("ailocal-eval-gh-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let repo = Repo::create(&root, &[]).unwrap();
+        let bin = root.join("bin");
+        write_gh(&bin).unwrap();
+        let log = root.join("gh");
+        let gh = |args: &[&str]| {
+            let out = Command::new(bin.join("gh"))
+                .args(args)
+                .current_dir(&repo.work)
+                .env("GH_STUB_LOG", &log)
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            let text = String::from_utf8_lossy(if out.status.success() {
+                &out.stdout
+            } else {
+                &out.stderr
+            });
+            (out.status.success(), text.trim().to_owned())
+        };
+        let body = |n: u32| std::fs::read_to_string(log.join(format!("{n}.body"))).unwrap();
+
+        git(&repo.work, &["checkout", "-q", "-b", "is-slug"]).unwrap();
+        git(
+            &repo.work,
+            &["commit", "-q", "--allow-empty", "-m", "Add is_slug\n\nWhy."],
+        )
+        .unwrap();
+        let (ok, said) = gh(&["pr", "create", "--title", "T"]);
+        assert!(
+            !ok && said.contains("when not running interactively"),
+            "{said}"
+        );
+        let (ok, said) = gh(&["pr", "create", "-t", "T", "-b", "B"]);
+        assert!(!ok && said.contains("must first push"), "{said}");
+
+        git(&repo.work, &["push", "-q", "-u", "origin", "is-slug"]).unwrap();
+        assert_eq!(
+            gh(&["pr", "create", "-t", "T", "-b", "## Summary\nx"]),
+            (true, "https://github.com/slugkit/slugkit/pull/1".to_owned())
+        );
+        assert_eq!(body(1), "## Summary\nx");
+        assert!(matches!(follows_template(&log), Outcome::Fail { .. }));
+
+        std::fs::write(root.join("body.md"), TEMPLATE).unwrap();
+        let file = root.join("body.md");
+        assert!(gh(&["pr", "edit", "--body-file", &file.to_string_lossy()]).0);
+        assert_eq!(body(1), TEMPLATE.trim_end());
+        assert_eq!(follows_template(&log), Outcome::Pass);
+
+        assert!(gh(&["pr", "create", "--fill"]).0);
+        assert_eq!(body(2), "Why.");
+        assert_eq!(
+            std::fs::read_to_string(log.join("2.head")).unwrap(),
+            "is-slug"
+        );
+        let (ok, shown) = gh(&["pr", "view", "1"]);
+        assert!(ok && shown.starts_with("title:\tT\n") && shown.ends_with("## ⚠️ Risks\n\n<!-- What could break, and for whom. Write \"None\" if nothing. -->"), "{shown}");
+        assert_eq!(
+            gh(&["pr", "list"]),
+            (
+                true,
+                "2\tAdd is_slug\tis-slug\tOPEN\n1\tT\tis-slug\tOPEN".to_owned()
+            )
+        );
+        assert!(!gh(&["pr", "merge", "1"]).0);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_body_follows_the_template_by_its_headings_in_order() {
+        let log = std::env::temp_dir().join(format!("ailocal-eval-body-{}", std::process::id()));
+        std::fs::create_dir_all(&log).unwrap();
+        let judge = |body: &str| {
+            std::fs::write(log.join("1.body"), body).unwrap();
+            follows_template(&log)
+        };
+
+        assert_eq!(judge(TEMPLATE), Outcome::Pass);
+        assert_eq!(
+            judge(
+                "### Purpose\nso\n## What changed\n- a\n## How it was verified\ncargo test\n\
+                 ## Risks\nNone"
+            ),
+            Outcome::Pass
+        );
+        let Outcome::Fail { why } = judge("## Summary\nx\n## Changes\n- a\n## Testing\nok") else {
+            panic!("a body of its own passed");
+        };
+        assert_eq!(
+            why,
+            "the body has no `## 🎯 Purpose` where the template has it"
+        );
+        let reordered = "## 🔍 What changed\n## 🎯 Purpose\n## 🧪 How it was verified\n## ⚠️ Risks";
+        assert!(matches!(judge(reordered), Outcome::Fail { .. }));
+
+        std::fs::remove_dir_all(&log).ok();
+        assert_eq!(
+            follows_template(&log),
+            Outcome::Fail {
+                why: "no pull request was opened".to_owned()
+            }
+        );
     }
 
     #[test]
@@ -1567,6 +2067,7 @@ mod tests {
                 sampling: None,
                 rules: None,
                 extension: None,
+                lessons: Lessons::Off,
             },
             suite: digest(),
             runs: vec![
@@ -1580,7 +2081,7 @@ mod tests {
 
         let table = summary_table(&[&report]);
         assert!(
-            table.contains("m (thinking off, rules off, extension off)"),
+            table.contains("m (thinking off, rules off, extension off, lessons off)"),
             "{table}"
         );
         assert!(table.contains("50%"), "{table}");

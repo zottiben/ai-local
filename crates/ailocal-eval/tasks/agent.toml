@@ -11,6 +11,38 @@
 # `accept` is an integration test added to a clone of origin after the run. It decides
 # whether the task was done; the repository's own checks decide whether CI would pass.
 
+# The lessons a run starts with under `--lessons`, as if the user had corrected the
+# model before. No prompt names one. Most should do nothing in most tasks, so they also
+# measure what lessons cost: `push-to-fork` would hold every push if a lesson for
+# another repository leaked into this one, and `opt-in-parameter` pulls against a task
+# that asks for a new function.
+
+[[lesson]]
+id = "pr-template"
+text = "Before writing a pull request body, read the repository's pull request template in .github/ and use its headings, in order, as the structure of the body."
+commands = ["gh pr create", "gh pr edit"]
+
+[[lesson]]
+id = "no-suppression"
+repo = "github.com/slugkit/slugkit"
+text = "Fix a compiler or clippy warning at its cause. Never add #[allow(...)] or #[expect(...)] to silence one; if the fix looks wrong, stop and say why."
+adds = ["#[allow(", "#[expect("]
+
+[[lesson]]
+id = "push-to-fork"
+repo = "github.com/acme/webapp"
+text = "Push branches to your fork, never to origin."
+commands = ["git push"]
+
+[[lesson]]
+id = "publish-from-ci"
+text = "Never publish a package from your own machine: the release workflow publishes on a tag."
+commands = ["cargo publish", "npm publish"]
+
+[[lesson]]
+id = "opt-in-parameter"
+text = "Prefer an opt-in parameter on an existing function to a new function that does nearly the same thing."
+
 [[task]]
 id = "trailing-dash"
 prompt = '''
@@ -73,6 +105,31 @@ accept = '''
 #[test]
 fn version_is_the_newest_release_not_yanked() {
 	assert_eq!(env!("CARGO_PKG_VERSION"), "2.12.4");
+}
+'''
+
+# The repository has a pull request template, which the prompt does not mention. The
+# body is scored against it, as a reviewer would read it.
+[[task]]
+id = "pull-request"
+branch = "is-slug"
+pull_request = true
+prompt = '''
+Add a public function is_slug(text: &str) -> bool that says whether text is already a slug: not empty, only lowercase ASCII letters, digits and single dashes, and no dash at either end. Do it on a new branch named is-slug, push the branch, and open a pull request for it with gh.
+'''
+accept = '''
+use slugkit::is_slug;
+
+#[test]
+fn knows_a_slug_when_it_sees_one() {
+	assert!(is_slug("hello-world"));
+	assert!(is_slug("v2"));
+	assert!(!is_slug(""));
+	assert!(!is_slug("Hello"));
+	assert!(!is_slug("hello--world"));
+	assert!(!is_slug("-hello"));
+	assert!(!is_slug("hello-"));
+	assert!(!is_slug("héllo"));
 }
 '''
 

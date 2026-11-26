@@ -1,0 +1,97 @@
+#!/bin/sh
+# gh, as far as `ailocal eval agent` needs it: opens and edits pull requests by
+# writing them under $GH_STUB_LOG, one numbered title, head and body each, shows
+# them again, and refuses what the real one refuses without a terminal.
+
+set -u
+log=${GH_STUB_LOG:?}
+opened() { ls "$log" 2>/dev/null | grep -c '\.head$'; }
+
+case "${1:-} ${2:-}" in
+"auth status")
+	echo "github.com: logged in as slugkit-bot"
+	exit 0
+	;;
+"pr list")
+	n=$(opened)
+	while [ "$n" -gt 0 ]; do
+		printf '%s\t%s\t%s\tOPEN\n' "$n" "$(cat "$log/$n.title")" "$(cat "$log/$n.head")"
+		n=$((n - 1))
+	done
+	exit 0
+	;;
+"pr view")
+	n=${3:-$(opened)}
+	if [ ! -f "$log/$n.head" ]; then
+		echo "no pull requests found for this branch" >&2
+		exit 1
+	fi
+	printf 'title:\t%s\nstate:\tOPEN\nnumber:\t%s\n--\n%s\n' \
+		"$(cat "$log/$n.title")" "$n" "$(cat "$log/$n.body")"
+	exit 0
+	;;
+"pr create" | "pr edit") ;;
+*)
+	echo "gh $*: only \`gh pr create\`, \`edit\`, \`view\` and \`list\` work here" >&2
+	exit 1
+	;;
+esac
+command=$2
+shift 2
+
+number= title= body= has_body= fill= head=
+if [ "$command" = edit ] && [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+	number=$1
+	shift
+fi
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-t | --title) title=$2; shift 2 ;;
+	--title=*) title=${1#*=}; shift ;;
+	-b | --body) body=$2; has_body=1; shift 2 ;;
+	--body=*) body=${1#*=}; has_body=1; shift ;;
+	-F | --body-file)
+		if [ "$2" = - ]; then body=$(cat); else body=$(cat "$2") || exit 1; fi
+		has_body=1
+		shift 2
+		;;
+	--body-file=*) body=$(cat "${1#*=}") || exit 1; has_body=1; shift ;;
+	-f | --fill | --fill-first | --fill-verbose) fill=1; shift ;;
+	-H | --head) head=$2; shift 2 ;;
+	-B | --base | -a | --assignee | -l | --label | -r | --reviewer | -m | --milestone) shift 2 ;;
+	*) shift ;;
+	esac
+done
+
+mkdir -p "$log"
+if [ "$command" = edit ]; then
+	number=${number:-$(opened)}
+	if [ ! -f "$log/$number.head" ]; then
+		echo "no pull requests found for this branch" >&2
+		exit 1
+	fi
+	[ -n "$title" ] && printf '%s' "$title" >"$log/$number.title"
+	[ -n "$has_body" ] && printf '%s' "$body" >"$log/$number.body"
+	echo "https://github.com/slugkit/slugkit/pull/$number"
+	exit 0
+fi
+
+if [ -z "$has_body" ] && [ -z "$fill" ]; then
+	echo "must provide \`--title\` and \`--body\` (or \`--fill\`) when not running interactively" >&2
+	exit 1
+fi
+head=${head:-$(git rev-parse --abbrev-ref HEAD)}
+if ! git ls-remote --exit-code --heads origin "$head" >/dev/null 2>&1; then
+	echo "aborted: you must first push the current branch to a remote, or use the --head flag" >&2
+	exit 1
+fi
+if [ -n "$fill" ] && [ -z "$has_body" ]; then
+	title=${title:-$(git log -1 --format=%s)}
+	body=$(git log -1 --format=%b)
+fi
+
+number=$(($(opened) + 1))
+printf '%s' "$head" >"$log/$number.head"
+printf '%s' "$title" >"$log/$number.title"
+printf '%s' "$body" >"$log/$number.body"
+echo "https://github.com/slugkit/slugkit/pull/$number"
