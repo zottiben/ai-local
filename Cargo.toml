@@ -42,7 +42,10 @@ reqwest = { version = "0.13.5", default-features = false, features = [
 # forbidding unsafe.
 rustix = { version = "1", features = ["fs", "process"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order: llama.cpp generates an object's properties in the order its JSON
+# schema lists them, and a sorted map put every schema the gateway forwarded into
+# alphabetical order - a model asked for its reason and then its answer answered first.
+serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 toml = "1"

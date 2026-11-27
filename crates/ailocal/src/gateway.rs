@@ -912,6 +912,23 @@ mod tests {
         body
     }
 
+    /// llama.cpp generates an object's properties in the order its schema lists them,
+    /// so a harness that asks for a reason before an answer must get them in that order.
+    /// Measured through the gateway before this held: `answer` came first.
+    #[test]
+    fn a_schema_keeps_the_order_its_client_gave() {
+        let raw = br#"{"model": "m", "messages": [], "response_format": {"type": "json_schema",
+            "json_schema": {"name": "a", "schema": {"type": "object",
+            "properties": {"reason": {"type": "string"}, "answer": {"type": "string"}}}}}}"#;
+        let mut payload: serde_json::Value = serde_json::from_slice(raw).unwrap();
+        apply_thinking_request(&mut payload);
+        let sent = String::from_utf8(serde_json::to_vec(&payload).unwrap()).unwrap();
+        assert!(
+            sent.find("\"reason\"").unwrap() < sent.find("\"answer\"").unwrap(),
+            "{sent}"
+        );
+    }
+
     /// Measured against llama-server: it ignores `reasoning_effort` outright, and acts
     /// only on `chat_template_kwargs`. Without this translation a harness's thinking
     /// control does nothing at all, which is indistinguishable from the model refusing
