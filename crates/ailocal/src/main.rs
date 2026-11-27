@@ -1632,11 +1632,12 @@ fn lessons_capture(model: Option<String>) -> anyhow::Result<()> {
     let (path, progress) = (lessons::path()?, capture::Progress::path()?);
     let files = capture::session_files()?;
     if !progress.exists() {
-        println!(
-            "Reading all {} of Pi's sessions for the first time, with {}.",
-            files.len(),
-            distiller.name()
-        );
+        let name = distiller.name();
+        match files.len() {
+            0 => println!("Pi has kept no sessions to learn from yet."),
+            1 => println!("Reading Pi's one session for the first time, with {name}."),
+            n => println!("Reading all {n} of Pi's sessions for the first time, with {name}."),
+        }
     }
 
     let (mut read, mut learned, mut repeated) = (0, 0, 0);
