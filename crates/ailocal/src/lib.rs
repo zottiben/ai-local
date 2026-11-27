@@ -5,9 +5,11 @@
 
 pub mod anthropic;
 pub mod auth;
+pub mod capture;
 pub mod catalogue;
 pub mod config;
 pub mod device;
+pub mod distill;
 pub mod download;
 pub mod extras;
 pub mod gateway;

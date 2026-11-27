@@ -225,6 +225,7 @@ fn lesson_store(seeds: &[Seed], lessons: Lessons) -> ailocal::lessons::Store {
                     state: ailocal::lessons::State::Active,
                     source: "ailocal eval agent".to_owned(),
                     created: 0,
+                    corrections: Vec::new(),
                 }
             })
             .collect(),
@@ -605,7 +606,7 @@ struct Tools {
 
 impl Tools {
     fn find() -> anyhow::Result<Self> {
-        let pi = find_pi()?;
+        let pi = ailocal::harness::find_pi()?;
         let pi_version = version(Command::new(&pi).arg("--version"))
             .with_context(|| format!("running {} --version", pi.display()))?;
 
@@ -643,25 +644,6 @@ fn version(command: &mut Command) -> anyhow::Result<String> {
         .unwrap_or_default()
         .trim()
         .to_owned())
-}
-
-/// Pi, on `PATH` or where its installer puts it.
-fn find_pi() -> anyhow::Result<PathBuf> {
-    let on_path = std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
-        .unwrap_or_default();
-    let managed = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".pi/agent/bin"));
-
-    on_path
-        .into_iter()
-        .chain(managed)
-        .map(|dir| dir.join("pi"))
-        .find(|p| p.is_file())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "pi is not on PATH or in ~/.pi/agent/bin; install it from https://pi.dev"
-            )
-        })
 }
 
 /// Instruction files Pi would load into every run from above `dir`.

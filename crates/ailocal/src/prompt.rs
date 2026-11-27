@@ -86,10 +86,6 @@ pub fn parse_choice(input: &str, len: usize) -> Option<usize> {
 
 /// Ask for a line of text, falling back to `default` on an empty answer.
 ///
-/// Expands a leading `~/`, because someone typing a path at a prompt is not running a
-/// shell and will not get it expanded for them - and a literal `~` directory appearing
-/// in the home directory is a confusing way to find that out.
-///
 /// # Errors
 /// If the terminal cannot be read.
 pub fn ask(question: &str, default: &str) -> anyhow::Result<String> {
@@ -102,8 +98,19 @@ pub fn ask(question: &str, default: &str) -> anyhow::Result<String> {
     Ok(if answer.is_empty() {
         default.to_owned()
     } else {
-        expand_home(answer)
+        answer.to_owned()
     })
+}
+
+/// Ask for a path, as [`ask`] does, expanding a leading `~/`: someone typing a path at
+/// a prompt is not running a shell and will not get it expanded for them - and a
+/// literal `~` directory appearing in the home directory is a confusing way to find
+/// that out.
+///
+/// # Errors
+/// If the terminal cannot be read.
+pub fn ask_path(question: &str, default: &str) -> anyhow::Result<String> {
+    Ok(expand_home(&ask(question, default)?))
 }
 
 /// Expand a leading `~` against `HOME`.

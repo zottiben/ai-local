@@ -268,6 +268,42 @@ expands `insteadOf`: the eval's clone has a GitHub URL mapped onto a bare reposi
 and only the configured form keeps a repository's lessons applying there.
 `lessons::repo_id` and the extension's `repoId` are both tested on `pi/remotes.json`.
 
+### 7d. Lessons are learned from Pi's sessions, by the model ailocal serves
+`capture` reads the session files Pi has already written, from the byte offset it
+reached last time (`lessons-read.json`), and never hooks into a live session. A file's
+offset moves only once every correction in it got an answer, so one the distiller
+failed on is asked again rather than lost.
+
+The distiller is the served model by default, so capture works with no frontier
+provider at all; `--model` asks one of Pi's through `pi -p`. That path must not pass
+`--no-extensions` (`claude-subscription` *is* an extension, and the model is then "not
+found"), and puts the instructions in the message, because that provider ignored
+`--system-prompt`.
+
+**Ask a local model one thing per call.** Asked "lesson, repeat or none" with the kept
+lessons in view, qwen3.6-35b-a3b called seven unrelated corrections in a row repeats of
+the first lesson it wrote. `distill` therefore asks whether the message teaches a
+lesson, and only for a draft whether it is one already kept.
+
+**A schema's property order is the order the model thinks in.** llama.cpp generates
+fields in the order the schema lists them, and serde_json sorted them until the
+workspace turned on `preserve_order` - so the distiller wrote its lesson and triggers
+before its reason, and its verdict last. Keep `reason` first, and never drop that
+feature: the gateway forwards clients' schemas through the same maps.
+
+The person's review is the precision step, so the distiller is tuned for recall. A
+third question, whether a draft is a standing rule, took precision on 136 labelled
+corrections from 68% to 95% and recall from 67% to 43%; it is not asked. Thinking
+stays off: with it an answer took 25-50 s instead of about 4, and on the seven
+corrections it was tried on, that check let more task instructions through, not fewer.
+
+The gateway's pass runs only while every slot is idle, stops before the next
+correction once one is busy, and sends `id_slot` for the idle slot holding the fewest
+tokens - any other slot may hold the cache of a session the user will come back to.
+
+The labelled corrections that measure the distiller quote the user's real sessions,
+so they live under `target/`, never in the repository. Tests use made-up sessions.
+
 ### 8. Retrieval for facts, fine-tuning for behaviour
 Codebase knowledge is a retrieval problem, not a QLoRA problem. An adapter trained on a
 repo produces confident wrong API signatures and is stale on the next commit. No

@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use ailocal::{
-    auth, config::Config, download, extras, gateway, harness, install, lessons, registry,
-    registry::Fit, serve, service, setup, source::Source, vram,
+    auth, capture, config::Config, distill, download, extras, gateway, harness, install, lessons,
+    registry, registry::Fit, serve, service, setup, source::Source, vram,
 };
 use clap::{Args, Parser, Subcommand};
 
@@ -165,6 +165,29 @@ enum LessonsCmd {
     Add(LessonAddArgs),
     /// Delete a lesson.
     Rm { id: String },
+    /// Learn lessons from your messages in Pi's sessions, for you to review.
+    ///
+    /// Reads what Pi has written since the last time - the first time, every session
+    /// it has kept - and asks a model which of your corrections teach something to
+    /// keep. What it learns waits for `ailocal lessons review`.
+    Capture {
+        /// Ask this model of Pi's instead of the one ailocal serves, as `provider/id`,
+        /// e.g. claude-subscription/claude-haiku-5-5.
+        #[arg(long, value_name = "PROVIDER/ID")]
+        model: Option<String>,
+    },
+    /// Go through the pending lessons, accepting, editing or rejecting each.
+    Review,
+    /// Accept pending lessons, so local models get them.
+    Accept {
+        #[arg(required = true)]
+        ids: Vec<String>,
+    },
+    /// Reject lessons. They are kept, so that capture does not propose them again.
+    Reject {
+        #[arg(required = true)]
+        ids: Vec<String>,
+    },
 }
 
 #[derive(Args)]
@@ -386,6 +409,10 @@ fn main() -> anyhow::Result<()> {
         Command::Lessons(LessonsCmd::Ls) => lessons_ls(),
         Command::Lessons(LessonsCmd::Add(args)) => lessons_add(args),
         Command::Lessons(LessonsCmd::Rm { id }) => lessons_rm(&id),
+        Command::Lessons(LessonsCmd::Capture { model }) => lessons_capture(model),
+        Command::Lessons(LessonsCmd::Review) => lessons_review(),
+        Command::Lessons(LessonsCmd::Accept { ids }) => lessons_set(&ids, lessons::State::Active),
+        Command::Lessons(LessonsCmd::Reject { ids }) => lessons_set(&ids, lessons::State::Rejected),
         Command::Extras(ExtrasCmd::List) => extras_list(),
         Command::Extras(ExtrasCmd::Install { name }) => extras_install(&name),
         Command::Extras(ExtrasCmd::Remove { name }) => extras_remove(&name),
@@ -1022,6 +1049,22 @@ fn status() -> anyhow::Result<()> {
         }
     );
 
+    let store = lessons::Store::load(&lessons::path()?)?;
+    let count = |state| store.lessons.iter().filter(|l| l.state == state).count();
+    let (active, pending) = (
+        count(lessons::State::Active),
+        count(lessons::State::Pending),
+    );
+    if pending > 0 {
+        let wait = if pending == 1 { "waits" } else { "wait" };
+        println!(
+            "-     lessons     {active} active, {pending} learned from your corrections {wait} \
+             for you: `ailocal lessons review`"
+        );
+    } else if active > 0 {
+        println!("ok    lessons     {active} active");
+    }
+
     match o.next.describe() {
         Some(line) => println!("\n{line}"),
         None => println!("\nEverything is in place."),
@@ -1487,27 +1530,11 @@ fn lessons_ls() -> anyhow::Result<()> {
         State::Rejected => 2,
     });
     for lesson in &all {
-        let mut head = vec![
-            lesson.id.clone(),
-            lesson
-                .repo
-                .clone()
-                .unwrap_or_else(|| "everywhere".to_owned()),
-        ];
+        let mut head = describe(lesson);
         if lesson.state != State::Active {
-            head.push(lesson.state.as_str().to_owned());
+            head.push_str(&format!("  {}", lesson.state.as_str()));
         }
-        let holds: Vec<String> = lesson
-            .commands
-            .iter()
-            .map(|c| format!("`{c}`"))
-            .chain(lesson.adds.iter().map(|a| format!("edits adding `{a}`")))
-            .chain(lesson.files.iter().map(|f| format!("edits to `{f}`")))
-            .collect();
-        if !holds.is_empty() {
-            head.push(format!("holds {}", holds.join(", ")));
-        }
-        println!("{}\n  {}\n", head.join("  "), lesson.text);
+        println!("{head}\n  {}\n", lesson.text);
     }
     let active = all.iter().filter(|l| l.state == State::Active).count();
     println!("{active} of {} active, in {}", all.len(), path.display());
@@ -1535,6 +1562,7 @@ fn lessons_add(args: LessonAddArgs) -> anyhow::Result<()> {
         created: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
+        corrections: Vec::new(),
     })?;
     store.save(&path)?;
 
@@ -1579,6 +1607,201 @@ fn lessons_rm(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn lessons_capture(model: Option<String>) -> anyhow::Result<()> {
+    use capture::Outcome;
+    use std::io::Write as _;
+
+    let distiller = match model {
+        Some(model) => distill::Distiller::Pi {
+            pi: harness::find_pi()?,
+            model,
+        },
+        None => {
+            let instance = serve::running()?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no model is running to learn with; start one with `ailocal serve <name>`, \
+                     or name one of Pi's with --model <provider/id>"
+                )
+            })?;
+            distill::Distiller::Local {
+                base: instance.base_url(),
+                model: instance.model,
+            }
+        }
+    };
+    let (path, progress) = (lessons::path()?, capture::Progress::path()?);
+    let files = capture::session_files()?;
+    if !progress.exists() {
+        println!(
+            "Reading all {} of Pi's sessions for the first time, with {}.",
+            files.len(),
+            distiller.name()
+        );
+    }
+
+    let (mut read, mut learned, mut repeated) = (0, 0, 0);
+    let counting = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    capture::pass(
+        &distiller,
+        &files,
+        &path,
+        &progress,
+        || true,
+        |candidate, outcome| {
+            read += 1;
+            if counting {
+                eprint!("\r\x1b[K");
+            }
+            match outcome {
+                Outcome::Learned(id) => {
+                    learned += 1;
+                    println!("learned  {id}");
+                }
+                Outcome::Repeated(id) => {
+                    repeated += 1;
+                    println!("again    {id}");
+                }
+                Outcome::Nothing => {}
+                Outcome::Failed(e) => eprintln!(
+                    "could not read {} in {}: {e:#}",
+                    candidate.entry,
+                    candidate.session.display()
+                ),
+            }
+            if counting {
+                eprint!("{read} of your messages read");
+                std::io::stderr().flush().ok();
+            }
+        },
+    )?;
+    if counting {
+        eprint!("\r\x1b[K");
+    }
+
+    let noun = |n| if n == 1 { "lesson" } else { "lessons" };
+    println!(
+        "{read} of your messages read: {learned} new {}, {repeated} taught again",
+        noun(learned)
+    );
+    let pending = lessons::Store::load(&path)?
+        .lessons
+        .iter()
+        .filter(|l| l.state == lessons::State::Pending)
+        .count();
+    if pending > 0 {
+        let wait = if pending == 1 { "waits" } else { "wait" };
+        println!(
+            "{pending} {} {wait} for you: `ailocal lessons review`",
+            noun(pending)
+        );
+    }
+    Ok(())
+}
+
+fn lessons_review() -> anyhow::Result<()> {
+    use lessons::State;
+
+    let path = lessons::path()?;
+    let mut queue: Vec<lessons::Lesson> = lessons::Store::load(&path)?
+        .lessons
+        .into_iter()
+        .filter(|l| l.state == State::Pending)
+        .collect();
+    if queue.is_empty() {
+        println!("no lessons wait for review");
+        return Ok(());
+    }
+    // The most corrected first: those are the ones that cost the most steering.
+    queue.sort_by_key(|l| std::cmp::Reverse(l.corrections.len()));
+
+    let total = queue.len();
+    for (n, lesson) in queue.into_iter().enumerate() {
+        println!("\n[{}/{total}] {}", n + 1, describe(&lesson));
+        println!("  {}", lesson.text);
+        for c in lesson.corrections.iter().rev().take(3) {
+            println!("    {}  \"{}\"", c.at.get(..10).unwrap_or(&c.at), c.said);
+        }
+
+        let mut options = vec!["Accept".to_owned()];
+        if lesson.repo.is_some() {
+            options.push("Accept for every repository".to_owned());
+        }
+        if !(lesson.commands.is_empty() && lesson.adds.is_empty() && lesson.files.is_empty()) {
+            options.push("Accept without its holds".to_owned());
+        }
+        options.extend(["Edit, then accept", "Reject", "Skip"].map(str::to_owned));
+        let Some(choice) = ailocal::prompt::choose("What should happen to it?", &options)? else {
+            break;
+        };
+
+        let mut store = lessons::Store::load(&path)?;
+        let Ok(kept) = store.lesson_mut(&lesson.id) else {
+            continue;
+        };
+        match options[choice].as_str() {
+            "Accept" => kept.state = State::Active,
+            "Accept for every repository" => {
+                kept.repo = None;
+                kept.state = State::Active;
+            }
+            "Accept without its holds" => {
+                kept.commands.clear();
+                kept.adds.clear();
+                kept.files.clear();
+                kept.state = State::Active;
+            }
+            "Edit, then accept" => {
+                let text = ailocal::prompt::ask("The lesson", &kept.text)?;
+                kept.text = text.trim().to_owned();
+                kept.state = State::Active;
+            }
+            "Reject" => kept.state = State::Rejected,
+            _ => continue,
+        }
+        println!("  {}", kept.state.as_str());
+        store.save(&path)?;
+    }
+    Ok(())
+}
+
+/// Where a lesson applies and what it holds, on one line.
+fn describe(lesson: &lessons::Lesson) -> String {
+    let mut head = vec![
+        lesson.id.clone(),
+        lesson
+            .repo
+            .clone()
+            .unwrap_or_else(|| "everywhere".to_owned()),
+    ];
+    let holds: Vec<String> = lesson
+        .commands
+        .iter()
+        .map(|c| format!("`{c}`"))
+        .chain(lesson.adds.iter().map(|a| format!("edits adding `{a}`")))
+        .chain(lesson.files.iter().map(|f| format!("edits to `{f}`")))
+        .collect();
+    if !holds.is_empty() {
+        head.push(format!("holds {}", holds.join(", ")));
+    }
+    if !lesson.corrections.is_empty() {
+        head.push(format!("taught {}x", lesson.corrections.len()));
+    }
+    head.join("  ")
+}
+
+fn lessons_set(ids: &[String], state: lessons::State) -> anyhow::Result<()> {
+    let path = lessons::path()?;
+    let mut store = lessons::Store::load(&path)?;
+    for id in ids {
+        store.lesson_mut(id)?.state = state;
+    }
+    store.save(&path)?;
+    for id in ids {
+        println!("{}  {id}", state.as_str());
+    }
+    Ok(())
+}
+
 fn resolve_data_dir(args: &SetupArgs) -> anyhow::Result<Config> {
     let path = Config::path()?;
     let mut cfg = Config::load()?;
@@ -1601,7 +1824,7 @@ fn resolve_data_dir(args: &SetupArgs) -> anyhow::Result<Config> {
              \x20  {default} has {} free.",
             ailocal::free_mib(&cfg.data_dir).map_or_else(|| "?".into(), ailocal::format_mib)
         );
-        let answer = ailocal::prompt::ask("   Data directory", &default)?;
+        let answer = ailocal::prompt::ask_path("   Data directory", &default)?;
         cfg.set_data_dir(std::path::PathBuf::from(answer));
     }
 
@@ -1995,6 +2218,14 @@ fn gateway_run(host: &str, port: u16, log_requests: bool) -> anyhow::Result<()> 
         request_log,
         config,
         client: gateway::upstream_client()?,
+    });
+
+    // Lessons are for the Pi extension to give, so they are learned while it is there.
+    let watched = Arc::clone(&state);
+    std::thread::spawn(move || {
+        capture::keep_capturing(|| {
+            watched.config.get().agent_rules && harness::is_configured("pi")
+        });
     });
 
     let runtime = tokio::runtime::Builder::new_multi_thread()

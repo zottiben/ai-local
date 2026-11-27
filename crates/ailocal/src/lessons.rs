@@ -52,11 +52,26 @@ pub struct Lesson {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
     pub state: State,
-    /// Where it came from: the correction it was learned from, or that a person wrote it.
+    /// Who wrote it: a person, or the model that distilled it from a correction.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source: String,
     /// When it was made, in seconds since the Unix epoch.
     pub created: u64,
+    /// The person's messages it was learned from, and every one that taught it again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub corrections: Vec<Correction>,
+}
+
+/// A message of the person's in a Pi session that taught a lesson.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Correction {
+    pub session: PathBuf,
+    /// Its entry in the session file.
+    pub entry: String,
+    /// When it was said, as Pi wrote it.
+    pub at: String,
+    /// What was said, cut short.
+    pub said: String,
 }
 
 /// Only an active lesson reaches a model. A rejected one is kept so that the same
@@ -150,6 +165,26 @@ impl Store {
         Ok(id)
     }
 
+    /// The lesson with this id.
+    ///
+    /// # Errors
+    /// If there is none.
+    pub fn lesson_mut(&mut self, id: &str) -> anyhow::Result<&mut Lesson> {
+        self.lessons
+            .iter_mut()
+            .find(|l| l.id == id)
+            .ok_or_else(|| no_lesson(id))
+    }
+
+    /// Whether this message of the person's has taught a lesson already.
+    #[must_use]
+    pub fn has_learned_from(&self, session: &Path, entry: &str) -> bool {
+        self.lessons
+            .iter()
+            .flat_map(|l| &l.corrections)
+            .any(|c| c.session == session && c.entry == entry)
+    }
+
     /// Remove a lesson, returning it.
     ///
     /// # Errors
@@ -159,9 +194,7 @@ impl Store {
             .lessons
             .iter()
             .position(|l| l.id == id)
-            .ok_or_else(|| {
-                anyhow::anyhow!("there is no lesson {id:?}; `ailocal lessons ls` lists them")
-            })?;
+            .ok_or_else(|| no_lesson(id))?;
         Ok(self.lessons.remove(index))
     }
 
@@ -175,6 +208,10 @@ impl Store {
             .find(|id| !taken(id))
             .expect("an unbounded range has a free number")
     }
+}
+
+fn no_lesson(id: &str) -> anyhow::Error {
+    anyhow::anyhow!("there is no lesson {id:?}; `ailocal lessons ls` lists them")
 }
 
 /// Words that say nothing about which lesson it is.
@@ -242,6 +279,7 @@ mod tests {
             state: State::Active,
             source: String::new(),
             created: 1_795_600_000,
+            corrections: Vec::new(),
         }
     }
 

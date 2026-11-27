@@ -265,6 +265,49 @@ Lessons are kept beside the config in `lessons.json`, and the extension reads th
 every prompt, so a new one applies from the next. Like everything else in the
 extension, they reach local models only.
 
+#### Lessons it learns from you
+
+Writing each lesson down is the steering this is meant to save, so ailocal also learns
+them from what you already said. It reads the sessions Pi keeps, finds your messages
+that answer something the agent did and read like a correction - "why didn't you",
+"again", "don't" - and asks a model whether each one teaches a rule worth keeping. A
+correction you gave Opus teaches a local model too.
+
+```sh
+ailocal lessons capture                    # read what Pi wrote since the last time
+ailocal lessons review                     # accept, edit or reject each lesson it found
+ailocal lessons accept <id>... / reject <id>...
+```
+
+- Nothing it learns applies until you accept it. `review` shows each lesson with the
+  messages it came from, most corrected first, and can accept one for every
+  repository, or without its triggers.
+- Saying it again does not make a second lesson: a correction that teaches one you
+  already have is added to that lesson as one more time you said it. A rejected
+  lesson stays rejected, so capture does not offer it again.
+- The model is the one ailocal serves, so nothing leaves the machine.
+  `--model provider/id` asks one of Pi's models instead, through `pi`.
+- While the gateway runs, with agent rules on and Pi configured, it captures every ten
+  minutes on its own - only while the model has nothing else to do, stopping as soon
+  as a request comes in, and in the slot whose cache is the smallest, so a session
+  you will come back to keeps its cache. `ailocal status` says when lessons are
+  waiting for you.
+
+Measured on 136 corrections from real sessions, labelled by hand, qwen3.6-35b-a3b
+found 67% of the lessons in them, and 68% of what it proposed was a lesson - the rest
+is what `review` is for. Asked whether each draft was really a standing rule, it
+proposed almost nothing false (95%) but found only 43%, so it is not asked: nothing
+applies until you accept it, and a lesson never found is steering you keep doing.
+
+Only messages that read like a correction are read at all, and about half of the
+messages that teach a lesson do not: "push it, I'll open the PR" says a rule without
+saying it is one. Reading the other messages too found more of them, but proposed two
+false lessons for each, so to be sure a rule is learned, say it as one - "don't",
+"never", "you didn't", "in future".
+
+A lesson keeps the words of the corrections it came from, so `lessons.json` holds
+quotes of what you said to agents.
+
 ### A house rule for every harness
 
 Harnesses build their own system prompt and have no notion of a per-machine one, so the

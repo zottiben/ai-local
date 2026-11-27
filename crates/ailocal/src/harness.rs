@@ -59,6 +59,29 @@ pub fn pi_models_json_path() -> anyhow::Result<PathBuf> {
     pi_file("models.json")
 }
 
+/// The `pi` to run: on `PATH`, or where Pi's installer puts it, which a service's
+/// `PATH` does not reach.
+///
+/// # Errors
+/// If there is neither.
+pub fn find_pi() -> anyhow::Result<PathBuf> {
+    let on_path = std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let managed = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".pi/agent/bin"));
+
+    on_path
+        .into_iter()
+        .chain(managed)
+        .map(|dir| dir.join("pi"))
+        .find(|p| p.is_file())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "pi is not on PATH or in ~/.pi/agent/bin; install it from https://pi.dev"
+            )
+        })
+}
+
 /// Path to our extension in Pi's global extension directory.
 ///
 /// # Errors
