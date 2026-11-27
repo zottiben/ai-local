@@ -242,7 +242,7 @@ gives a local model at the moment it applies, rather than once at the top of a l
 context:
 
 ```sh
-ailocal lessons add "Before writing a PR body, read the template in .github/ and use its headings" \
+ailocal lessons add "Before writing a pull request body, read the template in .github/ and use its headings in order" \
   --command "gh pr create" --command "gh pr edit"
 ailocal lessons add --here --adds eslint-disable \
   "Fix a lint error at its cause. Never add eslint-disable; if the rule looks wrong, stop and ask."
@@ -250,12 +250,14 @@ ailocal lessons ls
 ailocal lessons rm <id>
 ```
 
-- With each prompt, the extension adds the three lessons that share the most words with
-  it, and none when nothing does - "hello?" gets no lessons.
+- With each prompt, the extension adds up to three lessons whose text shares at least
+  two telling words with it - "open a pull request" brings the template lesson above,
+  and "hello?" brings none.
 - A trigger holds the first matching call of each prompt and shows the lesson:
   `--command` for a command, as its first words; `--adds` for text an edit or a write
   adds; `--file` for a file, directory or extension it changes. Sent again, the call
-  goes through.
+  goes through. This is what catches "open a PR", which shares no word with the
+  lesson, so give a lesson a trigger wherever it has one.
 - `--here` (or `--repo`) keeps a lesson to one repository, named by its origin, so
   every clone and worktree of it shares the lesson.
 
@@ -518,6 +520,7 @@ ailocal eval agent --rules off --rules on          # two arms, side by side
 ailocal eval agent --extension off --extension on  # with and without the Pi extension
 ailocal eval agent --thinking off --thinking high
 ailocal eval agent --task release-version --reps 5
+ailocal eval agent --lessons off --lessons prompt --lessons on
 ```
 
 This is what the [built-in agent rules](#built-in-rules-for-coding-agents) and the Pi
@@ -542,6 +545,27 @@ With both, the extension never had to act: the model tested every time without b
 held, at a median of 69 seconds a run against 49 with the rules alone. That run-to-run
 difference is the model's own; the extension is there for the runs that skip. Thinking
 `high` bought nothing on this suite.
+
+`--lessons` measures [lessons](#lessons-from-your-corrections). The suite seeds its own,
+never yours: one that the slugkit repository's pull request template applies, and four
+that should stay out of the way. LESSON scores whether the pull request body follows the
+template. Two tasks open a pull request; one asks for "a pull request", the other for
+"a PR", which shares no word with the lesson:
+
+```
+ARM                                                                     RUNS  DONE    CI LESSON
+qwen3.6-35b-a3b (thinking off, rules on, extension on, lessons off)        6   83%  100%     0%
+qwen3.6-35b-a3b (thinking off, rules on, extension on, lessons prompt)     6  100%  100%    50%
+qwen3.6-35b-a3b (thinking off, rules on, extension on, lessons on)         6  100%  100%   100%
+```
+
+Untold, the model wrote a body of its own, mostly under `## Summary`, and never used
+the template. Given the lesson with the
+prompt, it used the template whenever the prompt said "pull request", and never when it
+said "PR". With the trigger as well, `gh pr create` was held once in every run, and
+each time the model read the template and sent the body again in its shape. Over the
+whole suite, of the four others only the one about publishing went along with a task -
+the version bump, which passed every check in every arm - and none was ever held.
 
 It needs `pi`, `git` and `cargo` with `rustfmt` and `clippy`. Every request goes through
 a gateway the eval hosts itself, and Pi gets an agent directory holding only that

@@ -133,6 +133,27 @@ fn knows_a_slug_when_it_sees_one() {
 }
 '''
 
+# The same template, from a prompt that says "PR". It shares too few words with the
+# lesson for the lesson to go along with it, so only the lesson's trigger can bring it.
+[[task]]
+id = "unslug"
+branch = "unslug"
+pull_request = true
+prompt = '''
+Add a public function unslug(slug: &str) -> String that turns a slug back into words: each dash becomes a space, and the first letter is uppercase. Do it on a new branch named unslug, push it, and open a PR with gh.
+'''
+accept = '''
+use slugkit::unslug;
+
+#[test]
+fn turns_a_slug_back_into_words() {
+	assert_eq!(unslug("hello-world"), "Hello world");
+	assert_eq!(unslug("rust-is-fun"), "Rust is fun");
+	assert_eq!(unslug("v2"), "V2");
+	assert_eq!(unslug(""), "");
+}
+'''
+
 # A teammate pushed while this clone had a commit of its own, and both changed the
 # same lines. Finishing the rebase takes `git rebase --continue`, which opens an
 # editor for the commit message - in a shell with no terminal, one nobody types into.

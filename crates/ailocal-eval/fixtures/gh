@@ -1,33 +1,169 @@
 #!/bin/sh
-# gh, as far as `ailocal eval agent` needs it: opens and edits pull requests by
-# writing them under $GH_STUB_LOG, one numbered title, head and body each, shows
-# them again, and refuses what the real one refuses without a terminal.
+# gh, as far as `ailocal eval agent` needs it: opens, edits, shows and lists pull
+# requests, kept under $GH_STUB_LOG as one numbered head, base, title and body each,
+# answers --json and --jq as gh does, and refuses what the real one refuses without
+# a terminal.
 
 set -u
 log=${GH_STUB_LOG:?}
+pulls=https://github.com/slugkit/slugkit/pull
+fields="baseRefName body headRefName isDraft number state title url"
+tab=$(printf '\t')
+cr=$(printf '\r')
+
 opened() { ls "$log" 2>/dev/null | grep -c '\.head$'; }
+
+unknown() {
+	printf 'unknown flag: %s\n\nUsage:  gh pr %s [flags]\n' "$1" "$2" >&2
+	exit 1
+}
+
+# The pull request that a number, a URL or a branch names, or the current branch's.
+find_pr() {
+	want=${1:-$(git rev-parse --abbrev-ref HEAD)}
+	want=${want##*/pull/}
+	case $want in
+	'' | *[!0-9]*)
+		n=$(opened)
+		while [ "$n" -gt 0 ]; do
+			if [ "$(cat "$log/$n.head")" = "$want" ]; then
+				echo "$n"
+				return 0
+			fi
+			n=$((n - 1))
+		done
+		echo "no pull requests found for branch \"$want\"" >&2
+		return 1
+		;;
+	esac
+	if [ ! -f "$log/$want.head" ]; then
+		echo "GraphQL: Could not resolve to a PullRequest with the number of $want. (repository.pullRequest)" >&2
+		return 1
+	fi
+	echo "$want"
+}
+
+fields_or_exit() {
+	if [ -z "$1" ]; then
+		echo "Specify one or more comma-separated fields for \`--json\`:" >&2
+		printf '  %s\n' $fields >&2
+		exit 1
+	fi
+	for f in $(echo "$1" | tr ',' ' '); do
+		case " $fields " in
+		*" $f "*) ;;
+		*)
+			printf 'Unknown JSON field: "%s"\nAvailable fields:\n' "$f" >&2
+			printf '  %s\n' $fields >&2
+			exit 1
+			;;
+		esac
+	done
+}
+
+json_string() {
+	printf '%s' "$1" |
+		sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e "s/$tab/\\\\t/g" -e "s/$cr/\\\\r/g" |
+		awk 'BEGIN { ORS = ""; print "\"" } NR > 1 { print "\\n" } { print } END { print "\"" }'
+}
+
+json_pr() {
+	out= sep=
+	for f in $(echo "$2" | tr ',' ' '); do
+		case $f in
+		number) v=$1 ;;
+		state) v='"OPEN"' ;;
+		isDraft) v=false ;;
+		url) v="\"$pulls/$1\"" ;;
+		headRefName) v=$(json_string "$(cat "$log/$1.head")") ;;
+		baseRefName) v=$(json_string "$(cat "$log/$1.base")") ;;
+		*) v=$(json_string "$(cat "$log/$1.$f")") ;;
+		esac
+		out="$out$sep\"$f\":$v"
+		sep=,
+	done
+	printf '{%s}' "$out"
+}
+
+# JSON as gh prints it, or what `--jq` makes of it, with strings raw.
+show_json() {
+	if [ -n "$2" ]; then
+		printf '%s\n' "$1" | jq -r "$2"
+	else
+		printf '%s\n' "$1"
+	fi
+}
 
 case "${1:-} ${2:-}" in
 "auth status")
 	echo "github.com: logged in as slugkit-bot"
 	exit 0
 	;;
-"pr list")
-	n=$(opened)
-	while [ "$n" -gt 0 ]; do
-		printf '%s\t%s\t%s\tOPEN\n' "$n" "$(cat "$log/$n.title")" "$(cat "$log/$n.head")"
-		n=$((n - 1))
+"pr view" | "pr list")
+	command=$2
+	shift 2
+	which= head= json= jq= asked=
+	while [ $# -gt 0 ]; do
+		case "$command $1" in
+		*" --json") json=${2:-} asked=1; shift; [ $# -gt 0 ] && shift ;;
+		*" --json="*) json=${1#*=} asked=1; shift ;;
+		*" -q" | *" --jq") jq=$2; shift 2 ;;
+		*" --jq="*) jq=${1#*=}; shift ;;
+		*" -t" | *" --template" | *" --template="*)
+			echo "gh pr $command: --template does not work here; use --json and --jq" >&2
+			exit 1
+			;;
+		*" -w" | *" --web")
+			echo "Opening github.com/slugkit/slugkit/pulls in your browser." >&2
+			exit 0
+			;;
+		"view -c" | "view --comments" | "list -d" | "list --draft") shift ;;
+		"list -H" | "list --head") head=$2; shift 2 ;;
+		"list --head="*) head=${1#*=}; shift ;;
+		"list -s" | "list --state" | "list -L" | "list --limit" | "list -B" | "list --base" | \
+			"list -A" | "list --author" | "list -a" | "list --assignee" | "list -l" | \
+			"list --label" | "list -S" | "list --search" | "list --app") shift 2 ;;
+		"list --state="* | "list --limit="* | "list --base="* | "list --author="* | \
+			"list --assignee="* | "list --label="* | "list --search="* | "list --app="*) shift ;;
+		*" -"*) unknown "$1" "$command" ;;
+		"view "*) which=$1; shift ;;
+		*)
+			echo "unknown argument \"$1\"; please quote all values that have spaces" >&2
+			exit 1
+			;;
+		esac
 	done
-	exit 0
-	;;
-"pr view")
-	n=${3:-$(opened)}
-	if [ ! -f "$log/$n.head" ]; then
-		echo "no pull requests found for this branch" >&2
+	if [ -n "$asked" ]; then
+		fields_or_exit "$json"
+	elif [ -n "$jq" ]; then
+		echo "cannot use \`--jq\` without specifying \`--json\`" >&2
 		exit 1
 	fi
-	printf 'title:\t%s\nstate:\tOPEN\nnumber:\t%s\n--\n%s\n' \
-		"$(cat "$log/$n.title")" "$n" "$(cat "$log/$n.body")"
+
+	if [ "$command" = view ]; then
+		n=$(find_pr "$which") || exit 1
+		if [ -n "$asked" ]; then
+			show_json "$(json_pr "$n" "$json")" "$jq"
+			exit
+		fi
+		printf 'title:\t%s\nstate:\tOPEN\nauthor:\tslugkit-bot\nnumber:\t%s\nurl:\t%s\n--\n%s\n' \
+			"$(cat "$log/$n.title")" "$n" "$pulls/$n" "$(cat "$log/$n.body")"
+		exit 0
+	fi
+
+	n=$(opened) list= sep=
+	while [ "$n" -gt 0 ]; do
+		if [ -z "$head" ] || [ "$(cat "$log/$n.head")" = "$head" ]; then
+			if [ -n "$asked" ]; then
+				list="$list$sep$(json_pr "$n" "$json")"
+				sep=,
+			else
+				printf '%s\t%s\t%s\tOPEN\n' "$n" "$(cat "$log/$n.title")" "$(cat "$log/$n.head")"
+			fi
+		fi
+		n=$((n - 1))
+	done
+	[ -n "$asked" ] && show_json "[$list]" "$jq"
 	exit 0
 	;;
 "pr create" | "pr edit") ;;
@@ -39,7 +175,7 @@ esac
 command=$2
 shift 2
 
-number= title= body= has_body= fill= head=
+number= title= body= has_body= fill= head= base=main
 if [ "$command" = edit ] && [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
 	number=$1
 	shift
@@ -58,21 +194,19 @@ while [ $# -gt 0 ]; do
 	--body-file=*) body=$(cat "${1#*=}") || exit 1; has_body=1; shift ;;
 	-f | --fill | --fill-first | --fill-verbose) fill=1; shift ;;
 	-H | --head) head=$2; shift 2 ;;
-	-B | --base | -a | --assignee | -l | --label | -r | --reviewer | -m | --milestone) shift 2 ;;
+	-B | --base) base=$2; shift 2 ;;
+	--base=*) base=${1#*=}; shift ;;
+	-a | --assignee | -l | --label | -r | --reviewer | -m | --milestone) shift 2 ;;
 	*) shift ;;
 	esac
 done
 
 mkdir -p "$log"
 if [ "$command" = edit ]; then
-	number=${number:-$(opened)}
-	if [ ! -f "$log/$number.head" ]; then
-		echo "no pull requests found for this branch" >&2
-		exit 1
-	fi
+	number=$(find_pr "$number") || exit 1
 	[ -n "$title" ] && printf '%s' "$title" >"$log/$number.title"
 	[ -n "$has_body" ] && printf '%s' "$body" >"$log/$number.body"
-	echo "https://github.com/slugkit/slugkit/pull/$number"
+	echo "$pulls/$number"
 	exit 0
 fi
 
@@ -92,6 +226,7 @@ fi
 
 number=$(($(opened) + 1))
 printf '%s' "$head" >"$log/$number.head"
+printf '%s' "$base" >"$log/$number.base"
 printf '%s' "$title" >"$log/$number.title"
 printf '%s' "$body" >"$log/$number.body"
-echo "https://github.com/slugkit/slugkit/pull/$number"
+echo "$pulls/$number"

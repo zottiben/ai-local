@@ -1905,6 +1905,106 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// An agent checks its pull request with `--json`, often through `--jq`. A stub
+    /// that answered in text, or took a flag gh refuses, would cost a run turns that
+    /// real gh never would.
+    #[test]
+    fn the_stub_gh_answers_json_and_refuses_what_gh_refuses() {
+        let root =
+            std::env::temp_dir().join(format!("ailocal-eval-gh-json-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let repo = Repo::create(&root, &[]).unwrap();
+        let bin = root.join("bin");
+        write_gh(&bin).unwrap();
+        let gh = |args: &[&str]| {
+            let out = Command::new(bin.join("gh"))
+                .args(args)
+                .current_dir(&repo.work)
+                .env("GH_STUB_LOG", root.join("gh"))
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            let text = String::from_utf8_lossy(if out.status.success() {
+                &out.stdout
+            } else {
+                &out.stderr
+            });
+            (out.status.success(), text.trim_end().to_owned())
+        };
+
+        git(&repo.work, &["checkout", "-q", "-b", "unslug"]).unwrap();
+        git(&repo.work, &["push", "-q", "-u", "origin", "unslug"]).unwrap();
+        let (ok, said) = gh(&["pr", "view"]);
+        assert!(
+            !ok && said == "no pull requests found for branch \"unslug\"",
+            "{said}"
+        );
+
+        let body = "## Purpose\n\nA tab\there, \"quotes\", a back\\slash and `code`.";
+        assert!(gh(&["pr", "create", "-t", "Add \"unslug\"", "-b", body]).0);
+        let (ok, json) = gh(&["pr", "view", "--json", "number,title,body,headRefName,url"]);
+        assert!(ok, "{json}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+            serde_json::json!({
+                "number": 1,
+                "title": "Add \"unslug\"",
+                "body": body,
+                "headRefName": "unslug",
+                "url": "https://github.com/slugkit/slugkit/pull/1",
+            })
+        );
+        assert_eq!(
+            gh(&["pr", "view", "1", "--json", "body", "--jq", ".body"]),
+            (true, body.to_owned())
+        );
+        assert_eq!(
+            gh(&["pr", "view", "unslug", "-q", ".title", "--json=title"]),
+            (true, "Add \"unslug\"".to_owned())
+        );
+        assert_eq!(
+            gh(&["pr", "list", "--head", "unslug", "--json", "number"]),
+            (true, "[{\"number\":1}]".to_owned())
+        );
+        assert_eq!(
+            gh(&[
+                "pr",
+                "list",
+                "--head=main",
+                "--state=open",
+                "--json",
+                "number"
+            ]),
+            (true, "[]".to_owned())
+        );
+
+        let url = "https://github.com/slugkit/slugkit/pull/1";
+        assert!(gh(&["pr", "edit", url, "--body", "new"]).0);
+        assert_eq!(
+            gh(&["pr", "view", "-q", ".body", "--json", "body"]),
+            (true, "new".to_owned())
+        );
+
+        for (args, said) in [
+            (&["pr", "view", "--body"][..], "unknown flag: --body"),
+            (&["pr", "list", "--wat"], "unknown flag: --wat"),
+            (
+                &["pr", "view", "--json", "nope"],
+                "Unknown JSON field: \"nope\"",
+            ),
+            (&["pr", "view", "--jq", ".x"], "cannot use `--jq` without"),
+            (
+                &["pr", "view", "7"],
+                "GraphQL: Could not resolve to a PullRequest with the number of 7.",
+            ),
+            (&["pr", "list", "open"], "unknown argument \"open\""),
+        ] {
+            let (ok, got) = gh(args);
+            assert!(!ok && got.starts_with(said), "gh {args:?}: {got}");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn a_body_follows_the_template_by_its_headings_in_order() {
         let log = std::env::temp_dir().join(format!("ailocal-eval-body-{}", std::process::id()));
