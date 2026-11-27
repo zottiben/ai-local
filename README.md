@@ -295,7 +295,8 @@ ailocal lessons accept <id>... / reject <id>...
 
 Measured on 136 corrections from real sessions, labelled by hand, qwen3.6-35b-a3b
 found 67% of the lessons in them, and 68% of what it proposed was a lesson - the rest
-is what `review` is for. Asked whether each draft was really a standing rule, it
+is what `review` is for. Claude Haiku, through `--model`, found 73% at 89%, in about
+10 s a message rather than 4. Asked whether each draft was really a standing rule, it
 proposed almost nothing false (95%) but found only 43%, so it is not asked: nothing
 applies until you accept it, and a lesson never found is steering you keep doing.
 
