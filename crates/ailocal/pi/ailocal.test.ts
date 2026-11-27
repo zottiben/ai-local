@@ -17,6 +17,7 @@ import ailocal, {
   lessonReason,
   lessonsMessage,
   lessonsPath,
+  pendingNotice,
   PROMPT_LESSONS,
   PUSH_REASON,
   pythonOnJson,
@@ -321,17 +322,24 @@ describe("lessons", () => {
   });
 
   it("are read only when active, and not at all from a newer ailocal", () => {
-    assert.deepEqual(readLessons(join(root, "missing.json")), []);
+    assert.deepEqual(readLessons(join(root, "missing.json")), { active: [], pending: 0 });
     const path = store("states.json", [
       { ...template, state: "active" },
       { ...suppress, state: "pending" },
       { ...changelog, state: "rejected" },
     ]);
+    const read = readLessons(path);
     assert.deepEqual(
-      readLessons(path).map((l) => l.id),
+      read.active.map((l) => l.id),
       ["pr-template"],
     );
+    assert.equal(read.pending, 1);
     assert.throws(() => readLessons(store("newer.json", [], 2)), /newer ailocal/);
+  });
+
+  it("waiting for review are counted in words that agree", () => {
+    assert.match(pendingNotice(1), /: 1 lesson learned .* waits for you: ailocal lessons review$/);
+    assert.match(pendingNotice(3), /: 3 lessons learned .* wait for you: /);
   });
 
   it("name a repository as lessons::repo_id does", () => {

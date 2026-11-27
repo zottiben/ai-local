@@ -290,8 +290,8 @@ ailocal lessons accept <id>... / reject <id>...
 - While the gateway runs, with agent rules on and Pi configured, it captures every ten
   minutes on its own - only while the model has nothing else to do, stopping as soon
   as a request comes in, and in the slot whose cache is the smallest, so a session
-  you will come back to keeps its cache. `ailocal status` says when lessons are
-  waiting for you.
+  you will come back to keeps its cache. Pi and `ailocal status` say when lessons
+  are waiting for you.
 
 Measured on 136 corrections from real sessions, labelled by hand, qwen3.6-35b-a3b
 found 67% of the lessons in them, and 68% of what it proposed was a lesson - the rest

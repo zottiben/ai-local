@@ -134,6 +134,7 @@ export default function ailocal(pi: ExtensionAPI): void {
 
   let lessons: Lesson[] = [];
   let unreadable: string | undefined;
+  let pending = 0;
   const record = (given: Lesson[], how: "prompt" | "held") => {
     for (const lesson of given) pi.appendEntry("ailocal-lesson", { id: lesson.id, how });
   };
@@ -148,8 +149,12 @@ export default function ailocal(pi: ExtensionAPI): void {
     const path = lessonsPath();
     try {
       const repo = await repoOf(ctx.cwd);
-      lessons = readLessons(path).filter((lesson) => lesson.repo === undefined || lesson.repo === repo);
+      const store = readLessons(path);
+      lessons = store.active.filter((lesson) => lesson.repo === undefined || lesson.repo === repo);
       unreadable = undefined;
+      // Said again only when more arrive, so it is news rather than a nag.
+      if (store.pending > pending) ctx.ui.notify(pendingNotice(store.pending), "info");
+      pending = store.pending;
     } catch (error) {
       lessons = [];
       const why = `ailocal: no lessons until ${path} can be read: ${(error as Error).message}`;
@@ -467,20 +472,27 @@ export function lessonsPath(env: NodeJS.ProcessEnv = process.env): string {
   return join(config, "ailocal", "lessons.json");
 }
 
-/** The active lessons in the store at `path`, and none when there is no store yet. */
-export function readLessons(path: string): Lesson[] {
+/**
+ * The active lessons in the store at `path`, and how many wait for the person's review;
+ * none when there is no store yet.
+ */
+export function readLessons(path: string): { active: Lesson[]; pending: number } {
   let text: string;
   try {
     text = readFileSync(path, "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { active: [], pending: 0 };
     throw error;
   }
   const store = JSON.parse(text) as { version?: number; lessons?: (Lesson & { state?: string })[] };
   if ((store.version ?? 0) > LESSONS_VERSION) {
     throw new Error(`a newer ailocal wrote it (version ${store.version}); update this one`);
   }
-  return (store.lessons ?? []).filter((lesson) => lesson.state === "active" && typeof lesson.text === "string");
+  const all = store.lessons ?? [];
+  return {
+    active: all.filter((lesson) => lesson.state === "active" && typeof lesson.text === "string"),
+    pending: all.filter((lesson) => lesson.state === "pending").length,
+  };
 }
 
 /**
@@ -554,6 +566,14 @@ export function lessonsMessage(lessons: Lesson[]): string {
     "ailocal: lessons from the user's earlier corrections. Follow each one that applies " +
     "to this request:\n" +
     lessons.map((lesson) => `- ${lesson.text}`).join("\n")
+  );
+}
+
+export function pendingNotice(pending: number): string {
+  const one = pending === 1;
+  return (
+    `ailocal: ${pending} ${one ? "lesson" : "lessons"} learned from your corrections ` +
+    `${one ? "waits" : "wait"} for you: ailocal lessons review`
   );
 }
 
